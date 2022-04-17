@@ -70,6 +70,7 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
         if ($uninstall) {
             choco uninstall $package -y
+            Unregister-ScheduledTask -TaskName ("Update "+"$ChocoName+" on startup") -Confirm:$false
         } else {
             choco upgrade $package -y
         }
@@ -382,7 +383,7 @@ $Content = '
 "Greenshot","greenshot"
 "Process Monitor","procmon"
 "PSExec","psexec"
-"Sublime Text 3","sublimetext3"
+"Sublime Text 4","sublimetext4"
 "Power BI Desktop","powerbi"
 "Rufus","rufus"
 "Veeam Agent for Microsoft Windows","veeam-agent"
@@ -408,5 +409,3 @@ $Tenant = Read-Host
 Connect-MSIntuneGraph -TenantID $Tenant
 
 New-IntuneWin32ChocoApplicationInstallFromRepo
-
-#2Do: Remove Scheduled Task in Uninstall-Part
