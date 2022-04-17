@@ -36,7 +36,7 @@ Connect-MSIntuneGraph -TenantID "contoso.com"
 import-module "C:\admin\ChocoIntuneDeployment-Main.ps1"
 ```
 ## How to Use
-in simples way, easy run the script.
+in simplest way, easy run the script.
 ![image](https://user-images.githubusercontent.com/9081611/163731600-cefafdb1-e591-44b0-a4eb-9fe62c81d2a6.png)
 First you will be asked, what tenant you want to connect and you will be asked for M365 Creds to authenticate to Graph API
 ![image](https://user-images.githubusercontent.com/9081611/163731608-f09cf7cb-416c-4412-b620-c78dec9004fc.png)
@@ -48,7 +48,26 @@ Start the Process With OK
   
 Everything else is done automaticly now
   
-### Optional Steps  
+### Optional Steps
+### Adding Applications to the Softwarelist
+You can easy add software you like to the list.
+You need to find following line and add Software in following pattern
+```powershell
+ "<Description>","<choconame>"
+```
+```powershell
+
+$Content = '
+<ADD YOUR CONTENT HERE>
+"Adobe Acrobat Reader DC","adobereader"
+"Google Chrome","googlechrome"
+"Mozilla Firefox","firefox"
+"Java SE Runtime Environment","jre8"
+.
+.
+.
+```
+
 ### Install Chocolatey Manually
 This step is only required, if you want to install it manually or the automatic process is not working.
 Normaly, chocolaty will be installed automaticly befor you publish the first application
