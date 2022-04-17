@@ -58,4 +58,12 @@ If you know the exact chocolatey name, you can also deploy the software without 
 ```powershell
 New-IntuneWin32ChocoApplication "googlechrome"
 ```
+### Results:
+deployed Chocolatey
+![image](https://user-images.githubusercontent.com/9081611/163720203-5c0b8f83-0d2e-4d01-bf5c-6fa84572fc2a.png)
 
+Deployed Application
+![image](https://user-images.githubusercontent.com/9081611/163720228-fed60e20-b2bb-420c-b7b5-b23a86649af6.png)
+
+Available for every user and dependened on Chocolatey
+![image](https://user-images.githubusercontent.com/9081611/163720260-b979c1bd-ca30-4d2e-8860-d4b6424f880d.png)
