@@ -1,3 +1,5 @@
+![image](https://user-images.githubusercontent.com/9081611/163731912-44660347-56b9-4a20-a571-bd1139bc2636.png)
+
 # Deploy Intune Win32 Applications automated with chocolatey
 ## Description
 With this script you automate the APP-Deployment.
