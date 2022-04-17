@@ -306,5 +306,3 @@ $Selection = Get-ChocolateyPackage -Name $SearchPattern | Out-GridView -Title "S
 return $Selection.Name
 
 }
-
-Connect-MSIntuneGraph -TenantID "dytech.de" -Refresh
