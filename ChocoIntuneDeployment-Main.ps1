@@ -70,7 +70,7 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
         if ($uninstall) {
             choco uninstall $package -y
-            Unregister-ScheduledTask -TaskName ("Update "+"$ChocoName+" on startup") -Confirm:$false
+            Unregister-ScheduledTask -TaskName ("Update " + $ChocoName + " on startup") -Confirm:$false
         } else {
             choco upgrade $package -y
 
