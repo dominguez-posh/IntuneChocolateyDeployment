@@ -332,3 +332,81 @@ $Selection = Get-ChocolateyPackage -Name $SearchPattern | Out-GridView -Title "S
 return $Selection.Name
 
 }
+
+function New-IntuneWin32ChocoApplicationInstallFromRepo{
+
+$Content = '
+"Adobe Acrobat Reader DC","adobereader"
+"Google Chrome","googlechrome"
+"Mozilla Firefox","firefox"
+"Java SE Runtime Environment","jre8"
+"Microsoft Visual C++ Redistributable for Visual Studio 2015-2022","vcredist140"
+"Notepad++","notepadplusplus"
+"Python 3.x","python3"
+"Python 2.x","python2"
+"Adobe AIR Runtime","adobeair"
+"7-Zip","7zip.install"
+"Microsoft Visual C++ Redistributable for Visual Studio 2015","vcredist2015"
+"Microsoft .NET Framework 4.8","dotnetfx"
+"VLC media player","vlc"
+"Git","git.install"
+"Microsoft Edge","microsoft-edge"
+"Zoom Client for Meetings","zoom"
+"Microsoft Silverlight","silverlight"
+"Sysinternals","sysinternals"
+"Foxit PDF Reader","foxitreader"
+"Paint.NET","paint.net"
+"Teamviewer (Install","teamviewer"
+"Skype","skype"
+"Putty","putty.install"
+"Java SE","jdk8"
+"Visual Studio Code","vscode"
+"FileZilla","filezilla"
+"PDF Creator","pdfcreator"
+"Dot Net 3.5","dotnet3.5"
+"Dot Net 4.5.2","dotnet4.5.2"
+"Windows Terminal","microsoft-windows-terminal"
+"WinSCP","winscp.install"
+"Inkscape","inkscape"
+"Dropbox","dropbox"
+"Wireshark","wireshark"
+"Process Explorer","procexp"
+"Advanced IP Scanner","advanced-ip-scanner"
+"Opera","opera"
+"Everything","everything"
+"Microsoft OneDrive Sync Client","onedrive"
+"Teamviewer Host","teamviewer.host"
+"Teamviewer QuickSupport","teamviewer-qs"
+"WinDirStat","windirstat"
+"Adobe Creative Cloud Client","adobe-creative-cloud"
+"Greenshot","greenshot"
+"Process Monitor","procmon"
+"PSExec","psexec"
+"Sublime Text 3","sublimetext3"
+"Power BI Desktop","powerbi"
+"Rufus","rufus"
+"Veeam Agent for Microsoft Windows","veeam-agent"
+'
+
+$Softwarelist = $Content | ConvertFrom-CSV -Delimiter "," -Header "Name","ChocoName"
+
+$SelectedSoftware = $Softwarelist | Out-GridView -PassThru -Title "Select software to deploy"
+
+foreach($Software in $SelectedSoftware){
+
+    New-IntuneWin32ChocoApplication $Software.ChocoName
+
+}
+
+
+}
+
+
+Write-Host "Insert Tenant Name:"
+$Tenant = Read-Host
+
+Connect-MSIntuneGraph -TenantID $Tenant
+
+New-IntuneWin32ChocoApplicationInstallFromRepo
+
+#2Do: Remove Scheduled Task in Uninstall-Part
