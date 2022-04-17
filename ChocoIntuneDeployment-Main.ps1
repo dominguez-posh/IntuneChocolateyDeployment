@@ -73,7 +73,6 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
             Unregister-ScheduledTask -TaskName ("Update "+"$ChocoName+" on startup") -Confirm:$false
         } else {
             choco upgrade $package -y
-        }
 
         # Creating Update Task for Start-Up
         $chocoCmd = Get-Command –Name "choco" –ErrorAction SilentlyContinue –WarningAction SilentlyContinue | Select-Object –ExpandProperty Source
@@ -85,6 +84,7 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
         $task = New-ScheduledTask –Action $taskAction –Principal $taskUserPrincipal –Trigger $taskTrigger –Settings $taskSettings
         Register-ScheduledTask –TaskName ("Update " + $ChocoName + " on startup")  –InputObject $task -TaskPath "Intune-Choco-Updates" –Force
+        }
 
         ')}catch{"Some Error 62"}
 
