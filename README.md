@@ -17,7 +17,7 @@ https://www.thelazyadministrator.com/2020/02/05/intune-chocolatey-a-match-made-i
 2. Download The Script and Save it for example to C:\admin
 3. Install and Import all required Modules, chocolatey and Software for icon-converting.
 ```powershell
-
+set-executionpolicy unrestricted # not needed but my one is set so, you can try it with other policies
 Install-Module IntuneWin32App -Force
 Import-Module IntuneWin32App
 Install-Module Microsoft.Graph.Intune -Force
@@ -26,18 +26,30 @@ Install-Module -Name chocolatey
 Import-Module -Name chocolatey
 Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
 choco install inkscape -y
-
 ```
-4. Connect to Intune Graph API (Multi-Tenant Use is possible
+4. OPTIONAL IF YOU USE IT MANUALLY Connect to Intune Graph API (Multi-Tenant Use is possible) 
 ```powershell
 Connect-MSIntuneGraph -TenantID "contoso.com"
 ```
-5. Import Downloaded Script (in this sample from C:\admin)
+5. OPTIONAL IF YOU USE IT MANUALLY Import Downloaded Script (in this sample from C:\admin)
 ```powershell
 import-module "C:\admin\ChocoIntuneDeployment-Main.ps1"
 ```
 ## How to Use
-### Install Chocolatey Manually (optional)
+in simples way, easy run the script.
+![image](https://user-images.githubusercontent.com/9081611/163731600-cefafdb1-e591-44b0-a4eb-9fe62c81d2a6.png)
+First you will be asked, what tenant you want to connect and you will be asked for M365 Creds to authenticate to Graph API
+![image](https://user-images.githubusercontent.com/9081611/163731608-f09cf7cb-416c-4412-b620-c78dec9004fc.png)
+![image](https://user-images.githubusercontent.com/9081611/163731629-6c3de3af-0823-401c-8d96-73ab49d9a27b.png)
+Then you can choose the software you want to install. (Hold STRG to select more then One)
+![image](https://user-images.githubusercontent.com/9081611/163731645-e088c563-abf9-45d0-b8c6-aa3e291e0ee9.png)
+
+Start the Process With OK
+  
+Everything else is done automaticly now
+  
+### Optional Steps  
+### Install Chocolatey Manually
 This step is only required, if you want to install it manually or the automatic process is not working.
 Normaly, chocolaty will be installed automaticly befor you publish the first application
 ```powershell
