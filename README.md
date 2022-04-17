@@ -8,6 +8,9 @@ The Application is published automaticly for every user.
 You can also make it be installed automaticly
 
 For keeping the installed software updated, the Installer creates a Scheduled Task for every application with fires a "choco upgrade <application> -y" on every startup for every deployed application
+  
+Spectial thanks to the Lazy Administrator who gave me the the incentive to that automation 
+https://www.thelazyadministrator.com/2020/02/05/intune-chocolatey-a-match-made-in-heaven/
 
 ## Install-Guide
 1. Start powershell with elevated rights.
