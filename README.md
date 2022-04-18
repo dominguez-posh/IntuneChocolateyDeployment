@@ -96,11 +96,28 @@ If you know the exact chocolatey name, you can also deploy the software without 
 New-IntuneWin32ChocoApplication "googlechrome"
 ```
 ### Results:
-deployed Chocolatey
-![image](https://user-images.githubusercontent.com/9081611/163720203-5c0b8f83-0d2e-4d01-bf5c-6fa84572fc2a.png)
+New created Windows applications
+![image](https://user-images.githubusercontent.com/9081611/163807675-df7319ab-3104-43ee-8707-7a8c0b0f0255.png)
 
-Deployed Application
-![image](https://user-images.githubusercontent.com/9081611/163720228-fed60e20-b2bb-420c-b7b5-b23a86649af6.png)
+Configured chocolatey Application with detection Rule
 
-Available for every user and dependened on Chocolatey
-![image](https://user-images.githubusercontent.com/9081611/163720260-b979c1bd-ca30-4d2e-8860-d4b6424f880d.png)
+![image](https://user-images.githubusercontent.com/9081611/163807786-8cad4527-6922-46b2-a650-ad29a70e82b1.png)
+
+Deployed application with detection script, dependency to the choco application and available for all users
+
+![image](https://user-images.githubusercontent.com/9081611/163807922-685e9195-9568-4833-9e5f-3167d731efe5.png)
+
+
+![image](https://user-images.githubusercontent.com/9081611/163808042-c876dcd3-3d1b-4f7d-a150-0917ee611f53.png)
+  
+Result shown in Company Portal:
+
+![image](https://user-images.githubusercontent.com/9081611/163808208-c31b7b10-3db3-4a03-b657-591bcb241625.png)
+
+Configured Update Task in Task Scheduler
+  
+![image](https://user-images.githubusercontent.com/9081611/163808457-a48c8598-1e48-474e-a397-7e471d5f6f80.png)
+
+  
+
+
