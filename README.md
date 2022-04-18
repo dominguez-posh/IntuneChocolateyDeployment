@@ -38,21 +38,12 @@ Connect-MSIntuneGraph -TenantID "contoso.com"
 import-module "C:\admin\ChocoIntuneDeployment-Main.ps1"
 ```
 ## How to Use
+![Demonstration-Rollout](https://user-images.githubusercontent.com/9081611/163804998-08c0b08c-b8c1-466c-b68f-27b24bf598ae.gif)
+
 in simplest way, easy run the script.
-![image](https://user-images.githubusercontent.com/9081611/163731600-cefafdb1-e591-44b0-a4eb-9fe62c81d2a6.png)
-
 First you will be asked, what tenant you want to connect and you will be asked for M365 Creds to authenticate to Graph API
-
-![image](https://user-images.githubusercontent.com/9081611/163731608-f09cf7cb-416c-4412-b620-c78dec9004fc.png)
-
-![image](https://user-images.githubusercontent.com/9081611/163731629-6c3de3af-0823-401c-8d96-73ab49d9a27b.png)
-
 Then you can choose the software you want to install. (Hold STRG to select more then One)
-
-![image](https://user-images.githubusercontent.com/9081611/163731645-e088c563-abf9-45d0-b8c6-aa3e291e0ee9.png)
-
 Start the Process With OK
-  
 Everything else is done automaticly now
   
 ### Optional Steps
