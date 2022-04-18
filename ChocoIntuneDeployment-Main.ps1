@@ -107,7 +107,12 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 ###
 
 ### Detection Script
-        try{$DetectionScript =  New-IntuneWin32AppDetectionRule -PowerShellScript -ScriptFile ($Workpath + "\source\detection.ps1")}catch{"Some Error 109"}
+        try{
+            $Path = ($Workpath + "\source\detection.ps1")
+            $DetectionScript =  New-IntuneWin32AppDetectionRuleScript -ScriptFile $Path
+            $Code = [convert]::ToBase64String((Get-Content $Path -Encoding byte)) ### Fixing the bug, Base64 is wrong parsed 
+            $DetectionScript.scriptContent = $Code
+        }catch{"Some Error 109"}
 
 ###
 
@@ -244,7 +249,9 @@ try{$APP = Add-IntuneWin32App -FilePath $AppPackage.Path -DisplayName "Chocolate
 write-host "Make application installable for everyone in the company"
 try{Add-IntuneWin32AppAssignmentAllUsers -ID $App.id -Intent available -Notification hideAll }catch{"Some Error 239"}
 if ($APP.id -ne $Null){
-write-host "chocolatey successfully installed."
+write-host "chocolatey successfully installed. Waiting 5 Seconds for continue"
+
+Start-Sleep -s 5
 return $APP.id
 }
 else{
@@ -278,6 +285,7 @@ param(
 set-alias inkscape "C:\Program Files\Inkscape\bin\inkscape.exe"
 $BaseURL = "https://community.chocolatey.org/content/packageimages/"
 $IconName = choco search --exact $ChocoName --detail
+if($IconName -like "*reboot*"){write-host "reboot is pending, please update and reboot and then try again!";Read-Host}
 $IconName = $Iconname[1].split("[")[0].split()[0] + "." + $Iconname[1].split("[")[0].split()[1]
 
 
@@ -335,6 +343,10 @@ return $Selection.Name
 }
 
 function New-IntuneWin32ChocoApplicationInstallFromRepo{
+param(
+[switch]$autoupdate = $true,
+[switch]$autoinstall = $false
+)
 
 $Content = '
 "Adobe Acrobat Reader DC","adobereader"
@@ -394,8 +406,12 @@ $Softwarelist = $Content | ConvertFrom-CSV -Delimiter "," -Header "Name","ChocoN
 $SelectedSoftware = $Softwarelist | Out-GridView -PassThru -Title "Select software to deploy"
 
 foreach($Software in $SelectedSoftware){
-
-    New-IntuneWin32ChocoApplication $Software.ChocoName
+    if($autoinstall -eq $false){
+     New-IntuneWin32ChocoApplication $Software.ChocoName
+    }
+    if($autoinstall -eq $true){
+     New-IntuneWin32ChocoApplication $Software.ChocoName -Required
+    }
 
 }
 
@@ -409,3 +425,7 @@ $Tenant = Read-Host
 Connect-MSIntuneGraph -TenantID $Tenant
 
 New-IntuneWin32ChocoApplicationInstallFromRepo
+
+Read-Host
+
+
