@@ -422,6 +422,7 @@ foreach($Software in $SelectedSoftware){
 Write-Host "Insert Tenant Name:"
 $Tenant = Read-Host
 
+
 Connect-MSIntuneGraph -TenantID $Tenant
 
 New-IntuneWin32ChocoApplicationInstallFromRepo
