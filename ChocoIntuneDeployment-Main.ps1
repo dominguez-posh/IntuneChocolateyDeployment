@@ -285,7 +285,7 @@ param(
 set-alias inkscape "C:\Program Files\Inkscape\bin\inkscape.exe"
 $BaseURL = "https://community.chocolatey.org/content/packageimages/"
 $IconName = choco search --exact $ChocoName --detail
-if($IconName -like "*reboot*"){write-host "reboot is pending, please update and reboot and then try again!";Read-Host}
+if($IconName -like "*reboot pending*"){write-host "reboot is pending, please update and reboot and then try again!";Read-Host}
 $IconName = $Iconname[1].split("[")[0].split()[0] + "." + $Iconname[1].split("[")[0].split()[1]
 
 
