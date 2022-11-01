@@ -9,7 +9,7 @@
 
 function Install-IntunechocoComponents {
 
-
+#test
 Install-Module IntuneWin32App -Force
 Import-Module IntuneWin32App
 Install-Module Microsoft.Graph.Intune -Force
