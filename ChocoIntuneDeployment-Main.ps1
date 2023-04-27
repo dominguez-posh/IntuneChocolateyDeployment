@@ -232,7 +232,7 @@ try{New-Item $SourcePath -Name "install.ps1" -ItemType File -Force}catch{"Some E
 
 $InstallScriptContent = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
 
-try{$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture All -MinimumSupportedOperatingSystem 1607}catch{"Some Error 227"}
+try{$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture All -MinimumSupportedWindowsRelease W10_1607}catch{"Some Error 227"}
 
 try{Set-Content ($SourcePath + "\install.ps1") $InstallScriptContent}catch{"Some Error 229"}
 
