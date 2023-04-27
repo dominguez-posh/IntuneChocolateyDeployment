@@ -121,7 +121,7 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
 
 ### Create custom requirement rule
-        try{$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture All -MinimumSupportedOperatingSystem 1607}catch{"Some Error 118"}
+        try{$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture All -MinimumSupportedWindowsRelease W10_1607}catch{"Some Error 118"}
 ###
 
 ### Chocolatey Dependency
