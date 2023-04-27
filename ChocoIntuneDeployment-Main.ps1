@@ -101,7 +101,7 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
         try{Set-Content  ($Sourcepath + "\detection.ps1") $DetectionContent}catch{"Some Error 101"}
 
-        try{Remove-Item ($WorkPath + "\install.intunewin")}catch{}
+        try{Remove-Item ($WorkPath + "\install.intunewin") -ErrorAction Stop}catch{}
 
         try{$IntuneWinFile = New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath}catch{"Some Error 105"}
 ###
@@ -236,7 +236,7 @@ try{$RequirementRule = New-IntuneWin32AppRequirementRule -Architecture All -Mini
 
 try{Set-Content ($SourcePath + "\install.ps1") $InstallScriptContent}catch{"Some Error 229"}
 
-try{Remove-Item ($WorkPath + "\install.intunewin")}catch{"Some Error 231"}
+try{Remove-Item ($WorkPath + "\install.intunewin") -ErrorAction Stop}catch{"Some Error 231"}
 
 Write-Host "Creating Win32 APP Package File"
 try{$AppPackage = New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath}catch{"Some Error 233"}
