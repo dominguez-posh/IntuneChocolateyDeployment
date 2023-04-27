@@ -27,7 +27,7 @@ param(
   )
 
 #Connect-MSIntuneGraph -TenantID $TenantName.ToString() -Refresh
-$WorkPath = $env:TEMP
+$WorkPath = "\\?\" + $env:TEMP
 
 if($ChocoName -eq $Null){return "No software selected, repeat it"}
 
