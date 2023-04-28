@@ -136,6 +136,9 @@ if($ChocoName -eq $Null){return "No software selected, repeat it"}
 ### Deploy Application
         $DisplayName = $ChocoName
         Write-Host ("Creating and Uploading " + $ChocoName + " as win32 App to Intune")
+        if($Infos.SoftwareLicense = "n/a"){
+          $Infos.SoftwareLicense = $Infos.SoftwareSite 
+          } 
         try{$IntuneApp = Add-IntuneWin32App  -FilePath $IntuneWinFile.Path -DisplayName $AppName -Description $Infos.Description -Notes "PoweredByChocolatey" -Publisher "-" -InformationURL $Infos.SoftwareSite -PrivacyURL $Infos.SoftwareLicense -InstallExperience system -RestartBehavior suppress -DetectionRule $DetectionScript -RequirementRule $RequirementRule -InstallCommandLine $InstallCommandLine -UninstallCommandLine $UninstallCommandLine -Icon $Icon }catch{"Some Error 131"}
         Write-Host "Adding dependency for chocolatey to the created Application"
         try{Add-IntuneWin32AppDependency -ID $IntuneApp.ID -Dependency $Dependency}catch{"Some Error 132"}
