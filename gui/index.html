@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intune Choco Deployment</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="brand">
+        <img src="icon.svg" alt="" class="brand-icon">
+        <div>
+          <div class="brand-title">Intune Choco Deployment</div>
+          <div class="brand-sub">Chocolatey packages as Win32 apps</div>
+        </div>
+      </div>
+      <div class="account" id="account"></div>
+    </header>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item" data-view="catalog"><span class="nav-glyph" aria-hidden="true">&#xE8F1;</span>Catalog</button>
+      <button class="nav-item" data-view="search"><span class="nav-glyph" aria-hidden="true">&#xE721;</span>Search</button>
+      <button class="nav-item" data-view="tenant"><span class="nav-glyph" aria-hidden="true">&#xE753;</span>In tenant</button>
+      <button class="nav-item" data-view="activity"><span class="nav-glyph" aria-hidden="true">&#xE81C;</span>Activity<span class="nav-badge" id="activity-badge" hidden></span></button>
+      <button class="nav-item" data-view="settings"><span class="nav-glyph" aria-hidden="true">&#xE713;</span>Settings</button>
+      <div class="nav-spacer"></div>
+      <div class="nav-foot" id="nav-foot"></div>
+      <button class="nav-item nav-quit" id="quit"><span class="nav-glyph" aria-hidden="true">&#xE7E8;</span>Quit</button>
+    </nav>
+
+    <main class="content" id="content"></main>
+  </div>
+
+  <div class="selection-bar" id="selection-bar" hidden></div>
+  <aside class="drawer" id="drawer" hidden></aside>
+  <div class="scrim" id="scrim" hidden></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

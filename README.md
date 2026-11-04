@@ -14,37 +14,61 @@ For keeping the installed software updated, the Installer creates a Scheduled Ta
 Special thanks to Brad Wyatt who gave me the the incentive to that automation 
 https://www.thelazyadministrator.com/2020/02/05/intune-chocolatey-a-match-made-in-heaven/
 
+## Requirements
+- Windows 10 or Windows 11, Windows PowerShell 5.1 or PowerShell 7
+- The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer
+- An Entra ID app registration (see below)
+
+Chocolatey and Inkscape are **not** needed on the admin machine anymore: package infos and icons come straight from the
+chocolatey.org feed, SVG icons are converted with Microsoft Edge.
+
 ## Install-Guide
-1. Start powershell with elevated rights.
-2. Download The Script and Save it for example to C:\admin
-3. Install and Import all required Modules, chocolatey and Software for icon-converting.
+1. Download the script and save it, for example to C:\admin
+2. Install the required module once (no admin rights needed):
 ```powershell
-set-executionpolicy unrestricted # not needed but my one is set so, you can try it with other policies
-Install-Module IntuneWin32App -Force
-Import-Module IntuneWin32App
-Install-Module Microsoft.Graph.Intune -Force
-Import-Module Microsoft.Graph.Intune
-Install-Module -Name chocolatey
-Import-Module -Name chocolatey
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-choco install inkscape -y
+. C:\admin\ChocoIntuneDeployment-Main.ps1
+Install-IntunechocoComponents
 ```
-4. OPTIONAL IF YOU USE IT MANUALLY Connect to Intune Graph API (Multi-Tenant Use is possible) 
+3. Create an app registration in Entra ID (once per tenant). Microsoft retired the shared "Microsoft Intune PowerShell" app,
+   so IntuneWin32App needs your own:
+   - Entra admin center > App registrations > New registration, any name (e.g. "Intune Choco Deployment")
+   - Authentication > Add a platform > Mobile and desktop applications > Redirect URI `http://localhost`
+   - API permissions > Microsoft Graph > Delegated: `DeviceManagementApps.ReadWrite.All`, `DeviceManagementConfiguration.ReadWrite.All`,
+     `DeviceManagementRBAC.Read.All`, `Group.Read.All`, then grant admin consent
+   - Note the Application (client) ID
+
+## Graphical interface
 ```powershell
-Connect-MSIntuneGraph -TenantID "contoso.com"
+C:\admin\Start-IntuneChocoGui.ps1
 ```
-5. OPTIONAL IF YOU USE IT MANUALLY Import Downloaded Script (in this sample from C:\admin)
-```powershell
-import-module "C:\admin\ChocoIntuneDeployment-Main.ps1"
-```
-## How to Use
+The interface opens in your browser (Windows 11 look, light and dark theme). It runs only on this machine:
+a local server on `http://localhost` with a random port, protected by a session token. Close it with **Quit** or Ctrl+C.
+
+- **Catalog**: curated apps by category with icons, versions and license notes. Click apps to select them, choose the
+  assignment (available, required, none) and deploy them in one go.
+- **Search**: the whole Chocolatey community repository.
+- **Details**: description, links, license note, and a custom icon for packages without one (PNG, JPEG, SVG, ICO).
+- **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center.
+- **Activity**: deployments run one after another in the background, each with its full log.
+- **Settings**: tenant and client ID, deployment defaults, update delay and package sources.
+  Saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and also used by the command line functions.
+
+## How to Use (command line)
 ![Animation](https://user-images.githubusercontent.com/9081611/163805757-500bed68-a553-48db-b468-c3f8e62f25dd.gif)
   
 in simplest way, easy run the script.
+```powershell
+C:\admin\ChocoIntuneDeployment-Main.ps1 -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
+```
+Without parameters you will be asked for tenant and client ID. A browser window opens for the sign-in.
 
-First you will be asked, what tenant you want to connect and you will be asked for M365 Creds to authenticate to Graph API
+Then you can choose the software you want to install. (Hold STRG to select more then One; in PowerShell 7 you get a numbered list instead)
 
-Then you can choose the software you want to install. (Hold STRG to select more then One)
+To use the functions manually, dot-source the script and connect:
+```powershell
+. C:\admin\ChocoIntuneDeployment-Main.ps1
+Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
+```
 
 Start the Process With OK
   
@@ -53,22 +77,9 @@ Everything else is done automaticly now
   
 ### Optional Steps
 ### Adding Applications to the Softwarelist
-You can easy add software you like to the list.
-You need to find following line and add Software in following pattern
-```powershell
- "<Description>","<choconame>"
-```
-```powershell
-
-$Content = '
-<ADD YOUR CONTENT HERE>
-"Adobe Acrobat Reader DC","adobereader"
-"Google Chrome","googlechrome"
-"Mozilla Firefox","firefox"
-"Java SE Runtime Environment","jre8"
-.
-.
-.
+The software list lives in [catalog.json](catalog.json), used by the GUI and by the command line:
+```json
+{ "id": "<choconame>", "name": "<Description>", "category": "<Category>" }
 ```
 
 ### Install Chocolatey Manually
@@ -86,15 +97,40 @@ You will be prompted to enter a pattern of what Software you want to install.
 After that select the wanted software.
 
 By default the Software is published but not autoinstalled for every user in the intune Tenant.
-To make it automaticly installed add the Switch -Required
+To make it automaticly installed add the Switch -Required, or choose the assignment explicitly
 ```powershell
 New-IntuneWin32ChocoApplication -Required
+New-IntuneWin32ChocoApplication "vlc" -Assignment None   # Available, Required or None
 ```
 
 If you know the exact chocolatey name, you can also deploy the software without any userpromt
 ```powershell
 New-IntuneWin32ChocoApplication "googlechrome"
+New-IntuneWin32ChocoApplication "vlc", "7zip.install" -NoIconPrompt
 ```
+If a package has no icon on chocolatey.org, you can pick a file (Cancel creates the app without icon),
+pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPrompt`.
+
+### What gets deployed
+- `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and registers the scheduled task
+  `\Intune-Choco-Updates\Update <package> on startup`. Each device waits a random 5 to 60 minutes after startup
+  (configurable), so many devices behind one IP don't download at the same time. Uninstall removes the task again.
+- With a package source configured, install and update task use `choco --source <your feed>`.
+- The detection script checks `%ProgramData%\chocolatey\lib\<package>`.
+- The app gets a dependency to the Chocolatey app (auto install), which is deployed once per tenant.
+  Its installer retries with a random wait when the Chocolatey download is rate limited.
+- Requirement: Windows 10 1607 or newer (includes Windows 11), x64/x86. Use `-Architecture AllWithARM64` for ARM devices.
+
+## Licenses and rate limits
+- Chocolatey itself is Apache 2.0. The installed software keeps its own license. The tool shows a note for packages with
+  known restrictions (Oracle Java, TeamViewer, AnyDesk, Adobe Reader distribution, Sublime Text, 1Password); the catalog
+  uses Eclipse Temurin instead of Oracle Java.
+- Chocolatey [does not recommend](https://docs.chocolatey.org/en-us/community-repository/community-packages-disclaimer/)
+  organizational use of the community repository and rate limits it (about 20 package downloads per minute and IP,
+  temporary blocks at heavy use). For larger environments put a caching proxy or internal repository (ProGet, Nexus,
+  Azure Artifacts) in front and set it as package source.
+- Package infos are read with the NuGet v2 queries choco itself sends (choco 1.x style, falling back to the choco 2.x
+  style). Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
 ### Results:
 New created Windows applications
 ![image](https://user-images.githubusercontent.com/9081611/163807675-df7319ab-3104-43ee-8707-7a8c0b0f0255.png)
