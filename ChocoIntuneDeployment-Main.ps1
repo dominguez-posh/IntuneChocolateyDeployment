@@ -9,7 +9,7 @@
         Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<app registration id>"
         New-IntuneWin32ChocoApplication -ChocoName "googlechrome"
 
-    Graphical interface: .\Start-IntuneChocoGui.ps1
+    Graphical interface: Start.cmd (or .\Start-IntuneChocoTool.ps1 in Windows PowerShell 5.1)
 
     First use: run Install-IntunechocoComponents once to install the IntuneWin32App module.
     Works with Windows PowerShell 5.1 and PowerShell 7 on Windows 10 and Windows 11.
@@ -103,7 +103,13 @@ function Get-ChocoLicenseNote {
 
 function Install-IntunechocoComponents {
     # IntuneWin32App 1.5.0 or newer is required (older versions break packaging, see issue #5, and dependencies, see issue #3)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    # Windows PowerShell asks for the NuGet provider on first use; in the GUI nobody could answer that question
+    if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue | Where-Object Version -ge "2.8.5.201")) {
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+    }
     Install-Module IntuneWin32App -MinimumVersion $script:MinimumModuleVersion -Scope CurrentUser -Force -AllowClobber
+    Remove-Module IntuneWin32App -ErrorAction SilentlyContinue
     Import-Module IntuneWin32App -MinimumVersion $script:MinimumModuleVersion -Force
     Write-Host "IntuneWin32App $((Get-Module IntuneWin32App).Version) is installed. Chocolatey and Inkscape are no longer needed on this machine."
 }#Installs all required script components
@@ -142,6 +148,7 @@ function Update-IntuneChocoToken {
     Assert-IntuneChocoConnection
     $ExpiresOn = $Global:AccessToken.ExpiresOn
     if ($ExpiresOn -and ([datetime]$ExpiresOn).ToUniversalTime() -lt (Get-Date).ToUniversalTime().AddMinutes(10) -and $script:Settings.ClientID) {
+        if (-not $Global:AccessToken.RefreshToken) { Write-Warning "The access token expires soon and cannot be renewed silently, sign in again if the next step fails"; return }
         Write-Host "Refreshing the Intune access token"
         Connect-MSIntuneGraph -TenantID $Global:AccessTokenTenantID -ClientID $script:Settings.ClientID -Refresh | Out-Null
     }
@@ -162,28 +169,74 @@ function Set-IntuneChocoAuthState {
     $Global:AccessTokenTenantID = $State.AccessTokenTenantID
 }#Hands the sign-in over to another runspace (used by the GUI)
 
+function Set-IntuneChocoToken {
+    param(
+        [Parameter(Mandatory = $true)]$TokenResponse,
+        [Parameter(Mandatory = $true)][string]$TenantID
+    )
+    # Same shape as the module's own New-DelegatedAccessToken, so Connect-MSIntuneGraph -Refresh keeps working
+    if (-not $TokenResponse.access_token) { throw "The token response contains no access token" }
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "ExpiresOn" -Value ((Get-Date).AddSeconds([int]$TokenResponse.expires_in).ToUniversalTime()) -Force
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "Scopes" -Value @([string]$TokenResponse.scope -split " " | Where-Object { $_ }) -Force
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "AccessToken" -Value $TokenResponse.access_token -Force
+    if ($TokenResponse.refresh_token) { $TokenResponse | Add-Member -MemberType NoteProperty -Name "RefreshToken" -Value $TokenResponse.refresh_token -Force }
+    $Global:AccessToken = $TokenResponse
+    $Global:AuthenticationHeader = @{
+        "Content-Type"  = "application/json"
+        "Authorization" = "Bearer $($TokenResponse.access_token)"
+        "ExpiresOn"     = $TokenResponse.ExpiresOn
+    }
+    $Global:AccessTokenTenantID = $TenantID
+}#Takes a token from another sign-in (e.g. the Keevault sign-in of the GUI) into the IntuneWin32App module
+
+function Get-IntuneChocoIdentity {
+    # Name, account and tenant from the access token (display only, Graph checks the signature)
+    if ($null -eq $Global:AccessToken) { return $null }
+    try {
+        $Payload = ([string]$Global:AccessToken.access_token).Split(".")[1].Replace("-", "+").Replace("_", "/")
+        $Payload = $Payload.PadRight($Payload.Length + (4 - $Payload.Length % 4) % 4, "=")
+        $Claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
+        $Account = if ($Claims.upn) { $Claims.upn } elseif ($Claims.preferred_username) { $Claims.preferred_username } else { $Claims.unique_name }
+        return [pscustomobject]@{ Name = $Claims.name; Account = $Account; TenantId = $Claims.tid; ExpiresOn = $Global:AccessToken.ExpiresOn }
+    }
+    catch { return [pscustomobject]@{ Name = $null; Account = $null; TenantId = $Global:AccessTokenTenantID; ExpiresOn = $Global:AccessToken.ExpiresOn } }
+}#Who is signed in
+
+function Get-FeedText {
+    param($Node, [string]$Name)
+    # OData writes empty values as <d:Title m:null="true"/>, which PowerShell returns as an element, not as text
+    $Value = $Node.$Name
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Xml.XmlElement]) {
+        if ($Value.GetAttribute("null", "http://schemas.microsoft.com/ado/2007/08/dataservices/metadata") -eq "true") { return $null }
+        return $Value.InnerText
+    }
+    return [string]$Value
+}
+
 function Invoke-ChocoFeed {
     param([Parameter(Mandatory = $true)][string]$Query)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Uri = if ($Query -match '^https?://') { $Query } else { $script:Settings.MetadataFeed.TrimEnd("/") + "/" + $Query }
-    $Response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -ErrorAction Stop
+    $Response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
     $Xml = [xml]$Response.Content
     foreach ($Entry in @($Xml.feed.entry)) {
         if ($null -eq $Entry) { continue }
         $Properties = $Entry.properties
+        $Id = [string]$Entry.title.InnerText
         [pscustomobject]@{
-            Name            = $Entry.title.InnerText
-            Title           = $Properties.Title
-            Version         = $Properties.Version
-            Summary         = $Properties.Summary
-            Description     = $Properties.Description
-            Authors         = $Entry.author.name
-            SoftwareSite    = $Properties.ProjectUrl
-            SoftwareLicense = $Properties.LicenseUrl
-            IconUrl         = $Properties.IconUrl
-            Downloads       = $Properties.DownloadCount.InnerText
-            IsLatest        = $Properties.IsLatestVersion.InnerText -eq "true"
-            LicenseNote     = Get-ChocoLicenseNote $Entry.title.InnerText
+            Name            = $Id
+            Title           = Get-FeedText $Properties "Title"
+            Version         = Get-FeedText $Properties "Version"
+            Summary         = Get-FeedText $Properties "Summary"
+            Description     = Get-FeedText $Properties "Description"
+            Authors         = (@($Entry.author | ForEach-Object { [string]$_.name } | Where-Object { $_ }) -join ", ")
+            SoftwareSite    = Get-FeedText $Properties "ProjectUrl"
+            SoftwareLicense = Get-FeedText $Properties "LicenseUrl"
+            IconUrl         = Get-FeedText $Properties "IconUrl"
+            Downloads       = Get-FeedText $Properties "DownloadCount"
+            IsLatest        = (Get-FeedText $Properties "IsLatestVersion") -eq "true"
+            LicenseNote     = Get-ChocoLicenseNote $Id
         }
     }
     # The feed pages its results (FindPackagesById returns 40 versions per page)
@@ -218,6 +271,17 @@ function Get-ChocoInfo {
     return $Info
 
 }#Returns The Infos of Choco Repository
+
+function Get-ChocoAppName {
+    param([Parameter(Mandatory = $true)]$Info)
+    # The curated name from catalog.json, otherwise the feed title without the "(Install)" / "(Portable)" suffix
+    # that Chocolatey puts on its .install and .portable packages
+    $Entry = @(Get-IntuneChocoCatalog | Where-Object { $_.Id -eq $Info.Name }) | Select-Object -First 1
+    if ($Entry -and $Entry.Name) { return $Entry.Name }
+    $Title = ([string]$Info.Title) -replace '\s*\((Install|Portable)\)\s*$', ''
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $Info.Name }
+    return $Title.Trim()
+}#Display name of the app in Intune and the Company Portal
 
 function Search-ChocoPackage {
     param(
@@ -300,22 +364,27 @@ function ConvertTo-PngBytes {
             "--no-first-run", "--window-size=256,256", "--user-data-dir=`"$EdgeProfile`"",
             "--screenshot=`"$Png`"", ("file:///" + $Html.Replace('\', '/'))
         )
-        # Headless Edge sometimes keeps running after writing the screenshot: wait for the file, not for the process
-        $Process = Start-Process -FilePath $Edge -ArgumentList $Arguments -WindowStyle Hidden -PassThru
-        $Deadline = (Get-Date).AddSeconds(30)
-        $LastSize = -1
-        while ((Get-Date) -lt $Deadline) {
-            Start-Sleep -Milliseconds 300
-            $Size = if (Test-Path $Png) { (Get-Item $Png).Length } else { -1 }
-            if ($Size -gt 0 -and ($Size -eq $LastSize -or $Process.HasExited)) { break }
-            if ($Process.HasExited -and $Size -le 0) { break }
-            $LastSize = $Size
+        # Headless Edge sometimes keeps running after writing the screenshot: wait for the file, not for the process.
+        # Now and then it hangs without writing anything; a second start almost always works.
+        for ($Attempt = 1; $Attempt -le 2; $Attempt++) {
+            $Process = Start-Process -FilePath $Edge -ArgumentList $Arguments -WindowStyle Hidden -PassThru
+            $Deadline = (Get-Date).AddSeconds(30)
+            $LastSize = -1
+            while ((Get-Date) -lt $Deadline) {
+                Start-Sleep -Milliseconds 300
+                $Size = if (Test-Path $Png) { (Get-Item $Png).Length } else { -1 }
+                if ($Size -gt 0 -and ($Size -eq $LastSize -or $Process.HasExited)) { break }
+                if ($Process.HasExited -and $Size -le 0) { break }
+                $LastSize = $Size
+            }
+            # Stop exactly this Edge instance (recognized by its own profile folder), never the user's browser
+            Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($EdgeProfile, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            if ((Test-Path $Png) -and (Get-Item $Png).Length -gt 0) { break }
+            if ($Attempt -eq 1) { Write-Verbose "Edge did not render the SVG icon, trying once more"; Start-Sleep -Seconds 2 }
         }
-        # Stop exactly this Edge instance (recognized by its own profile folder), never the user's browser
-        Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like "*$EdgeProfile*" } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        if (-not (Test-Path $Png) -or (Get-Item $Png).Length -eq 0) { throw "Edge did not render the SVG icon within 30 seconds" }
+        if (-not (Test-Path $Png) -or (Get-Item $Png).Length -eq 0) { throw "Edge did not render the SVG icon (two attempts of 30 seconds)" }
         return ,[IO.File]::ReadAllBytes($Png)
     }
 
@@ -542,11 +611,13 @@ function New-IntuneWin32ChocoApplication {
                 Write-Host "Getting Infos from Chocolatey for $Name"
                 $Infos = Get-ChocoInfo -ChocoName $Name
                 $Name = $Infos.Name
-                $AppName = $Infos.Title
+                $AppName = Get-ChocoAppName -Info $Infos
 
-                $Existing = @(Get-IntuneWin32App -DisplayName $AppName | Where-Object { $_.displayName -eq $AppName })
+                # Already there: same name, or created by this tool for the same package (also when renamed).
+                # The module reads the whole list for a name filter anyway, so the full list costs the same.
+                $Existing = @(Get-IntuneWin32App | Where-Object { $_.displayName -eq $AppName -or [string]$_.notes -eq "$($script:AppMarker);package=$Name" })
                 if ($Existing.Count -gt 0) {
-                    Write-Warning "$AppName is already deployed, please update or remove first"
+                    Write-Warning "$AppName is already deployed ($($Existing[0].displayName)), please update or remove first"
                     continue
                 }
 

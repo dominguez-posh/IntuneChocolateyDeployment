@@ -15,7 +15,7 @@ Special thanks to Brad Wyatt who gave me the the incentive to that automation
 https://www.thelazyadministrator.com/2020/02/05/intune-chocolatey-a-match-made-in-heaven/
 
 ## Requirements
-- Windows 10 or Windows 11, Windows PowerShell 5.1 or PowerShell 7
+- Windows 10 or Windows 11, Windows PowerShell 5.1 or PowerShell 7 (the graphical interface runs in Windows PowerShell 5.1)
 - The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer
 - An Entra ID app registration (see below)
 
@@ -38,20 +38,27 @@ Install-IntunechocoComponents
    - Note the Application (client) ID
 
 ## Graphical interface
-```powershell
-C:\admin\Start-IntuneChocoGui.ps1
-```
-The interface opens in your browser (Windows 11 look, light and dark theme). It runs only on this machine:
-a local server on `http://localhost` with a random port, protected by a session token. Close it with **Quit** or Ctrl+C.
+Double-click **Start.cmd** (or run `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`).
+The tool is a WPF window for Windows PowerShell 5.1, without a console window next to it.
 
-- **Catalog**: curated apps by category with icons, versions and license notes. Click apps to select them, choose the
-  assignment (available, required, none) and deploy them in one go.
-- **Search**: the whole Chocolatey community repository.
-- **Details**: description, links, license note, and a custom icon for packages without one (PNG, JPEG, SVG, ICO).
+- **Start**: guided steps and a readiness list (module, app registration, sign-in, package source, Chocolatey app in the tenant),
+  each item with the button that fixes it.
+- **Sign in**: opens the Microsoft sign-in in your browser (IntuneWin32App module). The arrow next to it offers
+  **Sign in with Keevault**: you pick the Microsoft account in [Keevault](https://keevault.de), and user name, password and
+  one-time code are filled into an embedded sign-in window (WebView2). Needs Keevault with *AI agents (MCP)* switched on;
+  the token stays in this process.
+- **Catalog**: curated apps by category with icons, versions, publishers and license notes. Select several apps
+  (Ctrl+click / Shift+click, the selection is kept across filters), choose the assignment (available, required, none)
+  and deploy them in one go.
+- **Search**: the whole Chocolatey community repository (or your metadata feed).
+- **Details**: description, links, license note, and a custom icon for any package (PNG, JPEG, SVG, ICO).
 - **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center.
-- **Activity**: deployments run one after another in the background, each with its full log.
-- **Settings**: tenant and client ID, deployment defaults, update delay and package sources.
+- **Activity**: deployments run one after another in the background, the window stays usable; every step is logged.
+- **Settings**: tenant and client ID, deployment defaults, update delay, package sources and the module installation.
   Saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and also used by the command line functions.
+
+Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder
+(`%LOCALAPPDATA%\IntuneChocoDeployment`, button *Open work folder* in the settings).
 
 ## How to Use (command line)
 ![Animation](https://user-images.githubusercontent.com/9081611/163805757-500bed68-a553-48db-b468-c3f8e62f25dd.gif)
@@ -131,6 +138,12 @@ pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPr
   Azure Artifacts) in front and set it as package source.
 - Package infos are read with the NuGet v2 queries choco itself sends (choco 1.x style, falling back to the choco 2.x
   style). Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
+## Tests
+`Tests\Invoke-GuiSmoke.ps1` starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`) and its own
+`%LOCALAPPDATA%`, drives every page (sign-in, catalog, search, custom icon, deployments, tenant, settings, sign-out) and
+checks the results. Nothing shows up on the desktop and nothing is sent to a tenant; package infos come from the real
+Chocolatey feed. Screenshots of every page land in `%TEMP%\IntuneChocoSmoke`.
+
 ### Results:
 New created Windows applications
 ![image](https://user-images.githubusercontent.com/9081611/163807675-df7319ab-3104-43ee-8707-7a8c0b0f0255.png)

@@ -1,0 +1,419 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Intune Chocolatey Deployment" Width="1280" Height="880" MinWidth="1080" MinHeight="700"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBackground}" Foreground="{StaticResource Text}"
+        FontFamily="Segoe UI">
+    <!-- Styles and colors: UI\Theme.xaml (same look as the M365 MFA Administration tool and MSIX Sandbox Studio) -->
+    <Window.Resources>
+        <!-- Note chip in the tables: the pill from the theme, hidden when there is nothing to say -->
+        <Style x:Key="NoteChipBorder" TargetType="Border" BasedOn="{StaticResource ChipBorder}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StatusText}" Value="">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <DataTemplate x:Key="NoteChip">
+            <Border Style="{StaticResource NoteChipBorder}">
+                <TextBlock Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{Binding (TextElement.Foreground), RelativeSource={RelativeSource AncestorType=Border}}"/>
+            </Border>
+        </DataTemplate>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="30"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header: title with subtitle and connection state on the left, actions on the right -->
+        <Border Grid.Row="0" Background="{StaticResource HeaderBackground}" Padding="24,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Intune Chocolatey Deployment" Foreground="White" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="Deploy Chocolatey packages as Win32 apps to Microsoft Intune, kept up to date on every device" Foreground="#94A3B8" FontSize="12" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <TextBlock x:Name="TxtConnectionStatus" Text="Not signed in to Intune" Foreground="#FCA5A5" FontWeight="SemiBold" FontSize="12"/>
+                        <TextBlock Text="·" Foreground="#64748B" FontSize="12" Margin="8,0"/>
+                        <TextBlock x:Name="TxtTenant" Text="Tenant: -" Foreground="#CBD5E1" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="·" Foreground="#64748B" FontSize="12" Margin="8,0"/>
+                        <TextBlock x:Name="TxtModuleState" Text="IntuneWin32App: checking" Foreground="#CBD5E1" FontSize="12"/>
+                    </StackPanel>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnHelp" Tag="&#xE897;" Content="Help" Style="{StaticResource HeaderButton}"/>
+                    <Button x:Name="BtnHeaderSettings" Tag="&#xE713;" Content="Settings" Style="{StaticResource HeaderButton}"/>
+                    <Button x:Name="BtnSignIn" Tag="&#xE77B;" Content="Sign in" Style="{StaticResource SplitMainButton}" ToolTip="Sign in with your Microsoft account (browser)"/>
+                    <Button x:Name="BtnSignInMenu" Style="{StaticResource SplitDropButton}" ToolTip="More sign-in options (Keevault)"/>
+                    <Button x:Name="BtnSignOut" Tag="&#xE7E8;" Content="Sign out" Style="{StaticResource HeaderButton}" IsEnabled="False"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Navigation + busy indicator -->
+        <Border Grid.Row="1" Background="White" BorderBrush="{StaticResource CardBorder}" BorderThickness="0,0,0,1" Padding="16,0">
+            <Grid>
+                <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="NavStart" Style="{StaticResource NavTab}" Tag="&#xE80F;" Content="Start" IsChecked="True"/>
+                    <RadioButton x:Name="NavCatalog" Style="{StaticResource NavTab}" Tag="&#xE8F1;" Content="Catalog"/>
+                    <RadioButton x:Name="NavSearch" Style="{StaticResource NavTab}" Tag="&#xE721;" Content="Search"/>
+                    <RadioButton x:Name="NavTenant" Style="{StaticResource NavTab}" Tag="&#xE753;" Content="In tenant"/>
+                    <RadioButton x:Name="NavSettings" Style="{StaticResource NavTab}" Tag="&#xE713;" Content="Settings"/>
+                </StackPanel>
+                <StackPanel x:Name="BusyPanel" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Visibility="Collapsed">
+                    <Ellipse Style="{StaticResource Spinner}" Width="18" Height="18" StrokeThickness="2.5" Margin="0,0,10,0">
+                        <Ellipse.RenderTransform><RotateTransform/></Ellipse.RenderTransform>
+                    </Ellipse>
+                    <TextBlock x:Name="BusyText" Text="Working ..." VerticalAlignment="Center" Foreground="{StaticResource Primary}" FontWeight="SemiBold"
+                               MaxWidth="560" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Pages on the left, details and deployment on the right (catalog and search) -->
+        <Grid Grid.Row="2" Margin="20,18,20,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ===== Start ===== -->
+            <ScrollViewer x:Name="PageStart" Style="{StaticResource PageScroll}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="3*"/>
+                        <ColumnDefinition Width="18"/>
+                        <ColumnDefinition Width="2*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <GroupBox Header="Get started">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                    <Border Style="{StaticResource StepDot}"><TextBlock Text="1" Style="{StaticResource StepNumber}"/></Border>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Prepare once" Style="{StaticResource StepTitle}"/>
+                                        <TextBlock Text="Install the IntuneWin32App module (Settings > Components) and enter tenant and the client ID of your Entra ID app registration. Chocolatey is not needed on this computer." Style="{StaticResource StepText}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                    <Border Style="{StaticResource StepDot}"><TextBlock Text="2" Style="{StaticResource StepNumber}"/></Border>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Sign in" Style="{StaticResource StepTitle}"/>
+                                        <TextBlock Text="Sign in (top right) opens the Microsoft sign-in in your browser; the arrow next to it offers the sign-in with an account from Keevault." Style="{StaticResource StepText}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                    <Border Style="{StaticResource StepDot}"><TextBlock Text="3" Style="{StaticResource StepNumber}"/></Border>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Pick and deploy" Style="{StaticResource StepTitle}"/>
+                                        <TextBlock Text="Select apps in the catalog or search the whole Chocolatey repository (Ctrl+click for several), choose the assignment and click Deploy. Every app gets an install script, a detection rule, a startup update task and a dependency on the Chocolatey app, which is created once per tenant." Style="{StaticResource StepText}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <WrapPanel Margin="0,4,0,0">
+                                    <Button x:Name="BtnStartCatalog" Tag="&#xE8F1;" Content="Open catalog"/>
+                                    <Button x:Name="BtnStartSearch" Tag="&#xE721;" Content="Search packages" Style="{StaticResource SecondaryButton}"/>
+                                    <Button x:Name="BtnStartTenant" Tag="&#xE753;" Content="Apps in tenant" Style="{StaticResource SecondaryButton}"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </GroupBox>
+                        <GroupBox Header="What gets deployed">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,6"
+                                           Text="install.ps1 runs choco upgrade &lt;package&gt; -y as SYSTEM in 64-bit PowerShell and registers the scheduled task \Intune-Choco-Updates\Update &lt;package&gt; on startup. Each device waits a random time after startup (default 5 to 60 minutes), so many devices behind one IP don't download at once. Uninstall removes the task again."/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,6"
+                                           Text="The detection script checks %ProgramData%\chocolatey\lib\&lt;package&gt;. Requirement: Windows 10 1607 or newer, architecture from the settings."/>
+                                <TextBlock Style="{StaticResource Hint}"
+                                           Text="Chocolatey does not recommend organizational use of its community repository and rate limits downloads. For larger environments set an internal package source (ProGet, Nexus, Azure Artifacts) in the settings; the installed software keeps its own license."/>
+                            </StackPanel>
+                        </GroupBox>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Readiness" Style="{StaticResource CardTitle}" Margin="0,0,0,8"/>
+                        <StackPanel x:Name="ReadinessPanel" Margin="0,0,14,0"/>
+                    </StackPanel>
+                </Grid>
+            </ScrollViewer>
+
+            <!-- ===== Catalog ===== -->
+            <DockPanel x:Name="PageCatalog" Visibility="Collapsed">
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <ComboBox x:Name="CmbCategory" Width="210" Margin="0,0,10,0"/>
+                    <TextBox x:Name="TxtCatalogFilter" Grid.Column="1" Width="260" ToolTip="Filter by name or package id"/>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0,0,0">
+                        <Button x:Name="BtnCatalogSelectShown" Content="Select shown" Style="{StaticResource SmallButton}"/>
+                        <Button x:Name="BtnCatalogRefresh" Content="Refresh infos" Style="{StaticResource SmallButton}" ToolTip="Reads versions, publishers and icons from the Chocolatey feed again"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtCatalogCount" Grid.Column="4" VerticalAlignment="Center" Style="{StaticResource Hint}"/>
+                </Grid>
+                <DataGrid x:Name="DgCatalog">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Width="36" CanUserResize="False">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Image Source="{Binding IconUrl, IsAsync=True}" Width="20" Height="20" Stretch="Uniform"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="App" Binding="{Binding Title}" Width="2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Package" Binding="{Binding Id}" Width="1.3*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="130"/>
+                        <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="110"/>
+                        <DataGridTextColumn Header="Publisher" Binding="{Binding Authors}" Width="1.2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTemplateColumn Header="Note" Width="90" SortMemberPath="StatusText" CellTemplate="{StaticResource NoteChip}"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+
+            <!-- ===== Search ===== -->
+            <DockPanel x:Name="PageSearch" Visibility="Collapsed">
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="TxtSearch" Width="340" ToolTip="Name or part of a package id, e.g. 'notepad' (Enter searches)"/>
+                    <Button x:Name="BtnSearch" Grid.Column="1" Tag="&#xE721;" Content="Search" Margin="8,0,0,0"/>
+                    <TextBlock x:Name="TxtSearchCount" Grid.Column="3" VerticalAlignment="Center" Style="{StaticResource Hint}"/>
+                </Grid>
+                <DataGrid x:Name="DgSearch">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Width="36" CanUserResize="False">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Image Source="{Binding IconUrl, IsAsync=True}" Width="20" Height="20" Stretch="Uniform"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="App" Binding="{Binding Title}" Width="2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Package" Binding="{Binding Id}" Width="1.3*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="110"/>
+                        <DataGridTextColumn Header="Publisher" Binding="{Binding Authors}" Width="1.2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Downloads" Binding="{Binding Downloads}" Width="110"/>
+                        <DataGridTemplateColumn Header="Note" Width="90" SortMemberPath="StatusText" CellTemplate="{StaticResource NoteChip}"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+
+            <!-- ===== In tenant ===== -->
+            <DockPanel x:Name="PageTenant" Visibility="Collapsed">
+                <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="BtnTenantRefresh" Tag="&#xE72C;" Content="Refresh" Margin="0,4,4,4"/>
+                        <Button x:Name="BtnTenantOpen" Tag="&#xE8A7;" Content="Open in Intune admin center" Style="{StaticResource SecondaryButton}" IsEnabled="False"/>
+                        <Button x:Name="BtnTenantCopy" Tag="&#xE8C8;" Content="Copy app id" Style="{StaticResource SecondaryButton}" IsEnabled="False"/>
+                    </StackPanel>
+                    <TextBlock x:Name="TxtTenantCount" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource Hint}" Text="Sign in to see the apps this tool created in the tenant."/>
+                </Grid>
+                <DataGrid x:Name="DgTenant">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="App in Intune" Binding="{Binding DisplayName}" Width="2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Package" Binding="{Binding Package}" Width="1.3*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTemplateColumn Header="Type" Width="110" SortMemberPath="StatusText" CellTemplate="{StaticResource NoteChip}"/>
+                        <DataGridTextColumn Header="Created" Binding="{Binding CreatedText}" Width="150"/>
+                        <DataGridTextColumn Header="App id" Binding="{Binding Id}" Width="2*" ElementStyle="{StaticResource CellText}"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+
+            <!-- ===== Settings ===== -->
+            <ScrollViewer x:Name="PageSettings" Style="{StaticResource PageScroll}" Visibility="Collapsed">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="18"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <GroupBox Header="Tenant and app registration">
+                                <StackPanel>
+                                    <TextBlock Text="Tenant (domain or ID, e.g. contoso.onmicrosoft.com)" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtTenantId" Margin="0,0,0,10"/>
+                                    <TextBlock Text="Application (client) ID of your Entra ID app registration" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtClientId" Margin="0,0,0,10"/>
+                                    <Border Style="{StaticResource InfoBox}">
+                                        <TextBlock Style="{StaticResource Hint}" Foreground="{StaticResource Text}"
+                                                   Text="Microsoft retired the shared Intune PowerShell app, so the IntuneWin32App module needs your own app registration: platform 'Mobile and desktop applications' with redirect URI http://localhost; delegated Graph permissions DeviceManagementApps.ReadWrite.All, DeviceManagementConfiguration.ReadWrite.All, DeviceManagementRBAC.Read.All, Group.Read.All with admin consent."/>
+                                    </Border>
+                                </StackPanel>
+                            </GroupBox>
+                            <GroupBox Header="Deployment defaults">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="14"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="Architecture (requirement rule)" Style="{StaticResource Label}"/>
+                                            <ComboBox x:Name="CmbArchitecture"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Text="Assignment for all users" Style="{StaticResource Label}"/>
+                                            <ComboBox x:Name="CmbAssignment"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock Text="Update task: random wait after startup, minutes (from / to)" Style="{StaticResource Label}" Margin="0,12,0,4"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBox x:Name="TxtDelayMin" Width="90"/>
+                                        <TextBlock Text="to" VerticalAlignment="Center" Margin="10,0"/>
+                                        <TextBox x:Name="TxtDelayMax" Width="90"/>
+                                    </StackPanel>
+                                    <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,0"
+                                               Text="Every device picks its own wait time in this range, so an office behind one IP does not hit the Chocolatey rate limit at once."/>
+                                </StackPanel>
+                            </GroupBox>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <GroupBox Header="Package sources">
+                                <StackPanel>
+                                    <TextBlock Text="Metadata feed (package infos, icons, search)" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtMetadataFeed" Margin="0,0,0,10"/>
+                                    <TextBlock Text="Package source on the devices (choco --source), empty = community repository" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtPackageSource" Margin="0,0,0,10"/>
+                                    <TextBlock Text="Chocolatey download URL (nupkg) for the bootstrap, empty = community repository" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtChocoDownloadUrl" Margin="0,0,0,10"/>
+                                    <TextBlock Style="{StaticResource Hint}"
+                                               Text="For larger environments put an internal repository or caching proxy (ProGet, Nexus, Azure Artifacts) in front of chocolatey.org and enter it here."/>
+                                </StackPanel>
+                            </GroupBox>
+                            <GroupBox Header="Components">
+                                <StackPanel>
+                                    <TextBlock x:Name="TxtModuleInfo" Style="{StaticResource Hint}" Foreground="{StaticResource Text}" Text="IntuneWin32App: checking ..."/>
+                                    <WrapPanel Margin="0,10,0,0">
+                                        <Button x:Name="BtnInstallModule" Tag="&#xE896;" Content="Install or update module" Style="{StaticResource SecondaryButton}" Margin="0,4,4,4"/>
+                                        <Button x:Name="BtnOpenWorkFolder" Tag="&#xE8B7;" Content="Open work folder" Style="{StaticResource SecondaryButton}" ToolTip="Packages, icons, settings and the feed cache of this tool"/>
+                                    </WrapPanel>
+                                </StackPanel>
+                            </GroupBox>
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="BtnSaveSettings" Tag="&#xE74E;" Content="Save settings" Margin="0,4,4,4"/>
+                        <TextBlock x:Name="TxtSettingsPath" VerticalAlignment="Center" Style="{StaticResource Hint}" Margin="10,0,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ===== Details and deployment (catalog and search) ===== -->
+            <ScrollViewer x:Name="SidePanel" Grid.Column="1" Width="374" Margin="18,0,0,0" Visibility="Collapsed" Style="{StaticResource PageScroll}">
+            <StackPanel Margin="0,0,14,0">
+                <GroupBox Header="Deploy">
+                    <StackPanel>
+                        <TextBlock Text="Assignment for all users" Style="{StaticResource Label}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <RadioButton x:Name="RbAvailable" Content="Available" GroupName="Intent" IsChecked="True" ToolTip="Shown in the Company Portal, users install it themselves"/>
+                            <RadioButton x:Name="RbRequired" Content="Required" GroupName="Intent" ToolTip="Installed automatically on every device"/>
+                            <RadioButton x:Name="RbNone" Content="None" GroupName="Intent" ToolTip="Only uploaded, assign it in Intune yourself"/>
+                        </StackPanel>
+                        <TextBlock x:Name="TxtDeployDefaults" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+                        <TextBlock x:Name="TxtSelectionCount" FontWeight="SemiBold" Margin="0,0,0,6" Text="No app selected"/>
+                        <ItemsControl x:Name="SelectionList" MaxHeight="120" Margin="0,0,0,8">
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="ItemsControl">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsPresenter/></ScrollViewer>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding}" Style="{StaticResource Hint}" Foreground="{StaticResource Text}"/>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <WrapPanel>
+                            <Button x:Name="BtnDeploy" Tag="&#xE7B8;" Content="Deploy selected" IsEnabled="False" Margin="0,4,4,4"/>
+                            <Button x:Name="BtnClearSelection" Content="Clear" Style="{StaticResource SmallButton}" VerticalAlignment="Center"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </GroupBox>
+                <GroupBox Header="Details">
+                    <StackPanel>
+                        <TextBlock x:Name="TxtDetailEmpty" Style="{StaticResource Hint}" Text="Click an app to see its details. Ctrl+click or Shift+click selects several apps for one deployment."/>
+                        <StackPanel x:Name="DetailBody" Visibility="Collapsed">
+                            <DockPanel Margin="0,0,0,10">
+                                <Border DockPanel.Dock="Left" Width="56" Height="56" Background="#F1F5F9" CornerRadius="6" Margin="0,0,12,0">
+                                    <Image x:Name="ImgDetail" Width="40" Height="40" Stretch="Uniform"/>
+                                </Border>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock x:Name="TxtDetailTitle" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="TxtDetailMeta" Style="{StaticResource Hint}"/>
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock x:Name="TxtDetailSummary" TextWrapping="Wrap" Margin="0,0,0,10" MaxHeight="150" TextTrimming="CharacterEllipsis"/>
+                            <Border x:Name="BoxLicense" Style="{StaticResource ResultCard}" Margin="0,0,0,10" Padding="10,8">
+                                <StackPanel>
+                                    <TextBlock Text="License note" FontWeight="SemiBold" FontSize="11" Foreground="#92400E"/>
+                                    <TextBlock x:Name="TxtLicenseNote" TextWrapping="Wrap" FontSize="12" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </Border>
+                            <WrapPanel>
+                                <Button x:Name="BtnDetailSite" Content="Project site" Style="{StaticResource SmallButton}" Margin="0,0,4,4"/>
+                                <Button x:Name="BtnDetailLicense" Content="License" Style="{StaticResource SmallButton}" Margin="0,0,4,4"/>
+                                <Button x:Name="BtnDetailChoco" Content="chocolatey.org" Style="{StaticResource SmallButton}" Margin="0,0,4,4"/>
+                            </WrapPanel>
+                            <TextBlock Text="Icon in the Company Portal" Style="{StaticResource Label}" Margin="0,10,0,4"/>
+                            <TextBlock x:Name="TxtCustomIcon" Style="{StaticResource Hint}" Margin="0,0,0,4"/>
+                            <WrapPanel>
+                                <Button x:Name="BtnCustomIcon" Content="Custom icon ..." Style="{StaticResource SmallButton}" Margin="0,0,4,0" ToolTip="PNG, JPEG, SVG or ICO; used instead of the icon from chocolatey.org"/>
+                                <Button x:Name="BtnCustomIconRemove" Content="Remove" Style="{StaticResource SmallButton}" Visibility="Collapsed"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </GroupBox>
+            </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Activity log -->
+        <GroupBox Grid.Row="3" Margin="20,4,20,0" Padding="8,4">
+            <GroupBox.Header>
+                <DockPanel>
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                        <Button x:Name="BtnLogClear" Content="Clear" Style="{StaticResource SmallButton}"/>
+                        <Button x:Name="BtnLogToggle" Content="Hide" Style="{StaticResource SmallButton}"/>
+                    </StackPanel>
+                    <TextBlock Text="Activity" VerticalAlignment="Center"/>
+                </DockPanel>
+            </GroupBox.Header>
+            <ListBox x:Name="LogList" Style="{StaticResource LogList}" Height="110"/>
+        </GroupBox>
+
+        <TextBlock Grid.Row="4" x:Name="FooterText" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedText}"
+                   Text="Deployments run one after another in the background; the window stays usable. Package infos come from the Chocolatey feed and are cached for 24 hours."/>
+
+        <!-- Help flyout -->
+        <Border x:Name="HelpPanel" Grid.Row="1" Grid.RowSpan="4" Style="{StaticResource HelpPanel}">
+            <DockPanel>
+                <DockPanel DockPanel.Dock="Top">
+                    <Button x:Name="BtnHelpClose" DockPanel.Dock="Right" Style="{StaticResource CloseButton}"/>
+                    <TextBlock x:Name="HelpTitle" Text="Help" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </DockPanel>
+                <ScrollViewer Style="{StaticResource PageScroll}">
+                    <StackPanel x:Name="HelpBody"/>
+                </ScrollViewer>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>
