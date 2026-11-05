@@ -21,8 +21,26 @@ function Test-FakeAccessToken {
 function Get-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
     $Apps = Read-Store
+    if ($ID) { $Apps = $Apps | Where-Object { $_.id -eq $ID } }
     if ($DisplayName) { $Apps = $Apps | Where-Object { $_.displayName -like "*$DisplayName*" } }
     $Apps
+}
+function Update-IntuneWin32AppPackageFile { param([string]$ID, [string]$FilePath)
+    Test-FakeAccessToken
+    if (-not (Test-Path $FilePath)) { throw "intunewin missing" }
+    $Apps = Read-Store; ($Apps | Where-Object id -eq $ID).uploads++; Write-Store $Apps
+}
+function Set-IntuneWin32App {
+    # Same types as the real module: a detection rule of the wrong type fails here too
+    param([string]$ID, [string]$Notes, [string]$AppVersion, [System.Collections.Specialized.OrderedDictionary[]]$DetectionRule)
+    Test-FakeAccessToken
+    $Apps = Read-Store
+    $App = $Apps | Where-Object id -eq $ID
+    if (-not $App) { throw "App $ID not found (fake)" }
+    if ($Notes) { $App.notes = $Notes }
+    if ($AppVersion) { $App.displayVersion = $AppVersion }
+    if ($DetectionRule) { $App.detection = $DetectionRule[0].scriptContent }
+    Write-Store $Apps
 }
 function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
@@ -31,7 +49,7 @@ function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
 function New-IntuneWin32AppPackage { param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
     $Path = Join-Path $OutputFolder "install.intunewin"; Set-Content $Path "fake"; [pscustomobject]@{ Path = $Path }
 }
-function New-IntuneWin32AppDetectionRuleScript { param($ScriptFile) @{ "@odata.type" = "script"; scriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ScriptFile)) } }
+function New-IntuneWin32AppDetectionRuleScript { param($ScriptFile) [ordered]@{ "@odata.type" = "script"; scriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ScriptFile)) } }
 function New-IntuneWin32AppDetectionRuleFile { param([switch]$Existence, $DetectionType, $Path, $FileOrFolder) @{ type = "file" } }
 function New-IntuneWin32AppRequirementRule { param($Architecture, $MinimumSupportedWindowsRelease) @{ arch = $Architecture } }
 function New-IntuneWin32AppDependency { param($ID, $DependencyType) [ordered]@{ targetId = $ID } }
@@ -41,7 +59,7 @@ function Add-IntuneWin32AppAssignmentAllUsers { param($ID, $Intent, $Notificatio
     $Apps = Read-Store; ($Apps | Where-Object id -eq $ID).assignment = $Intent; Write-Store $Apps; $true
 }
 function Add-IntuneWin32App {
-    param($FilePath, $DisplayName, $Description, $Publisher, $Notes, $InstallExperience, $RestartBehavior, $DetectionRule,
+    param($FilePath, $DisplayName, $Description, $Publisher, $AppVersion, $Notes, $InstallExperience, $RestartBehavior, $DetectionRule,
         $RequirementRule, $InstallCommandLine, $UninstallCommandLine, $InformationURL, $Icon)
     Test-FakeAccessToken
     if (-not (Test-Path $FilePath)) { throw "intunewin missing" }
@@ -49,10 +67,12 @@ function Add-IntuneWin32App {
         id = [guid]::NewGuid().ToString(); displayName = $DisplayName; notes = $Notes; createdDateTime = (Get-Date).ToString("o")
         hasIcon = [bool]$Icon; iconValid = $(if ($Icon) { $b = [Convert]::FromBase64String($Icon); ($b[0] -eq 0x89 -or $b[0] -eq 0xFF) } else { $false })
         arch = $RequirementRule.arch; publisher = $Publisher; assignment = $null; install = $InstallCommandLine
+        displayVersion = $AppVersion; detection = $DetectionRule.scriptContent; uploads = 1
     }
     Write-Store (@(Read-Store) + $App)
     Start-Sleep -Milliseconds 500
     $App
 }
 Export-ModuleMember -Function Get-IntuneWin32App, Remove-IntuneWin32App, New-IntuneWin32AppPackage, New-IntuneWin32AppDetectionRuleScript, New-IntuneWin32AppDetectionRuleFile,
-    New-IntuneWin32AppRequirementRule, New-IntuneWin32AppDependency, Add-IntuneWin32AppDependency, Add-IntuneWin32AppAssignmentAllUsers, Add-IntuneWin32App
+    New-IntuneWin32AppRequirementRule, New-IntuneWin32AppDependency, Add-IntuneWin32AppDependency, Add-IntuneWin32AppAssignmentAllUsers, Add-IntuneWin32App,
+    Update-IntuneWin32AppPackageFile, Set-IntuneWin32App

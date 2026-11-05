@@ -170,7 +170,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
         Test-Smoke 'Scratch has the custom icon' ($scratch.hasIcon -and $scratch.iconValid)
         Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -ne 'Chocolatey' -and $_.assignment -eq 'available' }).Count -eq 2)
-        Test-Smoke 'notes carry the package id' ($zip.notes -eq 'PoweredByChocolatey;package=7zip.install') $zip.notes
+        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -eq 'PoweredByChocolatey;package=7zip.install;version=latest;update=Startup;grace=48') $zip.notes
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'no errors in the log' (-not ($log -match 'failed')) (($log -split "`n" | Where-Object { $_ -match 'failed' }) -join ' | ')
@@ -313,7 +313,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         }
         if (-not (Test-Idle)) { return $false }
         $apps = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ })
-        $vlc = $apps | Where-Object { $_.notes -eq 'PoweredByWinget;package=VideoLAN.VLC' }
+        $vlc = $apps | Where-Object { $_.notes -eq 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
         Test-Smoke 'winget VLC has the borrowed icon and the publisher from the manifest' ($vlc.hasIcon -and $vlc.iconValid -and $vlc.publisher -and $vlc.publisher -ne '-') $vlc.publisher
         Test-Smoke 'winget app has no Chocolatey dependency step' (-not ((Get-SmokeLog) -match '\[VideoLAN\.VLC\] Adding dependency'))
@@ -346,6 +346,152 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
         Test-Smoke 'back to Chocolatey, source saved' ($script:Source -eq 'Chocolatey' -and $saved.Source -eq 'Chocolatey' -and @($ui.DgCatalog.ItemsSource).Count -eq $script:Catalog.Count)
         $true } }
+    @{ Name = 'update settings per app'; Phase = 0; Do = {
+        param($s)
+        function Get-StoreApp([string]$Package) { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like "*package=$Package;*" })[0] }
+        function Test-GeneratedScripts([string]$Folder, [string]$What) {
+            # The scripts that run on the devices must at least be valid PowerShell, without leftover placeholders
+            foreach ($file in Get-ChildItem $Folder -Filter '*.ps1' -Recurse) {
+                $errors = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+                $text = Get-Content $file.FullName -Raw
+                Test-Smoke "$What script $($file.Name) is valid" ($errors.Count -eq 0 -and $text -notmatch '__[A-Z]+__') (@($errors | ForEach-Object { $_.Message }) -join '; ')
+            }
+        }
+        switch ($s.Phase) {
+            0 {
+                # Chocolatey app with its own settings at the deployment: pinned, user prompt, 3 days
+                Show-Page 'Catalog'
+                Clear-Selection
+                $s.Package = 'putty.install'
+                $row = @($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq $s.Package })[0]
+                Test-Smoke 'deploy panel starts with the settings defaults' ($ui.CmbDeployUpdate.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
+                $ui.CmbDeployUpdate.SelectedIndex = 2
+                Test-Smoke 'grace period appears for the user prompt' ($ui.PanelDeployGrace.Visibility -eq 'Visible' -and $ui.TxtDeployUpdateHelp.Text -like '*installed anyway*')
+                $ui.TxtDeployGrace.Text = 'x'
+                try { [void](Read-PolicyControls 'Deploy'); Test-Smoke 'invalid grace period rejected' $false } catch { Test-Smoke 'invalid grace period rejected' ($_.Exception.Message -like '*90 days*') $_.Exception.Message }
+                $ui.TxtDeployGrace.Text = '3'; $ui.CmbDeployGraceUnit.SelectedIndex = 1; $ui.CmbDeployVersion.SelectedIndex = 1
+                [void]$ui.DgCatalog.SelectedItems.Add($row)
+                Test-Smoke 'test button for one selected app' $ui.BtnTestSelected.IsEnabled
+                Save-SmokeShot '12-deploy-update-settings'
+                Start-Deploy
+                $s.Phase = 1
+                return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-StoreApp $s.Package
+                Test-Smoke 'deployment carries the update settings' ($app.notes -match 'update=Custom;grace=72$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
+                Test-Smoke 'install script has the update routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 72')
+                Test-GeneratedScripts (Join-Path $script:WorkRoot "package\$($s.Package)") 'Chocolatey'
+                $s.Detection = $app.detection
+                Reset-DeployPolicy
+                Start-TenantRefresh
+                $s.Phase = 2
+                return $false
+            }
+            2 {
+                if (-not (Test-Idle 'tenant')) { return $false }
+                Show-Page 'Tenant'
+                $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq $s.Package })[0]
+                $ui.DgTenant.SelectedItem = $row
+                Test-Smoke 'tenant lists version and update mode' ($row.VersionText -eq $row.Version -and $row.UpdateText -eq 'User prompt, installed after 3 day(s)') "$($row.VersionText) / $($row.UpdateText)"
+                Test-Smoke 'panel shows the settings of the app' ($ui.GbTenantPolicy.Visibility -eq 'Visible' -and $ui.CmbTenantUpdate.SelectedIndex -eq 2 -and $ui.TxtTenantGrace.Text -eq '3' -and $ui.CmbTenantVersion.SelectedItem -eq $row.Version) "$($ui.CmbTenantUpdate.SelectedIndex)/$($ui.TxtTenantGrace.Text)/$($ui.CmbTenantVersion.SelectedItem)"
+                Save-SmokeShot '13-tenant-update-settings'
+                # Later change: updates off, follow the latest version again
+                $ui.CmbTenantUpdate.SelectedIndex = 0
+                Start-AppPolicyUpdate -App $row -Version 'latest' -Policy (Read-PolicyControls 'Tenant')
+                $s.Phase = 3
+                return $false
+            }
+            3 {
+                if (-not (Test-Idle 'policy') -or -not (Test-Idle 'tenant')) { return $false }
+                $app = Get-StoreApp $s.Package
+                Test-Smoke 'later change reaches the app in Intune' ($app.notes -match 'version=latest;update=Off' -and $app.displayVersion -eq 'latest' -and $app.uploads -eq 2) "$($app.notes) / $($app.uploads)"
+                Test-Smoke 'detection rule changes, devices apply it' ($app.detection -and $app.detection -ne $s.Detection)
+                $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
+                Test-Smoke 'new install script has the new routine' ($install -match "\`$Mode = 'Off'")
+                $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq $s.Package })[0]
+                Test-Smoke 'tenant shows the new settings' ($row.UpdateText -eq 'Off' -and $row.VersionText -eq 'Latest') "$($row.VersionText) / $($row.UpdateText)"
+                # A winget app gets the same routine
+                $vlc = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'VideoLAN.VLC' })[0]
+                Test-Smoke 'winget app is deployed with a policy' ($vlc.HasPolicy -and $vlc.UpdateText -eq 'At every startup') "$($vlc.HasPolicy) / $($vlc.UpdateText)"
+                $ui.DgTenant.SelectedItem = $vlc
+                $ui.CmbTenantUpdate.SelectedIndex = 2; $ui.TxtTenantGrace.Text = '12'; $ui.CmbTenantGraceUnit.SelectedIndex = 0
+                $s.WingetDetection = (Get-StoreApp 'VideoLAN.VLC').detection
+                Start-AppPolicyUpdate -App $vlc -Version 'latest' -Policy (Read-PolicyControls 'Tenant')
+                $s.Phase = 4
+                return $false
+            }
+            4 {
+                if (-not (Test-Idle 'policy') -or -not (Test-Idle 'tenant')) { return $false }
+                $app = Get-StoreApp 'VideoLAN.VLC'
+                Test-Smoke 'winget app changed in Intune' ($app.notes -match '^PoweredByWinget;package=VideoLAN\.VLC;version=latest;update=Custom;grace=12$' -and $app.detection -ne $s.WingetDetection) $app.notes
+                $folder = Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC'
+                $install = Get-Content (Join-Path $folder 'source\install.ps1') -Raw
+                Test-Smoke 'winget install script has the routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 12' -and $install -match 'Intune-Winget-Updates')
+                Test-Smoke 'winget prompt starts the winget task' ((Get-Content (Join-Path $folder 'source\notify.ps1') -Raw) -match '\\Intune-Winget-Updates\\Update')
+                Test-Smoke 'winget detection checks the policy' ((Get-Content (Join-Path $folder 'detection.ps1') -Raw) -match 'policy\.txt')
+                Test-GeneratedScripts $folder 'winget'
+                $s.Phase = 5
+                # Package ids with a plus survive the notes
+                Test-Smoke 'package id with plus read from the notes' ((ConvertFrom-ChocoAppNotes 'PoweredByWinget;package=Notepad++.Notepad++;version=latest;update=Off;grace=48').Package -eq 'Notepad++.Notepad++')
+                Test-Smoke 'old notes without policy keep the old behavior' ((ConvertFrom-ChocoAppNotes 'PoweredByChocolatey;package=vlc').UpdateMode -eq 'Startup' -and -not (ConvertFrom-ChocoAppNotes 'PoweredByChocolatey;package=vlc').HasPolicy)
+                # Versions to choose from, in both sources
+                $s.Waited = 0
+                return $false
+            }
+            5 {
+                $s.Waited++
+                if (-not (Test-Idle 'versions') -and $s.Waited -lt 600) { return $false }
+                $choices = @($ui.CmbTenantVersion.ItemsSource)
+                Test-Smoke 'version list has the latest and real versions' ($choices[0] -eq 'Always the latest version' -and $choices.Count -ge 2 -and $choices -contains '3.0.24') ($choices -join ', ')
+                $true
+            }
+        } } }
+    @{ Name = 'sandbox test'; Phase = 0; Do = {
+        param($s)
+        $lab = Join-Path $env:LOCALAPPDATA 'fake-sandbox'
+        switch ($s.Phase) {
+            0 {
+                # The fake studio: the smoke test must never open a real sandbox
+                Show-Page 'Settings'
+                Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
+                $ui.TxtSandboxStudioPath.Text = Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'Fakes\MsixSandboxStudio'
+                Save-Settings
+                Test-Smoke 'sandbox studio found' ((Find-SandboxStudio) -like '*Fakes*MsixSandboxStudio.psd1') (Find-SandboxStudio)
+                Test-Smoke 'settings show where the studio is' ($ui.TxtSandboxStudioState.Text -like 'Found:*Fakes*') $ui.TxtSandboxStudioState.Text
+                Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 }
+                try { Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Version 'latest' -Policy @{ UpdateMode = 'Off'; GraceHours = 24 }; Test-Smoke 'only one sandbox test at a time' $false }
+                catch { Test-Smoke 'only one sandbox test at a time' ($_.Exception.Message -like '*already running*') $_.Exception.Message }
+                $s.Phase = 1
+                return $false
+            }
+            1 {
+                if (-not (Test-Idle 'test')) { return $false }
+                Test-Smoke 'Chocolatey test ran in the lab' (Test-Path (Join-Path $lab 'Choco-putty.install\started.txt'))
+                Test-Smoke 'Chocolatey test uses the deployed scripts with Chocolatey first' ((Get-Content (Join-Path $lab 'Choco-putty.install\source\Install.ps1') -Raw) -match 'chocolatey\.org/install\.ps1' -and (Test-Path (Join-Path $lab 'Choco-putty.install\source\choco-app.ps1')) -and (Get-Content (Join-Path $lab 'Choco-putty.install\source\choco-app.ps1') -Raw) -match "\`$Mode = 'Custom'")
+                Test-Smoke 'result in the activity panel' ((Get-SmokeLog) -match 'sandbox test passed') ''
+                Start-PackageTest -Package 'VideoLAN.VLC' -Source 'Winget' -Title 'VLC' -Version 'latest' -Policy @{ UpdateMode = 'Startup'; GraceHours = 24 }
+                $s.Phase = 2
+                return $false
+            }
+            2 {
+                if (-not (Test-Idle 'test')) { return $false }
+                $source = Join-Path $lab 'Winget-VideoLAN.VLC\source'
+                Test-Smoke 'winget test ran in the lab' (Test-Path (Join-Path $lab 'Winget-VideoLAN.VLC\started.txt'))
+                Test-Smoke 'winget test sets up winget first' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'Repair-WinGetPackageManager' -and (Get-Content (Join-Path $source 'choco-app.ps1') -Raw) -match "'VideoLAN\.VLC'")
+                foreach ($file in Get-ChildItem $source -Filter '*.ps1') {
+                    $errors = $null
+                    [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+                    Test-Smoke "lab script $($file.Name) is valid" ($errors.Count -eq 0) (@($errors | ForEach-Object { $_.Message }) -join '; ')
+                }
+                $ui.TxtSandboxStudioPath.Text = ''
+                Save-Settings
+                $true
+            }
+        } } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'
         Test-Smoke 'settings show the tenant' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com') $ui.TxtTenantId.Text

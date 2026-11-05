@@ -173,9 +173,9 @@
                         <GroupBox Header="What gets deployed">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,6"
-                                           Text="install.ps1 runs choco upgrade &lt;package&gt; -y as SYSTEM in 64-bit PowerShell and registers the scheduled task \Intune-Choco-Updates\Update &lt;package&gt; on startup. Each device waits a random time after startup (default 5 to 60 minutes), so many devices behind one IP don't download at once. Uninstall removes the task again."/>
+                                           Text="install.ps1 runs choco upgrade &lt;package&gt; -y as SYSTEM in 64-bit PowerShell and sets up the update routine of the app: off, at every startup, or a user prompt with a time after which the update is installed anyway. Each device waits a random time after startup (default 5 to 60 minutes), so many devices behind one IP don't download at once. Uninstall removes the tasks again."/>
                                 <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,6"
-                                           Text="The detection script checks %ProgramData%\chocolatey\lib\&lt;package&gt;. Requirement: Windows 10 1607 or newer, architecture from the settings."/>
+                                           Text="The detection script checks that the package is installed and that the device has the update settings set in Intune. Requirement: Windows 10 1607 or newer, architecture from the settings."/>
                                 <TextBlock Style="{StaticResource Hint}"
                                            Text="Chocolatey does not recommend organizational use of its community repository and rate limits downloads. For larger environments set an internal package source (ProGet, Nexus, Azure Artifacts) in the settings; the installed software keeps its own license."/>
                             </StackPanel>
@@ -290,13 +290,55 @@
                     </StackPanel>
                     <TextBlock x:Name="TxtTenantCount" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource Hint}" Text="Sign in to see the apps this tool created in the tenant."/>
                 </Grid>
+                <!-- Update settings of the selected app: applied in Intune, devices follow on their own -->
+                <GroupBox x:Name="GbTenantPolicy" DockPanel.Dock="Bottom" Header="Update settings of the selected app" Margin="0,10,0,0" Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="TxtTenantPolicyTitle" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="220"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="240"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Version" Style="{StaticResource Label}"/>
+                                <ComboBox x:Name="CmbTenantVersion"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Automatic updates" Style="{StaticResource Label}"/>
+                                <ComboBox x:Name="CmbTenantUpdate"/>
+                            </StackPanel>
+                            <StackPanel x:Name="PanelTenantGrace" Grid.Column="4">
+                                <TextBlock Text="Installed anyway after" Style="{StaticResource Label}"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBox x:Name="TxtTenantGrace" Width="56"/>
+                                    <ComboBox x:Name="CmbTenantGraceUnit" Width="84" Margin="6,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="TxtTenantUpdateHelp" Style="{StaticResource Hint}" Margin="0,8,0,0"/>
+                        <WrapPanel Margin="0,8,0,0">
+                            <Button x:Name="BtnTenantApply" Tag="&#xE74E;" Content="Apply in Intune" Margin="0,4,4,4"
+                                    ToolTip="Rebuilds the package with these settings and changes the app in Intune. Devices then apply them on their own."/>
+                            <Button x:Name="BtnTenantRelease" Tag="&#xE898;" Content="Release update" Style="{StaticResource SecondaryButton}" Visibility="Collapsed"
+                                    ToolTip="Moves this pinned app to the newest version"/>
+                            <Button x:Name="BtnTenantTest" Tag="&#xE768;" Content="Test in sandbox" Style="{StaticResource SecondaryButton}"
+                                    ToolTip="Tests the package with these settings in a fresh Windows Sandbox. Nothing is changed in Intune."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </GroupBox>
                 <DataGrid x:Name="DgTenant">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="App in Intune" Binding="{Binding DisplayName}" Width="2*" ElementStyle="{StaticResource CellText}"/>
                         <DataGridTextColumn Header="Package" Binding="{Binding Package}" Width="1.3*" ElementStyle="{StaticResource CellText}"/>
-                        <DataGridTemplateColumn Header="Type" Width="110" SortMemberPath="StatusText" CellTemplate="{StaticResource NoteChip}"/>
-                        <DataGridTextColumn Header="Created" Binding="{Binding CreatedText}" Width="150"/>
-                        <DataGridTextColumn Header="App id" Binding="{Binding Id}" Width="2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTemplateColumn Header="Type" Width="100" SortMemberPath="StatusText" CellTemplate="{StaticResource NoteChip}"/>
+                        <DataGridTextColumn Header="Version" Binding="{Binding VersionText}" Width="110" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Newest" Binding="{Binding LatestText}" Width="1.2*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Automatic updates" Binding="{Binding UpdateText}" Width="1.6*" ElementStyle="{StaticResource CellText}"/>
+                        <DataGridTextColumn Header="Created" Binding="{Binding CreatedText}" Width="130"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </DockPanel>
@@ -360,6 +402,28 @@
                                                Text="For larger environments put an internal repository or caching proxy (ProGet, Nexus, Azure Artifacts) in front of chocolatey.org and enter it here."/>
                                 </StackPanel>
                             </GroupBox>
+                            <GroupBox Header="Updates for new apps">
+                                <StackPanel>
+                                    <TextBlock Text="Version" Style="{StaticResource Label}"/>
+                                    <ComboBox x:Name="CmbDefaultVersion" Margin="0,0,0,10"/>
+                                    <TextBlock Text="Automatic updates" Style="{StaticResource Label}"/>
+                                    <ComboBox x:Name="CmbDefaultUpdate" Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="PanelDefaultGrace" Orientation="Horizontal" Margin="0,0,0,6">
+                                        <TextBlock Text="Installed anyway after" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <TextBox x:Name="TxtDefaultGrace" Width="56"/>
+                                        <ComboBox x:Name="CmbDefaultGraceUnit" Width="84" Margin="6,0,0,0"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="TxtDefaultUpdateHelp" Style="{StaticResource Hint}" Margin="0,0,0,6"/>
+                                    <TextBlock Style="{StaticResource Hint}" Text="These are the defaults of the deploy panel. Each app has its own settings; change them later under In tenant."/>
+                                </StackPanel>
+                            </GroupBox>
+                            <GroupBox Header="Sandbox test">
+                                <StackPanel>
+                                    <TextBlock Text="Folder of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller), empty = found automatically" Style="{StaticResource Label}"/>
+                                    <TextBox x:Name="TxtSandboxStudioPath" Margin="0,0,0,6"/>
+                                    <TextBlock x:Name="TxtSandboxStudioState" Style="{StaticResource Hint}"/>
+                                </StackPanel>
+                            </GroupBox>
                             <GroupBox Header="Components">
                                 <StackPanel>
                                     <TextBlock x:Name="TxtModuleInfo" Style="{StaticResource Hint}" Foreground="{StaticResource Text}" Text="IntuneWin32App: checking ..."/>
@@ -389,6 +453,16 @@
                             <RadioButton x:Name="RbRequired" Content="Required" GroupName="Intent" ToolTip="Installed automatically on every device"/>
                             <RadioButton x:Name="RbNone" Content="None" GroupName="Intent" ToolTip="Only uploaded, assign it in Intune yourself"/>
                         </StackPanel>
+                        <TextBlock Text="Version" Style="{StaticResource Label}"/>
+                        <ComboBox x:Name="CmbDeployVersion" Margin="0,0,0,8"/>
+                        <TextBlock Text="Automatic updates" Style="{StaticResource Label}"/>
+                        <ComboBox x:Name="CmbDeployUpdate" Margin="0,0,0,6"/>
+                        <StackPanel x:Name="PanelDeployGrace" Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBlock Text="Installed anyway after" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBox x:Name="TxtDeployGrace" Width="56"/>
+                            <ComboBox x:Name="CmbDeployGraceUnit" Width="84" Margin="6,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock x:Name="TxtDeployUpdateHelp" Style="{StaticResource Hint}" Margin="0,0,0,8"/>
                         <TextBlock x:Name="TxtDeployDefaults" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
                         <TextBlock x:Name="TxtSelectionCount" FontWeight="SemiBold" Margin="0,0,0,6" Text="No app selected"/>
                         <ItemsControl x:Name="SelectionList" MaxHeight="120" Margin="0,0,0,8">
@@ -405,6 +479,7 @@
                         </ItemsControl>
                         <WrapPanel>
                             <Button x:Name="BtnDeploy" Tag="&#xE7B8;" Content="Deploy selected" IsEnabled="False" Margin="0,4,4,4"/>
+                            <Button x:Name="BtnTestSelected" Tag="&#xE768;" Content="Test in sandbox" Style="{StaticResource SecondaryButton}" IsEnabled="False"/>
                             <Button x:Name="BtnClearSelection" Content="Clear" Style="{StaticResource SmallButton}" VerticalAlignment="Center"/>
                         </WrapPanel>
                     </StackPanel>

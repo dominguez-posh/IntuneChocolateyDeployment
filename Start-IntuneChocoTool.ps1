@@ -181,6 +181,9 @@ $script:UserPool = [runspacefactory]::CreateRunspacePool(1, 3)
 $script:UserPool.Open()
 $script:MetaPool = [runspacefactory]::CreateRunspacePool(1, 3)
 $script:MetaPool.Open()
+# A sandbox test waits until you report its result (Windows Sandbox runs one at a time): it must not hold up anything else
+$script:TestPool = [runspacefactory]::CreateRunspacePool(1, 1)
+$script:TestPool.Open()
 $script:Tasks = New-Object System.Collections.ArrayList
 $script:TaskCounter = 0
 $script:MetaDirty = $false
@@ -424,8 +427,9 @@ function Complete-MetaPrefetch {
     # All lookups are done: show the result, remember it, and say so when the source could not be reached
     Update-CatalogGrid
     if ($script:SearchIds.Count) { Update-SearchRows }
+    Update-TenantRows
     Save-MetaCache
-    $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
+    $failed =@($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
     if ($failed.Count -gt 0 -and -not $script:MetaQueued) {
         Write-UiLog "Infos for $($failed.Count) package(s) could not be read ($($failed[0].Error)). 'Refresh infos' in the catalog tries again." 'Warning'
     }
@@ -592,7 +596,7 @@ foreach ($p in $pages) {
 $script:HelpTexts = @{
     Start    = @(
         @('What it does', 'Deploys Chocolatey or winget packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs as SYSTEM, a detection rule and a startup task that keeps the package up to date. Chocolatey apps depend on the Chocolatey app, which is created once per tenant; winget is part of Windows.'),
-        @('Chocolatey or winget', 'The button in the header switches the package source. Catalog and search show the packages of that source. winget installs straight from the vendors (no rate limit, Microsoft-run repository) and needs Windows 10 1809 or newer; Chocolatey can use your own repository.'),
+        @('Chocolatey or winget', 'The switch in the header sets the package source; the active one is filled light. Catalog and search show the packages of that source. winget installs straight from the vendors (no rate limit, Microsoft-run repository) and needs Windows 10 1809 or newer; Chocolatey can use your own repository.'),
         @('Requirements', 'The IntuneWin32App module 1.5.0 or newer (Settings > Components) and an Entra ID app registration with redirect URI http://localhost and the delegated Graph permissions listed in the settings. Chocolatey and Inkscape are not needed on this computer.'),
         @('Sign in', 'Sign in opens the Microsoft sign-in in your browser. The arrow next to it offers the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in.'),
         @('Readiness', 'All items should be green before the first deployment. A red item says why and has the button that fixes it. Set up everything runs all fixes one after another: modules, app registration (one sign-in with a Global Administrator, admin consent included), sign-in, Chocolatey app.'))
@@ -600,6 +604,8 @@ $script:HelpTexts = @{
         @('Catalog', 'A curated list of common packages by category (catalog.json next to the scripts, edit it to add your own; "winget" holds the id of the same app in winget). Versions, publishers and icons come from the active source and are cached for 24 hours.'),
         @('Selecting', 'Click an app for its details. Ctrl+click or Shift+click selects several apps; the selection is kept while you switch categories or search. Select shown picks every row of the current view.'),
         @('Deploy', 'Choose the assignment (Available in the Company Portal, Required on every device, or None) and click Deploy selected. Deployments run one after another in the background; progress shows in the activity panel.'),
+        @('Updates per app', 'Version: always the latest, or pinned to today''s version (you release newer ones under In tenant). Automatic updates: Off, at every startup, or user prompt with a time after which the update is installed anyway. The settings apply to the apps of this deployment and can be changed later under In tenant.'),
+        @('Test in sandbox', 'Tests one selected package with these settings in a fresh Windows Sandbox, before it goes to Intune: you run Install, Detect and Uninstall as SYSTEM with one click each and report the result there. Needs MSIX Sandbox Studio and Windows Sandbox, no sign-in.'),
         @('License notes', 'Packages whose software license restricts business use or distribution carry a note. The tool deploys them only after a confirmation; the license is still yours to clear.'))
     Search   = @(
         @('Search', 'Searches the active source by name or package id: the Chocolatey community repository (or your metadata feed) with download counts, or the winget community repository with publisher and license from its manifests.'),
@@ -607,10 +613,15 @@ $script:HelpTexts = @{
         @('Custom icon', 'If a package has no icon, or you want your own, choose a PNG, JPEG, SVG or ICO file in the details. It is used for this deployment only.'))
     Tenant   = @(
         @('In tenant', 'The Win32 apps this tool created in the tenant, recognized by their notes, from both sources. The Chocolatey app is the dependency of the Chocolatey apps and stays while one of them exists.'),
-        @('Update or remove', 'Open in Intune admin center opens the selected app. An app that already exists is skipped on deployment; remove it in Intune first to deploy it again.'))
+        @('Update settings', 'Select an app: below the list you change its version and automatic updates. Apply in Intune rebuilds the package and changes the app; devices no longer detect it as current and run its install script again, which sets up the new update routine.'),
+        @('Release an update', 'A pinned app whose package has a newer version shows Release <version>. Devices then install it according to the update mode of the app. winget cannot go back to an older version, a pinned winget app only moves forward.'),
+        @('Test in sandbox', 'Tests the selected app with the settings in the panel in a fresh Windows Sandbox. Nothing is changed in Intune.'),
+        @('Remove', 'Open in Intune admin center opens the selected app. An app that already exists is skipped on deployment; remove it first to deploy it again.'))
     Settings = @(
         @('Tenant and client ID', 'The tenant (domain or ID) and the application (client) ID of your app registration. Both are saved in %LOCALAPPDATA%\IntuneChocoDeployment\settings.json and also used by the command line functions.'),
         @('Deployment defaults', 'Architecture of the requirement rule (x64x86 fits most devices, AllWithARM64 adds ARM devices), the default assignment and the random wait of the startup update task.'),
+        @('Updates for new apps', 'What the deploy panel starts with. Every app has its own settings: choose them when deploying, change them later under In tenant.'),
+        @('Sandbox test', 'The Test buttons use the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) and need Windows Sandbox. The tool finds the studio next to this folder, in C:\git\WindowsSandboxMSIXInstaller or as installed module.'),
         @('Package sources', 'The metadata feed is read on this computer. The package source is what choco uses on the devices (--source); the download URL is where the Chocolatey bootstrap gets its nupkg. Both empty = community repository.'),
         @('Rate limits', 'Chocolatey rate limits downloads from its community repository and does not recommend it for organizations. Put an internal repository or caching proxy in front for larger environments.'))
 }
@@ -950,6 +961,9 @@ function Update-SelectionView {
     $ui.BtnDeploy.Content = if ($count -gt 1) { "Deploy $count apps" } else { 'Deploy selected' }
     $ui.BtnDeploy.ToolTip = if (-not (Test-SignedIn)) { 'Sign in first' } elseif (-not $script:ModuleState.Ok) { 'Install the IntuneWin32App module first (Settings)' }
                             elseif ($wingetMissing) { 'Install the Microsoft.WinGet.Client module first (Settings)' } else { 'Creates the apps in Intune one after another' }
+    $ui.BtnTestSelected.IsEnabled = $count -eq 1 -and -not (Test-TaskRunning 'test') -and -not $wingetMissing
+    $ui.BtnTestSelected.ToolTip = if (Test-TaskRunning 'test') { 'A sandbox test is running (Windows Sandbox runs one at a time)' } elseif ($count -ne 1) { 'Select exactly one app to test' }
+                                  else { 'Tests this package with these settings in a fresh Windows Sandbox. No sign-in needed, nothing is changed in Intune.' }
     $how = if ($script:Source -eq 'Winget') { 'winget as SYSTEM, Windows 10 1809 or newer' } elseif ($script:Settings.PackageSource) { "choco from $($script:Settings.PackageSource)" } else { 'choco from the community repository' }
     $ui.TxtDeployDefaults.Text = "Installs with $how. Architecture $($script:Settings.Architecture), update task waits $($script:Settings.UpdateDelayMinMinutes) to $($script:Settings.UpdateDelayMaxMinutes) min after startup (Settings)."
 }
@@ -1112,6 +1126,101 @@ $ui.TxtSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { try { Start
 # ---------------------------------------------------------------- deploy
 function Get-Intent { if ($ui.RbRequired.IsChecked) { 'Required' } elseif ($ui.RbNone.IsChecked) { 'None' } else { 'Available' } }
 
+# ---------------------------------------------------------------- update settings (deploy panel, In tenant, Settings)
+# The three places use the same controls: Cmb<Place>Update, Panel<Place>Grace, Txt<Place>Grace, Cmb<Place>GraceUnit, Txt<Place>UpdateHelp
+$script:PolicyModes = @('Off', 'Startup', 'Custom')
+$script:PolicyModeLabels = @('Off', 'At every startup', 'User prompt, then automatic')
+$script:PolicyModeHelp = @{
+    Off     = 'No automatic updates. A version you release here is installed by Intune right away.'
+    Startup = 'Updated at every startup of the device, after a random wait.'
+    Custom  = 'The user is offered the update and can install it at once. When the time is up it is installed anyway, without a restart.'
+}
+foreach ($place in 'Deploy', 'Tenant', 'Default') {
+    $ui["Cmb${place}Update"].ItemsSource = $script:PolicyModeLabels
+    $ui["Cmb${place}GraceUnit"].ItemsSource = @('hours', 'days')
+    $ui["Cmb${place}Update"].Add_SelectionChanged({
+        param($src)
+        Sync-PolicyControls ($src.Name -replace '^Cmb|Update$', '')
+    })
+}
+$ui.CmbDeployVersion.ItemsSource = @('Always the latest version', 'Pin the current version')
+$ui.CmbDefaultVersion.ItemsSource = @('Always the latest version', 'Pin the current version')
+
+function Sync-PolicyControls([string]$Place) {
+    $index = [Math]::Max(0, $ui["Cmb${Place}Update"].SelectedIndex)
+    $mode = $script:PolicyModes[$index]
+    $ui["Panel${Place}Grace"].Visibility = if ($mode -eq 'Custom') { 'Visible' } else { 'Collapsed' }
+    $ui["Txt${Place}UpdateHelp"].Text = $script:PolicyModeHelp[$mode]
+}
+
+function Set-PolicyControls([string]$Place, [string]$Mode, [int]$GraceHours) {
+    $ui["Cmb${Place}Update"].SelectedIndex = [Math]::Max(0, [array]::IndexOf($script:PolicyModes, $Mode))
+    $inDays = $GraceHours -gt 0 -and $GraceHours % 24 -eq 0
+    $ui["Txt${Place}Grace"].Text = [string]$(if ($inDays) { $GraceHours / 24 } else { $GraceHours })
+    $ui["Cmb${Place}GraceUnit"].SelectedIndex = if ($inDays) { 1 } else { 0 }
+    Sync-PolicyControls $Place
+}
+
+function Read-PolicyControls([string]$Place) {
+    # Update mode and grace period from the controls; the grace period only has to be valid when it is used
+    $mode = $script:PolicyModes[[Math]::Max(0, $ui["Cmb${Place}Update"].SelectedIndex)]
+    $text = ([string]$ui["Txt${Place}Grace"].Text).Trim()
+    $factor = if ($ui["Cmb${Place}GraceUnit"].SelectedIndex -eq 1) { 24 } else { 1 }
+    $hours = if ($text -match '^\d{1,5}$') { [int]$text * $factor } else { 0 }
+    if ($hours -lt 1 -or $hours -gt 2160) {
+        if ($mode -eq 'Custom') { throw 'The time until the update is installed anyway must be between 1 hour and 90 days.' }
+        $hours = [int]$script:Settings.GraceHours
+    }
+    @{ UpdateMode = $mode; GraceHours = $hours }
+}
+
+function Format-UpdateText([string]$Mode, [int]$GraceHours) {
+    switch ($Mode) {
+        'Off' { 'Off' }
+        'Custom' { 'User prompt, installed after ' + $(if ($GraceHours % 24 -eq 0) { "$($GraceHours / 24) day(s)" } else { "$GraceHours hour(s)" }) }
+        default { 'At every startup' }
+    }
+}
+
+function Compare-PackageVersion([string]$A, [string]$B) {
+    # Numerically, part by part (1.10 is newer than 1.9); > 0 when A is newer
+    $pa = @($A -split '[.+-]' | ForEach-Object { $n = 0; [void][int64]::TryParse($_, [ref]$n); $n })
+    $pb = @($B -split '[.+-]' | ForEach-Object { $n = 0; [void][int64]::TryParse($_, [ref]$n); $n })
+    for ($i = 0; $i -lt [Math]::Max($pa.Count, $pb.Count); $i++) {
+        $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+        $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+        if ($x -ne $y) { return $(if ($x -gt $y) { 1 } else { -1 }) }
+    }
+    0
+}
+
+# ---------------------------------------------------------------- sandbox test
+function Start-PackageTest {
+    param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy)
+    if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
+    if (-not (Find-SandboxStudio)) { throw 'MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Enter its folder under Settings > Sandbox test.' }
+    if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
+    $name = if ($Title) { $Title } else { $Package }
+    $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
+    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours) Test-IntuneChocoPackage -ChocoName $Package -Source $Source -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours'
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
+        param($Result, $Job)
+        $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
+        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error' }
+        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success' }
+        else { Write-UiLog "[$($Job.Package)] sandbox test failed: $($outcome.Message)" 'Warning' }
+        Update-SelectionView
+        Update-TenantButtons
+    })
+    Update-SelectionView
+    Update-TenantButtons
+}
+Add-Click $ui.BtnTestSelected {
+    if ($script:Selected.Count -ne 1) { throw 'Select exactly one app to test.' }
+    $item = @($script:Selected.Values)[0]
+    Start-PackageTest -Package $item.Id -Source $item.Source -Title $item.Title -Version $(if ($ui.CmbDeployVersion.SelectedIndex -eq 1) { 'current' } else { 'latest' }) -Policy (Read-PolicyControls 'Deploy')
+}
+
 function Start-Deploy {
     if ($script:Selected.Count -eq 0) { throw 'Select at least one app first.' }
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
@@ -1128,10 +1237,12 @@ function Start-Deploy {
     $intent = Get-Intent
     if ($intent -eq 'Required' -and -not (Confirm-Action "Required installs the $($items.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment')) { return }
     if (@($items | Where-Object { $_.Source -eq 'Winget' }).Count -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
+    $policy = Read-PolicyControls 'Deploy'
+    $version = if ($ui.CmbDeployVersion.SelectedIndex -eq 1) { 'current' } else { 'latest' }
     Update-UiToken
     $work = @'
-param($Id, $Source, $Assignment, $Architecture, $IconBase64)
-$Params = @{ Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true }
+param($Id, $Source, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version)
+$Params = @{ Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true; UpdateMode = $UpdateMode; GraceHours = $GraceHours; Version = $Version }
 if ($IconBase64) { $Params.IconBase64 = $IconBase64 }
 if ($Source -eq 'Winget') { New-IntuneWin32WingetApplication -WingetId $Id @Params }
 else { New-IntuneWin32ChocoApplication -ChocoName $Id @Params }
@@ -1154,9 +1265,9 @@ else { New-IntuneWin32ChocoApplication -ChocoName $Id @Params }
             }
             $script:TenantApps = $null
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count) { Start-TenantRefresh }
-        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $intent; Architecture = $script:Settings.Architecture; IconBase64 = $icon })
+        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $intent; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version })
     }
-    Write-UiLog "$($items.Count) deployment(s) queued, assignment $intent." 'Info'
+    Write-UiLog "$($items.Count) deployment(s) queued, assignment $intent, updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)." 'Info'
     Clear-Selection
 }
 Add-Click $ui.BtnDeploy { Start-Deploy }
@@ -1178,7 +1289,10 @@ function Start-TenantRefresh {
     Update-UiToken
     $work = @'
 Get-IntuneChocoTenantApps | ForEach-Object {
-    [pscustomobject]@{ Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; Source = [string]$_.Source; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created }
+    [pscustomobject]@{
+        Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; Source = [string]$_.Source; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created
+        Version = [string]$_.Version; UpdateMode = [string]$_.UpdateMode; GraceHours = [int]$_.GraceHours; HasPolicy = [bool]$_.HasPolicy
+    }
 }
 '@
     [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -NeedsAuth -Work $work -OnDone {
@@ -1190,9 +1304,18 @@ Get-IntuneChocoTenantApps | ForEach-Object {
                 Id = $_.Id; DisplayName = $_.DisplayName; Package = $_.Package; Source = $_.Source; IsChocolatey = $_.IsChocolatey; CreatedText = $created
                 StatusText = $(if ($_.IsChocolatey) { 'Dependency' } elseif ($_.Source -eq 'Winget') { 'winget' } else { 'Chocolatey' })
                 Status = $(if ($_.IsChocolatey) { 'assigned' } elseif ($_.Source -eq 'Winget') { 'available' } else { '' })
+                Version = $_.Version; UpdateMode = $_.UpdateMode; GraceHours = $_.GraceHours; HasPolicy = $_.HasPolicy
+                VersionText = $(if ($_.IsChocolatey) { '' } elseif ($_.Version) { $_.Version } else { 'Latest' })
+                UpdateText = $(if ($_.IsChocolatey -or -not $_.Package) { '' } else { (Format-UpdateText $_.UpdateMode $_.GraceHours) + $(if ($_.HasPolicy) { '' } else { ' (older app)' }) })
+                LatestVersion = ''; LatestText = ''; UpdateAvailable = $false
             }
         } | Sort-Object { -not $_.IsChocolatey }, DisplayName)
-        $ui.DgTenant.ItemsSource = $script:TenantApps
+        Update-TenantRows -Force
+        # The newest versions, for "update available"
+        foreach ($source in 'Chocolatey', 'Winget') {
+            $ids = @($script:TenantApps | Where-Object { $_.Package -and -not $_.IsChocolatey -and $_.Source -eq $source } | ForEach-Object { $_.Package })
+            if ($ids.Count) { Start-MetaPrefetch -Ids $ids -Source $source }
+        }
         $apps = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count
         $ui.TxtTenantCount.Text = "$apps app(s) created by this tool" + $(if (@($script:TenantApps | Where-Object IsChocolatey).Count) { ', Chocolatey deployed' } else { ', Chocolatey not deployed yet' })
         # Catalog and search mark what is already there, including apps created in the last minutes that Graph
@@ -1211,12 +1334,115 @@ Get-IntuneChocoTenantApps | ForEach-Object {
 }
 Add-Click $ui.BtnTenantRefresh { Start-TenantRefresh }
 
+function Update-TenantRows {
+    # Newest version per app from the package infos; the grid is only rebuilt when something changed
+    param([switch]$Force)
+    if ($null -eq $script:TenantApps) { return }
+    $changed = $false
+    foreach ($app in $script:TenantApps) {
+        if (-not $app.Package -or $app.IsChocolatey) { continue }
+        $meta = $script:Shared.Meta[(Get-MetaKey $app.Package $app.Source)]
+        $latest = if ($meta -and $meta.Found) { [string]$meta.Version } else { '' }
+        if ($latest -eq $app.LatestVersion) { continue }
+        $changed = $true
+        $app.LatestVersion = $latest
+        $app.UpdateAvailable = [bool]($app.Version -and $latest -and (Compare-PackageVersion $latest $app.Version) -gt 0)
+        $app.LatestText = if ($app.UpdateAvailable) { "$latest (update to release)" } else { $latest }
+    }
+    if ($Force) {
+        # New rows from the tenant: the selected app stays selected, with its new values
+        $selected = if ($ui.DgTenant.SelectedItem) { $ui.DgTenant.SelectedItem.Id } else { $null }
+        $ui.DgTenant.ItemsSource = $script:TenantApps
+        if ($selected) { $ui.DgTenant.SelectedItem = @($script:TenantApps | Where-Object { $_.Id -eq $selected })[0] }
+    }
+    elseif ($changed) { $ui.DgTenant.Items.Refresh() }   # same rows: selection and what is typed in the panel stay
+    Update-TenantButtons
+}
+
+function Set-TenantVersionChoices($App, [string[]]$Versions) {
+    # "Always the latest version", then the versions a device can be moved to; the current pin stays selectable
+    $list = @('Always the latest version') + @($Versions | Where-Object { $_ })
+    if ($App.Version -and $list -notcontains $App.Version) { $list += $App.Version }
+    $ui.CmbTenantVersion.ItemsSource = $list
+    $ui.CmbTenantVersion.SelectedIndex = if ($App.Version) { [array]::IndexOf($list, $App.Version) } else { 0 }
+}
+
+function Show-TenantPolicy($App) {
+    # Fills the panel when another app is selected; changes in the panel stay while the same app is refreshed
+    if ($script:TenantPolicyApp -eq "$($App.Id)|$($App.Version)|$($App.UpdateMode)|$($App.GraceHours)") { return }
+    $script:TenantPolicyApp = "$($App.Id)|$($App.Version)|$($App.UpdateMode)|$($App.GraceHours)"
+    $ui.TxtTenantPolicyTitle.Text = "$($App.DisplayName)  ($($App.Package), $($App.StatusText))"
+    Set-PolicyControls 'Tenant' $App.UpdateMode $App.GraceHours
+    Set-TenantVersionChoices $App @()
+    [void](Start-UiTask -Kind 'versions' -Title 'Reading the package versions' -Package $App.Package -Pool $script:MetaPool -Hidden -Arguments @{ Package = $App.Package; Source = $App.Source; AppId = $App.Id } `
+        -Work 'param($Package, $Source, $AppId) Get-IntuneChocoPackageVersions -Package $Package -Source $Source' -OnDone {
+            param($Result, $Job)
+            $now = $ui.DgTenant.SelectedItem
+            if ($Job.Status -ne 'succeeded' -or -not $now -or $now.Package -ne $Job.Package) { return }
+            $chosen = $ui.CmbTenantVersion.SelectedItem
+            Set-TenantVersionChoices $now @($Result | ForEach-Object { [string]$_ })
+            if ($chosen -and @($ui.CmbTenantVersion.ItemsSource) -contains $chosen) { $ui.CmbTenantVersion.SelectedItem = $chosen }
+        })
+}
+$script:TenantPolicyApp = ''
+
 function Update-TenantButtons {
-    $on = [bool]$ui.DgTenant.SelectedItem
+    $app = $ui.DgTenant.SelectedItem
+    $on = [bool]$app
     $ui.BtnTenantOpen.IsEnabled = $on; $ui.BtnTenantCopy.IsEnabled = $on
     $ui.BtnTenantRemove.IsEnabled = $on -and (Test-SignedIn) -and -not (Test-TaskRunning 'remove')
+    # Update settings for the apps with a package; the Chocolatey app itself has none
+    $editable = $on -and $app.Package -and -not $app.IsChocolatey
+    $ui.GbTenantPolicy.Visibility = if ($editable) { 'Visible' } else { 'Collapsed' }
+    if (-not $editable) { $script:TenantPolicyApp = ''; return }
+    Show-TenantPolicy $app
+    $busy = Test-TaskRunning 'policy'
+    $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
+    $ui.BtnTenantRelease.Visibility = if ($app.UpdateAvailable) { 'Visible' } else { 'Collapsed' }
+    $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
+    $ui.BtnTenantRelease.Content = if ($app.UpdateAvailable) { "Release $($app.LatestVersion)" } else { 'Release update' }
+    $ui.BtnTenantTest.IsEnabled = -not (Test-TaskRunning 'test')
 }
-$ui.DgTenant.Add_SelectionChanged({ Update-TenantButtons })
+$ui.DgTenant.Add_SelectionChanged({ try { Update-TenantButtons } catch { Show-Error $_.Exception.Message } })
+
+function Start-AppPolicyUpdate {
+    # Rebuilds the package with the new settings and changes the app in Intune; devices follow on their own
+    param([Parameter(Mandatory)]$App, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][hashtable]$Policy)
+    if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
+    Update-UiToken
+    $arguments = @{ AppId = $App.Id; Source = $App.Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
+    [void](Start-UiTask -Kind 'policy' -Title "Update settings of $($App.DisplayName): $(Format-UpdateText $Policy.UpdateMode $Policy.GraceHours), version $Version" -Package $App.Package -NeedsAuth -Arguments $arguments `
+        -Work 'param($AppId, $Source, $Version, $UpdateMode, $GraceHours) Update-IntuneChocoApp -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Package)] update settings applied in Intune. Devices pick them up at their next Intune check." 'Success' }
+            else { Write-UiLog "[$($Job.Package)] the update settings could not be applied, see above." 'Error' }
+            $script:TenantApps = $null
+            Start-TenantRefresh
+        })
+    Update-TenantButtons
+}
+Add-Click $ui.BtnTenantApply {
+    $app = $ui.DgTenant.SelectedItem
+    if (-not $app) { return }
+    $policy = Read-PolicyControls 'Tenant'
+    $version = if ($ui.CmbTenantVersion.SelectedIndex -le 0) { 'latest' } else { [string]$ui.CmbTenantVersion.SelectedItem }
+    $text = "Change '$($app.DisplayName)' in Intune?`n`nVersion: $(if ($version -eq 'latest') { 'always the latest' } else { $version })`nAutomatic updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)`n`nThe package is rebuilt and uploaded. Devices no longer detect the app as current and run its install script again, which applies these settings."
+    if (-not (Confirm-Action $text 'Apply update settings')) { return }
+    Start-AppPolicyUpdate -App $app -Version $version -Policy $policy
+}
+Add-Click $ui.BtnTenantRelease {
+    $app = $ui.DgTenant.SelectedItem
+    if (-not $app -or -not $app.UpdateAvailable) { return }
+    $how = Format-UpdateText $app.UpdateMode $app.GraceHours
+    if (-not (Confirm-Action "Release version $($app.LatestVersion) of '$($app.DisplayName)'?`n`nIt goes from $($app.Version) to $($app.LatestVersion). Devices install it according to the update mode of the app: $how." 'Release update')) { return }
+    Start-AppPolicyUpdate -App $app -Version $app.LatestVersion -Policy @{ UpdateMode = $app.UpdateMode; GraceHours = $app.GraceHours }
+}
+Add-Click $ui.BtnTenantTest {
+    $app = $ui.DgTenant.SelectedItem
+    if (-not $app) { return }
+    $version = if ($ui.CmbTenantVersion.SelectedIndex -le 0) { 'latest' } else { [string]$ui.CmbTenantVersion.SelectedItem }
+    Start-PackageTest -Package $app.Package -Source $app.Source -Title $app.DisplayName -Version $version -Policy (Read-PolicyControls 'Tenant')
+}
 Add-Click $ui.BtnTenantRemove {
     $app = $ui.DgTenant.SelectedItem
     if (-not $app) { return }
@@ -1257,13 +1483,31 @@ function Update-SettingsView {
     $ui.CmbArchitecture.SelectedItem = $s.Architecture
     $ui.CmbAssignment.SelectedItem = $s.Assignment
     $ui.TxtSettingsPath.Text = $script:SettingsPath
+    Set-PolicyControls 'Default' $s.UpdateMode $s.GraceHours
+    $ui.CmbDefaultVersion.SelectedIndex = if ($s.VersionMode -eq 'Pinned') { 1 } else { 0 }
+    $ui.TxtSandboxStudioPath.Text = $s.SandboxStudioPath
+    Update-SandboxStudioState
     Update-ModuleState
+}
+function Update-SandboxStudioState {
+    $found = Find-SandboxStudio
+    $ui.TxtSandboxStudioState.Text = if ($found) { "Found: $found" } else { 'Not found: enter the folder of WindowsSandboxMSIXInstaller. The Test buttons need it and Windows Sandbox.' }
+}
+function Reset-DeployPolicy {
+    # The deploy panel starts with the defaults from the settings
+    Set-PolicyControls 'Deploy' $script:Settings.UpdateMode $script:Settings.GraceHours
+    $ui.CmbDeployVersion.SelectedIndex = if ($script:Settings.VersionMode -eq 'Pinned') { 1 } else { 0 }
 }
 $ui.CmbArchitecture.ItemsSource = @('x64x86', 'x64', 'x86', 'arm64', 'AllWithARM64')
 $ui.CmbAssignment.ItemsSource = @('Available', 'Required', 'None')
 
 function Save-Settings {
+    $defaults = Read-PolicyControls 'Default'
     $new = [ordered]@{
+        UpdateMode            = $defaults.UpdateMode
+        GraceHours            = $defaults.GraceHours
+        VersionMode           = $(if ($ui.CmbDefaultVersion.SelectedIndex -eq 1) { 'Pinned' } else { 'Latest' })
+        SandboxStudioPath     = $ui.TxtSandboxStudioPath.Text
         TenantID              = $ui.TxtTenantId.Text
         ClientID              = $ui.TxtClientId.Text
         MetadataFeed          = $ui.TxtMetadataFeed.Text
@@ -1281,6 +1525,8 @@ function Save-Settings {
     if ($feedChanged) { $script:Shared.Meta.Clear(); $script:MetaDirty = $true }
     Write-UiLog "Settings saved to $script:SettingsPath." 'Success'
     switch ($script:Settings.Assignment) { 'Required' { $ui.RbRequired.IsChecked = $true } 'None' { $ui.RbNone.IsChecked = $true } default { $ui.RbAvailable.IsChecked = $true } }
+    Reset-DeployPolicy
+    Update-SandboxStudioState
     Update-ConnectionStatus
 }
 Add-Click $ui.BtnSaveSettings { Save-Settings }
@@ -1489,9 +1735,9 @@ Add-Click $ui.BtnLogToggle {
 # ---------------------------------------------------------------- run
 $window.Add_Closing({
     param($s, $e)
-    $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -eq 'deploy' })
+    $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -in 'deploy', 'policy' })
     if ($running.Count -gt 0 -and -not $env:INTUNECHOCO_SMOKE) {
-        $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) deployment(s) are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'Intune Chocolatey Deployment', 'YesNo', 'Warning')
+        $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'Intune Chocolatey Deployment', 'YesNo', 'Warning')
         if ($answer -ne 'Yes') { $e.Cancel = $true }
     }
 })
@@ -1510,6 +1756,7 @@ Write-UiLog "Intune Chocolatey Deployment $script:ToolVersion started. Work fold
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it under Settings > Components." 'Warning' }
 Update-ConnectionStatus
 Show-Page 'Start'
+Reset-DeployPolicy
 Set-PackageSource $script:Source -NoSave
 Start-CatalogPrefetch
 if (-not (Test-TaskRunning 'meta')) { Start-IconRender }   # all infos came from the cache
