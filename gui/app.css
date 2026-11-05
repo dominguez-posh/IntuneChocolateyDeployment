@@ -367,8 +367,12 @@ a:hover { text-decoration: underline; }
 .form .help { color: var(--text-3); font-size: 12px; max-width: 520px; }
 .range { display: flex; gap: 8px; align-items: center; }
 .range .input { width: 90px !important; }
+.range .select { width: auto !important; }
 .steps { margin: 6px 0 0; padding-left: 20px; color: var(--text-2); }
 .steps li { margin-bottom: 6px; }
+/* Row actions in tables (Release, Update settings, Test, Intune) */
+.table .toolbar { margin-bottom: 0; justify-content: flex-end; gap: 6px; flex-wrap: nowrap; }
+.modal .form { margin-top: 12px; }
 .code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; background: var(--stroke); padding: 1px 5px; border-radius: 4px; }
 details.help-box { margin-top: 12px; }
 details.help-box summary { cursor: pointer; color: var(--accent); font-weight: 600; }

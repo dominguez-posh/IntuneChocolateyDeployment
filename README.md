@@ -48,9 +48,15 @@ a local server on `http://localhost` with a random port, protected by a session 
   assignment (available, required, none) and deploy them in one go.
 - **Search**: the whole Chocolatey community repository.
 - **Details**: description, links, license note, and a custom icon for packages without one (PNG, JPEG, SVG, ICO).
-- **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center.
+- **In tenant**: the Win32 apps this tool created, with the released version, the update mode and a link to each app
+  in the Intune admin center. When a newer version exists on the feed, **Release** builds and uploads the new package;
+  **Update settings** changes the update mode and grace period of an app with one click (see [Updates](#updates)).
+- **Test**: installs the package in a Windows Sandbox before it goes to Intune, via
+  [MSIX Sandbox Studio](https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller) (Win32 Test Lab). The tool finds
+  it next to this repo, in `C:\git\WindowsSandboxMSIXInstaller` or as installed module; otherwise set the path in Settings.
 - **Activity**: deployments run one after another in the background, each with its full log.
-- **Settings**: tenant and client ID, deployment defaults, update delay and package sources.
+- **Settings**: tenant and client ID, deployment defaults, update defaults for new apps, update delay, package sources
+  and the Sandbox Studio path.
   Saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and also used by the command line functions.
 
 ## How to Use (command line)
@@ -111,12 +117,47 @@ New-IntuneWin32ChocoApplication "vlc", "7zip.install" -NoIconPrompt
 If a package has no icon on chocolatey.org, you can pick a file (Cancel creates the app without icon),
 pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPrompt`.
 
+Update mode, grace period and version can be set per app:
+```powershell
+New-IntuneWin32ChocoApplication "vlc" -UpdateMode Custom -GraceHours 48
+New-IntuneWin32ChocoApplication "7zip.install" -Version current -UpdateMode Off   # pin today's version
+Update-IntuneChocoApp -AppId <intune app id> -Version 3.0.21                      # release a new version
+Update-IntuneChocoApp -AppId <intune app id> -UpdateMode Startup                  # change only the settings
+Test-IntuneChocoPackage -ChocoName vlc                                            # Windows Sandbox test
+```
+
+### Updates
+Each app has its own update mode, stored in the app notes in Intune (`update=` and `grace=`):
+
+| Mode | Behaviour on the device |
+|------|-------------------------|
+| **Off** | No automatic updates. The device gets a new version only when you release it in the tool. |
+| **Startup** | The update is installed at the next PC start (after the random delay). |
+| **Custom** | Checked at startup and every 4 hours. When an update is available, signed-in users get a popup and can install it right away or snooze it. After the grace period (hours or days) it is installed automatically, without waiting for a restart. |
+
+The version is either **latest** (the device follows the newest version on the feed) or **pinned** to one version.
+For pinned apps, **Release** in the tool (or `Update-IntuneChocoApp -Version`) moves the app to a new version. The
+update mode then decides when devices install it.
+
+Settings changes take effect without redeploying. The detection script compares a fingerprint of the policy with
+`%ProgramData%\IntuneChocoUpdates\<package>\policy.txt`. After a change in Intune, detection fails, Intune runs
+`install.ps1` again, and that applies the new settings.
+
+Apps created by older versions keep working. They count as **latest / Startup** until you change their settings.
+
 ### What gets deployed
-- `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and registers the scheduled task
-  `\Intune-Choco-Updates\Update <package> on startup`. Each device waits a random 5 to 60 minutes after startup
-  (configurable), so many devices behind one IP don't download at the same time. Uninstall removes the task again.
+- `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and copies `update.ps1` and
+  `notify.ps1` to `%ProgramData%\IntuneChocoUpdates\<package>`. It also registers the scheduled tasks under
+  `\Intune-Choco-Updates\`:
+  - `Update <package> on startup` (Startup and Custom modes). Each device waits a random 5 to 60 minutes after startup
+    (configurable), so many devices behind one IP don't download at the same time.
+  - `Check <package> for updates` (Custom mode) runs every 4 hours.
+  - `Notify <package> update` (Custom mode) shows the popup in the user session.
+  - `Update <package> now` (Custom mode) is started by the popup. Users may start it, and it runs as SYSTEM.
+
+  Uninstall removes the tasks and the folder again.
 - With a package source configured, install and update task use `choco --source <your feed>`.
-- The detection script checks `%ProgramData%\chocolatey\lib\<package>`.
+- The detection script checks `%ProgramData%\chocolatey\lib\<package>` and the policy fingerprint.
 - The app gets a dependency to the Chocolatey app (auto install), which is deployed once per tenant.
   Its installer retries with a random wait when the Chocolatey download is rate limited.
 - Requirement: Windows 10 1607 or newer (includes Windows 11), x64/x86. Use `-Architecture AllWithARM64` for ARM devices.

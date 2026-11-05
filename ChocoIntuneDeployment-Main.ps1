@@ -41,7 +41,20 @@ $script:DefaultSettings = [ordered]@{
     # The startup update task waits a random time in this range, so devices behind one IP don't download at once
     UpdateDelayMinMinutes = 5
     UpdateDelayMaxMinutes = 60
+    # Defaults for new apps, changeable per app afterwards:
+    #   Off      no automatic updates; a version released in this tool is installed right away by Intune
+    #   Startup  update at every startup (random delay above)
+    #   Custom   the user is offered the update and can install it at once; after GraceHours it is installed anyway
+    UpdateMode            = "Startup"
+    GraceHours            = 48
+    # Latest = devices follow the newest package version; Pinned = new apps stay on today's version until you release one
+    VersionMode           = "Latest"
+    # Folder of WindowsSandboxMSIXInstaller (MSIX Sandbox Studio) for the Test button; empty = found automatically
+    SandboxStudioPath     = ""
 }
+$script:UpdateModes = "Off", "Startup", "Custom"
+# Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
+$script:DeviceScriptRevision = 2
 
 # Packages whose software license restricts business use or distribution
 $script:LicenseNotes = @{
@@ -86,6 +99,9 @@ function Save-IntuneChocoSettings {
     if ($Clean.Assignment -notin "Available", "Required", "None") { throw "Unknown assignment '$($Clean.Assignment)'" }
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
+    if ($Clean.UpdateMode -notin $script:UpdateModes) { throw "Unknown update mode '$($Clean.UpdateMode)'" }
+    if ($Clean.GraceHours -lt 1 -or $Clean.GraceHours -gt 2160) { throw "The grace period must be between 1 hour and 90 days" }
+    if ($Clean.VersionMode -notin "Latest", "Pinned") { throw "Unknown version mode '$($Clean.VersionMode)'" }
 
     New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
     $Clean | ConvertTo-Json | Set-Content -Path $script:SettingsPath -Encoding UTF8
@@ -100,6 +116,56 @@ function Get-ChocoLicenseNote {
     if (-not $ChocoName) { return $null }
     return $script:LicenseNotes[$ChocoName.ToLower()]
 }#Returns a license warning for the package, or $null
+
+function New-ChocoAppPolicy {
+    <#
+        The update policy of one app: version (empty = always the latest), update mode, grace period and the
+        values baked into the device scripts. The fingerprint goes into the detection rule: when it changes in
+        Intune, devices no longer detect the app as current and run install.ps1 again, which applies the policy.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Package,
+        [string]$Version = "",
+        [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode = "Startup",
+        [ValidateRange(1, 2160)][int]$GraceHours = 48,
+        [string]$PackageSource = "",
+        [int]$UpdateDelayMinMinutes = 5,
+        [int]$UpdateDelayMaxMinutes = 60
+    )
+    if ($Version -eq "latest") { $Version = "" }
+    if ($Version -and $Version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') { throw "'$Version' is not a valid package version" }
+    $Text = "$($Package.ToLower())|$Version|$UpdateMode|$GraceHours|$PackageSource|$UpdateDelayMinMinutes|$UpdateDelayMaxMinutes|$($script:DeviceScriptRevision)"
+    $Sha = [Security.Cryptography.SHA256]::Create()
+    $Hash = -join ($Sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))[0..7] | ForEach-Object { $_.ToString("x2") })
+    $Sha.Dispose()
+    return [pscustomobject]@{
+        Package               = $Package
+        Version               = $Version
+        UpdateMode            = $UpdateMode
+        GraceHours            = $GraceHours
+        PackageSource         = $PackageSource
+        UpdateDelayMinMinutes = $UpdateDelayMinMinutes
+        UpdateDelayMaxMinutes = $UpdateDelayMaxMinutes
+        Fingerprint           = $Hash
+    }
+}#Returns the update policy of an app with its fingerprint
+
+function ConvertTo-ChocoAppNotes {
+    param([Parameter(Mandatory = $true)]$Policy)
+    $Version = if ($Policy.Version) { $Policy.Version } else { "latest" }
+    return "$($script:AppMarker);package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)"
+}#Notes of the Intune app: marker, package and update policy (read back by ConvertFrom-ChocoAppNotes)
+
+function ConvertFrom-ChocoAppNotes {
+    param([string]$Notes)
+    $Result = [ordered]@{ Package = $null; Version = ""; UpdateMode = "Startup"; GraceHours = 48; HasPolicy = $false }
+    if ($Notes -match 'package=([A-Za-z0-9._-]+)') { $Result.Package = $Matches[1] }
+    if ($Notes -match 'version=([0-9A-Za-z.+-]+)' -and $Matches[1] -ne "latest") { $Result.Version = $Matches[1] }
+    if ($Notes -match 'update=(Off|Startup|Custom)') { $Result.UpdateMode = $Matches[1]; $Result.HasPolicy = $true }
+    if ($Notes -match 'grace=(\d+)') { $Result.GraceHours = [int]$Matches[1] }
+    # Apps from before the update policy keep their behavior: latest version, update at startup
+    return [pscustomobject]$Result
+}#Reads package and update policy from the notes of an Intune app
 
 function Install-IntunechocoComponents {
     # IntuneWin32App 1.5.0 or newer is required (older versions break packaging, see issue #5, and dependencies, see issue #3)
@@ -390,26 +456,35 @@ function Get-ChocoIconBase64 {
 }#Returns a Intune-Deployment-ready Base64-Coded PNG, or $null if there is no usable icon
 
 function New-ChocoPackageScripts {
+    <#
+        Writes the package content (install.ps1 plus the update helpers update.ps1 and notify.ps1) into SourcePath
+        and the detection script next to it. All values of the policy are baked into the scripts.
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$ChocoName,
         [Parameter(Mandatory = $true)][string]$SourcePath,
-        [string]$PackageSource = "",
-        [int]$UpdateDelayMinMinutes = 5,
-        [int]$UpdateDelayMaxMinutes = 60
+        [Parameter(Mandatory = $true)]$Policy,
+        [string]$DisplayName = ""
     )
 
     # Plain ASCII on purpose: Windows PowerShell reads BOM-less files as ANSI
     $InstallScript = @'
+# Installs or removes a Chocolatey package and applies its update policy (runs as SYSTEM through Intune).
 param(
     [string]$Package = '__PACKAGE__',
     [string]$Source = '__SOURCE__',
+    [string]$Version = '__VERSION__',
+    [string]$Mode = '__MODE__',
+    [int]$GraceHours = __GRACE__,
+    [string]$DisplayName = '__DISPLAYNAME__',
+    [string]$Policy = '__POLICY__',
     [switch]$Uninstall
 )
 
 # The Intune Management Extension starts 32-bit PowerShell; choco and many packages need the 64-bit one
+# (all values are baked in as defaults, so only -Uninstall has to be passed on)
 if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
-    $Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Package", $Package)
-    if ($Source) { $Arguments += @("-Source", "`"$Source`"") }
+    $Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
     if ($Uninstall) { $Arguments += "-Uninstall" }
     & "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe" @Arguments
     exit $LASTEXITCODE
@@ -420,68 +495,235 @@ if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
 $Choco = Join-Path $ChocoRoot "bin\choco.exe"
 if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot"; exit 1 }
 
-$TaskName = "Update $Package on startup"
 $TaskPath = "\Intune-Choco-Updates\"
+$TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update")
+$AppRoot = Join-Path $env:ProgramData "IntuneChocoUpdates\$Package"
+function Remove-UpdateTasks {
+    foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+}
 
 if ($Uninstall) {
     & $Choco uninstall $Package -y --no-progress
     $ExitCode = $LASTEXITCODE
-    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-UpdateTasks
+    Remove-Item -Path $AppRoot -Recurse -Force -ErrorAction SilentlyContinue
     exit $ExitCode
 }
 
 $SourceArguments = @()
-$SourceText = ""
-if ($Source) {
-    $SourceArguments = @("--source", $Source)
-    $SourceText = " --source `"$Source`""
+if ($Source) { $SourceArguments = @("--source", $Source) }
+$VersionArguments = @()
+if ($Version) { $VersionArguments = @("--version", $Version, "--allow-downgrade") }
+$Installed = Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")
+
+# A new installation always installs. When only the policy changed (released version, update mode), the device
+# follows its update mode: Off installs a released version right away, Startup at the next startup, Custom asks
+# the user and installs at the latest when the grace period is over.
+$ExitCode = 0
+if (-not $Installed -or $Mode -eq "Off") {
+    & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments
+    $ExitCode = $LASTEXITCODE
 }
+if ($ExitCode -notin 0, 1641, 3010) { exit $ExitCode }
 
-& $Choco upgrade $Package -y --no-progress @SourceArguments
-$ExitCode = $LASTEXITCODE
+# Settings for the update helpers; a new policy starts its own grace period
+New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
+foreach ($File in "update.ps1", "notify.ps1") { Copy-Item -Path (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force }
+@{ Package = $Package; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName } |
+    ConvertTo-Json | Set-Content -Path (Join-Path $AppRoot "config.json") -Encoding UTF8
+Remove-Item -Path (Join-Path $AppRoot "state.json") -Force -ErrorAction SilentlyContinue
 
-if ($ExitCode -in 0, 1641, 3010) {
-    # Keeps the package up to date: choco upgrade on every startup, as SYSTEM.
-    # Each device waits a random time, so a whole office behind one IP doesn't hit the Chocolatey rate limit at once.
-    try {
-        $Action = New-ScheduledTaskAction -Execute $Choco -Argument "upgrade $Package -y --no-progress$SourceText"
+Remove-UpdateTasks
+try {
+    $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $UpdateScript = Join-Path $AppRoot "update.ps1"
+    $System = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+    $UpdateAction = { param($Step) New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$UpdateScript`" -Mode $Step" }
+
+    if ($Mode -in "Startup", "Custom") {
+        # Each device waits a random time, so a whole office behind one IP doesn't hit the Chocolatey rate limit at once
         $Trigger = New-ScheduledTaskTrigger -AtStartup
         $Trigger.Delay = "PT{0}M" -f (Get-Random -Minimum __DELAYMIN__ -Maximum (__DELAYMAX__ + 1))
-        $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-        Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force | Out-Null
-        Write-Output "Scheduled task $TaskPath$TaskName registered"
+        Register-ScheduledTask -TaskName $TaskNames[0] -TaskPath $TaskPath -Action (& $UpdateAction "Startup") -Trigger $Trigger -Principal $System -Settings $Settings -Force | Out-Null
     }
-    catch {
-        Write-Output "Scheduled task could not be registered: $($_.Exception.Message)"
+    if ($Mode -eq "Custom") {
+        # "Update now" from the user prompt: started on demand; signed-in users may run it (not change it)
+        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action (& $UpdateAction "Now") -Principal $System -Settings $Settings -Force | Out-Null
+        $Service = New-Object -ComObject Schedule.Service
+        $Service.Connect()
+        $Service.GetFolder($TaskPath.TrimEnd("\")).GetTask($TaskNames[1]).SetSecurityDescriptor("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)", 0)
+
+        # Every 4 hours: is there an update, is the grace period over?
+        $Check = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes((Get-Random -Minimum 5 -Maximum 60)) -RepetitionInterval (New-TimeSpan -Hours 4) -RepetitionDuration (New-TimeSpan -Days 3650)
+        Register-ScheduledTask -TaskName $TaskNames[2] -TaskPath $TaskPath -Action (& $UpdateAction "Check") -Trigger $Check -Principal $System -Settings $Settings -Force | Out-Null
+
+        # The prompt runs in the session of every signed-in user (Users group), at logon and every hour, without a console window
+        $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+        $NotifyScript = Join-Path $AppRoot "notify.ps1"
+        $NotifyAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$NotifyScript`""
+        $NotifyTriggers = @(
+            (New-ScheduledTaskTrigger -AtLogOn),
+            (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650))
+        )
+        $NotifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force | Out-Null
     }
+    Write-Output "Update mode $Mode applied for $Package"
+}
+catch {
+    Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
 }
 
+# The detection rule compares this marker with the policy in Intune
+Set-Content -Path (Join-Path $AppRoot "policy.txt") -Value $Policy -Encoding ASCII
 exit $ExitCode
+'@
+
+    $UpdateScript = @'
+# Update helper of one Chocolatey app (scheduled tasks, SYSTEM). Settings come from config.json next to it.
+#   Startup  update to the target version (startup task)
+#   Check    update available? Remember since when; after the grace period install it
+#   Now      install the update at once (started from the user prompt)
+param([ValidateSet("Startup", "Check", "Now")][string]$Mode = "Check")
+
+$Config = Get-Content -Path (Join-Path $PSScriptRoot "config.json") -Raw | ConvertFrom-Json
+$Package = $Config.Package
+$StateFile = Join-Path $PSScriptRoot "state.json"
+$LogFile = Join-Path $PSScriptRoot "update.log"
+function Write-Log([string]$Text) { Add-Content -Path $LogFile -Value ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $Mode, $Text) }
+
+$ChocoRoot = $env:ChocolateyInstall
+if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
+$Choco = Join-Path $ChocoRoot "bin\choco.exe"
+if (-not (Test-Path $Choco)) { Write-Log "choco.exe not found"; exit 1 }
+$SourceArguments = @()
+if ($Config.Source) { $SourceArguments = @("--source", $Config.Source) }
+
+function Get-InstalledVersion {
+    $Nuspec = Join-Path $ChocoRoot "lib\$Package\$Package.nuspec"
+    if (Test-Path $Nuspec) { return ([xml](Get-Content -Path $Nuspec -Raw)).package.metadata.version }
+}
+
+function Get-TargetVersion {
+    # A released version is known; "latest" asks the source whether something newer than the installed one exists
+    if ($Config.Version) { return $Config.Version }
+    $Line = & $Choco outdated --limit-output @SourceArguments 2>$null | Where-Object { $_ -like "$Package|*" } | Select-Object -First 1
+    if ($Line) { return ($Line -split "\|")[2] }
+}
+
+function Invoke-Upgrade {
+    $VersionArguments = @()
+    if ($Config.Version) { $VersionArguments = @("--version", $Config.Version, "--allow-downgrade") }
+    & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments | Out-Null
+    $Code = $LASTEXITCODE
+    Write-Log "choco upgrade $Package exit code $Code"
+    if ($Code -in 0, 1641, 3010) { Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue }
+    return $Code
+}
+
+switch ($Mode) {
+    "Now" { exit (Invoke-Upgrade) }
+    "Startup" { exit (Invoke-Upgrade) }
+    "Check" {
+        $Installed = Get-InstalledVersion
+        $Target = Get-TargetVersion
+        $Pending = if ($Config.Version) { $Target -ne $Installed } else { [bool]$Target }
+        if (-not $Pending) {
+            Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
+            exit 0
+        }
+        $State = $null
+        if (Test-Path $StateFile) { try { $State = Get-Content -Path $StateFile -Raw | ConvertFrom-Json } catch { } }
+        if (-not $State -or $State.Target -ne $Target) {
+            $Now = Get-Date
+            $State = [pscustomobject]@{
+                Package     = $Package
+                DisplayName = $Config.DisplayName
+                Installed   = $Installed
+                Target      = $Target
+                FirstSeen   = $Now.ToString("o")
+                Deadline    = $Now.AddHours([int]$Config.GraceHours).ToString("o")
+            }
+            $State | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
+            Write-Log "update $Installed -> $Target available, installed automatically from $($State.Deadline)"
+        }
+        if ((Get-Date) -ge [datetime]$State.Deadline) {
+            Write-Log "grace period is over"
+            exit (Invoke-Upgrade)
+        }
+        exit 0
+    }
+}
+'@
+
+    $NotifyScript = @'
+# Shows the update prompt in the session of a signed-in user (scheduled task of the Users group, no admin rights).
+# "Install now" starts the SYSTEM task "Update <package> now"; "Later" is respected for 4 hours, but not within the
+# last hour before the update is installed anyway.
+$StateFile = Join-Path $PSScriptRoot "state.json"
+if (-not (Test-Path $StateFile)) { exit 0 }
+try { $State = Get-Content -Path $StateFile -Raw | ConvertFrom-Json } catch { exit 0 }
+$Deadline = [datetime]$State.Deadline
+if ((Get-Date) -ge $Deadline) { exit 0 }
+
+$SnoozeFolder = Join-Path $env:LOCALAPPDATA "IntuneChocoUpdates"
+$SnoozeFile = Join-Path $SnoozeFolder "$($State.Package).snooze"
+if (Test-Path $SnoozeFile) {
+    try { $Until = [datetime](Get-Content -Path $SnoozeFile -Raw).Trim() } catch { $Until = Get-Date }
+    if ((Get-Date) -lt $Until -and $Deadline -gt (Get-Date).AddHours(1)) { exit 0 }
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+$Name = if ($State.DisplayName) { $State.DisplayName } else { $State.Package }
+# DefaultDesktopOnly: the prompt comes to the front without a window of its own
+$Options = [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly
+$Text = "An update for $Name is available ($($State.Installed) -> $($State.Target)).`r`n`r`n" +
+    "Install it now? Save your work in $Name first, it may be closed during the update.`r`n`r`n" +
+    "Otherwise it is installed automatically from $($Deadline.ToString('g'))."
+$Answer = [System.Windows.Forms.MessageBox]::Show($Text, "Software update: $Name", "YesNo", "Information", "Button1", $Options)
+if ($Answer -eq "Yes") {
+    & schtasks.exe /run /tn "\Intune-Choco-Updates\Update $($State.Package) now" | Out-Null
+    $Message = if ($LASTEXITCODE -eq 0) { "The update of $Name is being installed now." } else { "The update could not be started. It is installed automatically from $($Deadline.ToString('g'))." }
+    [void][System.Windows.Forms.MessageBox]::Show($Message, "Software update: $Name", "OK", "Information", "Button1", $Options)
+}
+else {
+    New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
+    Set-Content -Path $SnoozeFile -Value (Get-Date).AddHours(4).ToString("o")
+}
 '@
 
     $DetectionScript = @'
 $Package = "__PACKAGE__"
+$Policy = "__POLICY__"
 $ChocoRoot = $env:ChocolateyInstall
 if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
-if (Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")) {
-    Write-Output "$Package is installed"
+# Installed, and with the update policy that is set in Intune (otherwise Intune runs install.ps1 again to apply it)
+$Marker = Join-Path $env:ProgramData "IntuneChocoUpdates\$Package\policy.txt"
+if ((Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")) -and (Test-Path $Marker) -and ((Get-Content -Path $Marker -Raw).Trim() -eq $Policy)) {
+    Write-Output "$Package is installed (update policy $Policy)"
     exit 0
 }
 exit 1
 '@
 
     if ($ChocoName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "'$ChocoName' is not a valid Chocolatey package id" }
-    if ($UpdateDelayMinMinutes -lt 0 -or $UpdateDelayMaxMinutes -lt $UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
-    $InstallScript = $InstallScript.Replace("__PACKAGE__", $ChocoName).Replace("__SOURCE__", $PackageSource.Replace("'", "''"))
-    $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$UpdateDelayMaxMinutes)
-    $DetectionScript = $DetectionScript.Replace("__PACKAGE__", $ChocoName)
+    if ($Policy.UpdateDelayMinMinutes -lt 0 -or $Policy.UpdateDelayMaxMinutes -lt $Policy.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
+    # Values go into single-quoted strings of ASCII files
+    $Quote = { param($Text) ([string]$Text -replace '[^\x20-\x7E]', '').Replace("'", "''") }
+    $InstallScript = $InstallScript.Replace("__PACKAGE__", $ChocoName).Replace("__SOURCE__", (& $Quote $Policy.PackageSource))
+    $InstallScript = $InstallScript.Replace("__VERSION__", (& $Quote $Policy.Version)).Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
+    $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
+    $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$Policy.UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$Policy.UpdateDelayMaxMinutes)
+    $DetectionScript = $DetectionScript.Replace("__PACKAGE__", $ChocoName).Replace("__POLICY__", $Policy.Fingerprint)
 
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value $NotifyScript -Encoding ASCII
     $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
     return $DetectionFile
-}#Writes install.ps1 (with update task) into the package and the detection script next to it
+}#Writes install.ps1, the update helpers and the detection script for an update policy
 
 function New-IntuneChocoWorkFolder {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -518,6 +760,14 @@ function New-IntuneWin32ChocoApplication {
         [string]$PackageSource = $script:Settings.PackageSource,
         [int]$UpdateDelayMinMinutes = $script:Settings.UpdateDelayMinMinutes,
         [int]$UpdateDelayMaxMinutes = $script:Settings.UpdateDelayMaxMinutes,
+        # Off, Startup or Custom (user prompt, installed after GraceHours at the latest)
+        [ValidateSet("Off", "Startup", "Custom")]
+        [string]$UpdateMode = $script:Settings.UpdateMode,
+        [ValidateRange(1, 2160)]
+        [int]$GraceHours = $script:Settings.GraceHours,
+        # "latest" = devices follow the newest version; "current" = pin today's version; or an exact version.
+        # Empty = the VersionMode setting (Latest or Pinned)
+        [string]$Version,
         [string]$IconFile,
         [string]$IconBase64,
         [switch]$NoIconPrompt
@@ -567,17 +817,24 @@ function New-IntuneWin32ChocoApplication {
                     $Icon = Get-ChocoIconBase64 -ChocoName $Name -IconUrl $Infos.IconUrl -IconFile $IconFile -NoIconPrompt:$NoIconPrompt
                 }
 
+                ### Update policy: version and update mode
+                $PinnedVersion = switch ($Version) {
+                    { $_ -eq "latest" } { ""; break }
+                    { $_ -eq "current" } { $Infos.Version; break }
+                    { -not $_ } { if ($script:Settings.VersionMode -eq "Pinned") { $Infos.Version } else { "" }; break }
+                    default {
+                        if ($Version -notin (Get-ChocoPackageVersions -ChocoName $Name)) { throw "Version $Version of $Name does not exist on $($script:Settings.MetadataFeed)" }
+                        $Version
+                    }
+                }
+                $Policy = New-ChocoAppPolicy -Package $Name -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
+                    -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes
+                Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
+
                 ### Install and Detection Script, package
                 Write-Host "Creating the install and detection script"
                 $WorkPath = New-IntuneChocoWorkFolder -Name $Name
-                $ScriptParams = @{
-                    ChocoName             = $Name
-                    SourcePath            = (Join-Path $WorkPath "source")
-                    PackageSource         = $PackageSource
-                    UpdateDelayMinMinutes = $UpdateDelayMinMinutes
-                    UpdateDelayMaxMinutes = $UpdateDelayMaxMinutes
-                }
-                $DetectionFile = New-ChocoPackageScripts @ScriptParams
+                $DetectionFile = New-ChocoPackageScripts -ChocoName $Name -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName
                 $IntuneWinFile = New-IntuneChocoPackage -WorkPath $WorkPath
 
                 $DetectionRule = New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile
@@ -590,7 +847,8 @@ function New-IntuneWin32ChocoApplication {
                     DisplayName          = $AppName
                     Description          = $Infos.Description
                     Publisher            = $(if ($Infos.Authors) { $Infos.Authors } else { "-" })
-                    Notes                = "$($script:AppMarker);package=$Name"
+                    AppVersion           = $(if ($PinnedVersion) { $PinnedVersion } else { "latest" })
+                    Notes                = ConvertTo-ChocoAppNotes $Policy
                     InstallExperience    = "system"
                     RestartBehavior      = "suppress"
                     DetectionRule        = $DetectionRule
@@ -630,6 +888,147 @@ function New-IntuneWin32ChocoApplication {
     }
 
 }#Main function for deploying The Applications
+
+function Format-ChocoUpdateMode {
+    param([Parameter(Mandatory = $true)]$Policy)
+    switch ($Policy.UpdateMode) {
+        "Off" { "off (released versions are installed by Intune right away)" }
+        "Startup" { "at every startup" }
+        "Custom" {
+            $Grace = if ($Policy.GraceHours % 24 -eq 0) { "$($Policy.GraceHours / 24) day(s)" } else { "$($Policy.GraceHours) hour(s)" }
+            "user prompt, installed after $Grace at the latest"
+        }
+    }
+}#Update mode in words
+
+function Get-ChocoPackageVersions {
+    param([Parameter(Mandatory = $true)][string]$ChocoName)
+    $Id = [uri]::EscapeDataString($ChocoName.ToLower().Replace("'", "''"))
+    @(Invoke-ChocoFeed -Query "FindPackagesById()?id='$Id'&semVerLevel=2.0.0" | ForEach-Object { $_.Version })
+}#All versions of a package on the metadata feed
+
+function Update-IntuneChocoApp {
+    <#
+        Changes the update policy of an app in Intune, or releases another version: builds the package with the new
+        policy, uploads it as new content and replaces the detection rule. Devices no longer detect the app as
+        current and run install.ps1 again, which applies the policy (and, depending on the update mode, the version).
+        Without parameters it keeps the current values (useful to roll out improved device scripts).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$AppId,
+        # Exact version to release, or "latest" to follow the newest version again
+        [string]$Version,
+        [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode,
+        [ValidateRange(1, 2160)][int]$GraceHours
+    )
+    Assert-IntuneChocoPrerequisites
+    Assert-IntuneChocoConnection
+    Update-IntuneChocoToken
+
+    $App = Get-IntuneWin32App -ID $AppId
+    if ($null -eq $App) { throw "App $AppId was not found in Intune" }
+    $Current = ConvertFrom-ChocoAppNotes $App.notes
+    if (-not $Current.Package) { throw "$($App.displayName) has no package id in its notes (created by an older version of this tool). Remove it and deploy it again." }
+    $Package = $Current.Package
+
+    $NewVersion = if ($PSBoundParameters.ContainsKey("Version")) { $Version } else { $Current.Version }
+    if ($NewVersion -eq "latest") { $NewVersion = "" }
+    if ($NewVersion -and ($NewVersion -notin (Get-ChocoPackageVersions -ChocoName $Package))) { throw "Version $NewVersion of $Package does not exist on $($script:Settings.MetadataFeed)" }
+    $NewMode = if ($UpdateMode) { $UpdateMode } else { $Current.UpdateMode }
+    $NewGrace = if ($PSBoundParameters.ContainsKey("GraceHours")) { $GraceHours } else { $Current.GraceHours }
+
+    $Policy = New-ChocoAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $script:Settings.PackageSource `
+        -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes
+    Write-Host ("{0}: version {1}, updates {2}" -f $App.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
+
+    Write-Host "Building the package with the new policy"
+    $WorkPath = New-IntuneChocoWorkFolder -Name $Package
+    $DetectionFile = New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $App.displayName
+    $IntuneWinFile = New-IntuneChocoPackage -WorkPath $WorkPath
+
+    # Content first, then the detection rule: until the rule changes, devices keep the old state
+    Write-Host "Uploading the new content"
+    Update-IntuneWin32AppPackageFile -ID $AppId -FilePath $IntuneWinFile.Path | Out-Null
+    Write-Host "Updating detection rule, version and notes"
+    $DetectionRule = New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile
+    Set-IntuneWin32App -ID $AppId -DetectionRule @($DetectionRule) -Notes (ConvertTo-ChocoAppNotes $Policy) -AppVersion $(if ($NewVersion) { $NewVersion } else { "latest" }) | Out-Null
+    Write-Host "Done: devices apply it at their next Intune check (or startup)."
+    $AppId
+}#Applies a changed update policy or released version to an app in Intune
+
+function Find-SandboxStudio {
+    <# Path of MsixSandboxStudio.psd1 (WindowsSandboxMSIXInstaller) for the Test button, or $null. #>
+    $Candidates = @()
+    if ($script:Settings.SandboxStudioPath) { $Candidates += $script:Settings.SandboxStudioPath }
+    $Candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "WindowsSandboxMSIXInstaller"), "C:\git\WindowsSandboxMSIXInstaller"
+    foreach ($Folder in $Candidates) {
+        foreach ($File in (Join-Path $Folder "MsixSandboxStudio\MsixSandboxStudio.psd1"), (Join-Path $Folder "MsixSandboxStudio.psd1")) {
+            if (Test-Path $File) { return (Resolve-Path $File).ProviderPath }
+        }
+    }
+    $Module = Get-Module -ListAvailable MsixSandboxStudio | Sort-Object Version -Descending | Select-Object -First 1
+    if ($Module) { return $Module.Path }
+    return $null
+}
+
+function Test-IntuneChocoPackage {
+    <#
+        Tests a package in Windows Sandbox with the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller):
+        a fresh sandbox installs Chocolatey (in Intune it is a dependency app), then you run Install, Detect and
+        Uninstall with one click each, as SYSTEM like Intune, and report the result. Returns the verdict.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ChocoName,
+        [string]$Version = "",
+        [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode = $script:Settings.UpdateMode,
+        [ValidateRange(1, 2160)][int]$GraceHours = $script:Settings.GraceHours
+    )
+    $Studio = Find-SandboxStudio
+    if (-not $Studio) { throw "MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Set its folder in Settings (Sandbox Studio path)." }
+    Import-Module $Studio -Force -ErrorAction Stop
+    $Info = Get-ChocoInfo -ChocoName $ChocoName
+    $Package = $Info.Name
+    if ($Version -eq "latest") { $Version = "" }
+    $Policy = New-ChocoAppPolicy -Package $Package -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -PackageSource $script:Settings.PackageSource `
+        -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes
+
+    # The package scripts exactly as deployed
+    $WorkPath = New-IntuneChocoWorkFolder -Name "test-$Package"
+    $SourcePath = Join-Path $WorkPath "source"
+    $DetectionFile = New-ChocoPackageScripts -ChocoName $Package -SourcePath $SourcePath -Policy $Policy -DisplayName $Info.Title
+
+    # Lab scripts: Chocolatey first (Intune installs it as dependency), then the package's own install.ps1.
+    # The package script is copied as choco-app.ps1: Install.ps1 and install.ps1 are the same file on Windows.
+    $DownloadUrl = $script:Settings.ChocolateyDownloadUrl.Replace("'", "''")
+    $LabInstall = @"
+# Win32 Test Lab: Chocolatey (a dependency app in Intune), then the package as deployed
+`$Choco = Join-Path `$env:ProgramData 'chocolatey\bin\choco.exe'
+if (-not (Test-Path `$Choco)) {
+    Write-Output 'Installing Chocolatey (in Intune it is the dependency app)'
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+    if ('$DownloadUrl') { `$env:chocolateyDownloadUrl = '$DownloadUrl' }
+    Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    if (-not (Test-Path `$Choco)) { Write-Output 'Chocolatey could not be installed'; exit 1 }
+}
+& "`$PSScriptRoot\choco-app.ps1"
+exit `$LASTEXITCODE
+"@
+    $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
+    $LabDetect = Get-Content -Path $DetectionFile -Raw
+
+    $Id = "Choco-" + ($Package -replace '[^A-Za-z0-9._-]', '')
+    $Project = Save-Win32AppProject -Id $Id -DisplayName "$($Info.Title) (Chocolatey)" -Publisher $(if ($Info.Authors) { [string]$Info.Authors } else { "" }) `
+        -Version $(if ($Version) { $Version } else { $Info.Version }) -Detection (New-Win32Detection -Type Script) -RunAs system `
+        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect; "Update.ps1" = "" }
+    Copy-Item -Path (Join-Path $SourcePath "install.ps1") -Destination (Join-Path $Project.SourcePath "choco-app.ps1") -Force
+    foreach ($File in "update.ps1", "notify.ps1") { Copy-Item -Path (Join-Path $SourcePath $File) -Destination $Project.SourcePath -Force }
+
+    Write-Host "Opening the Win32 Test Lab in Windows Sandbox for $($Info.Title): run Install, Detect, Uninstall there, then report the result"
+    $Result = Start-Win32TestLab -Id $Id
+    Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
+    [pscustomobject]@{ Package = $Package; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
+}#Tests a package in Windows Sandbox (Win32 Test Lab of MSIX Sandbox Studio)
 
 function install-chocolatey {
 
@@ -743,8 +1142,8 @@ function Get-IntuneChocoTenantApps {
         if (-not $IsChocolatey -and $Notes -notlike "$($script:AppMarker)*") { continue }
 
         # Apps created before the package id was stored in the notes only carry "PoweredByChocolatey"
-        $Package = $null
-        if ($Notes -match 'package=([A-Za-z0-9._-]+)') { $Package = $Matches[1] }
+        $Policy = ConvertFrom-ChocoAppNotes $Notes
+        $Package = $Policy.Package
         if ($IsChocolatey) { $Package = "chocolatey" }
 
         [pscustomobject]@{
@@ -753,6 +1152,12 @@ function Get-IntuneChocoTenantApps {
             Package      = $Package
             IsChocolatey = $IsChocolatey
             Created      = $App.createdDateTime
+            AppVersion   = $App.displayVersion
+            # Update policy ("" = always the latest version); apps from older versions: latest, update at startup
+            Version      = $Policy.Version
+            UpdateMode   = $Policy.UpdateMode
+            GraceHours   = $Policy.GraceHours
+            HasPolicy    = $Policy.HasPolicy
         }
     }
 

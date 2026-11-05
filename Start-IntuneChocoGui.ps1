@@ -18,7 +18,7 @@ $CorePath = Join-Path $PSScriptRoot "ChocoIntuneDeployment-Main.ps1"
 $GuiRoot = Join-Path $PSScriptRoot "gui"
 . $CorePath
 
-$GuiVersion = "2.0.0"
+$GuiVersion = "2.1.0"
 $MetaCachePath = Join-Path $script:WorkRoot "feedcache.json"
 $MetaCacheHours = 24
 
@@ -39,6 +39,9 @@ $Pool = [runspacefactory]::CreateRunspacePool(1, 4)
 $Pool.Open()
 $DeployPool = [runspacefactory]::CreateRunspacePool(1, 1)
 $DeployPool.Open()
+# Sandbox tests run on their own: Windows Sandbox runs one at a time, and a test must not hold up deployments
+$TestPool = [runspacefactory]::CreateRunspacePool(1, 1)
+$TestPool.Open()
 
 # Runs inside a pool runspace: loads the core script, takes over the sign-in, captures every stream into the job log
 $TaskBody = {
@@ -137,6 +140,7 @@ function Complete-GuiJob($Job) {
         }
         "meta" { $script:MetaDirty = $true }
         "deploy" { $Shared.TenantApps = $null }
+        "policy" { $Shared.TenantApps = $null }
         "components" { Remove-Module IntuneWin32App -ErrorAction SilentlyContinue }
     }
 }
@@ -280,7 +284,28 @@ function Get-StateView {
         expires       = $Expires
         settings      = $script:Settings
         running       = @($Shared.Jobs | Where-Object { -not $_.Hidden -and $_.Status -in "queued", "running" }).Count
+        sandboxStudio = Find-SandboxStudio
     }
+}
+
+function Read-UpdatePolicy($Body) {
+    # Update mode, grace period and version from a request, checked; missing values stay $null
+    $Policy = @{ UpdateMode = $null; GraceHours = $null; Version = $null }
+    if ($Body.updateMode) {
+        if ([string]$Body.updateMode -notin $script:UpdateModes) { throw [ArgumentException]::new("Unknown update mode") }
+        $Policy.UpdateMode = [string]$Body.updateMode
+    }
+    if ($null -ne $Body.graceHours) {
+        $Grace = [int]$Body.graceHours
+        if ($Grace -lt 1 -or $Grace -gt 2160) { throw [ArgumentException]::new("The grace period must be between 1 hour and 90 days") }
+        $Policy.GraceHours = $Grace
+    }
+    if ($Body.version) {
+        $Version = [string]$Body.version
+        if ($Version -notmatch '^(latest|current|[0-9A-Za-z][0-9A-Za-z.+-]*)$') { throw [ArgumentException]::new("Invalid version '$Version'") }
+        $Policy.Version = $Version
+    }
+    return $Policy
 }
 
 function Assert-Connected {
@@ -340,7 +365,8 @@ function Invoke-Route($Context, [string]$Token, [int]$ListenPort) {
         }
         '^POST /api/settings$' {
             $Body = Read-JsonBody $Context
-            [void](Save-IntuneChocoSettings -Settings $Body)
+            try { [void](Save-IntuneChocoSettings -Settings $Body) }
+            catch { throw [ArgumentException]::new($_.Exception.Message) }
             $script:Settings = Get-IntuneChocoSettings
             Send-Json $Context (Get-StateView)
         }
@@ -403,10 +429,54 @@ function Invoke-Route($Context, [string]$Token, [int]$ListenPort) {
         }
         '^GET /api/tenant$' {
             $Apps = Get-TenantAppList -Force:($Query["refresh"] -eq "1")
+            # Newest versions on the feed, for "update available"
+            Start-MetaPrefetch -Ids @($Apps | Where-Object { $_.Package -and -not $_.IsChocolatey } | ForEach-Object { $_.Package })
             Send-Json $Context @($Apps | ForEach-Object {
                 $Meta = if ($_.Package) { $Shared.Meta[$_.Package.ToLower()] } else { $null }
-                [ordered]@{ id = $_.Id; displayName = $_.DisplayName; package = $_.Package; isChocolatey = $_.IsChocolatey; created = $_.Created; iconUrl = $(if ($Meta) { $Meta.IconUrl } else { $null }) }
+                [ordered]@{
+                    id = $_.Id; displayName = $_.DisplayName; package = $_.Package; isChocolatey = $_.IsChocolatey; created = $_.Created
+                    iconUrl = $(if ($Meta) { $Meta.IconUrl } else { $null })
+                    appVersion = $_.AppVersion; version = $_.Version; updateMode = $_.UpdateMode; graceHours = $_.GraceHours; hasPolicy = $_.HasPolicy
+                    latest = $(if ($Meta -and $Meta.Found) { $Meta.Version } else { $null })
+                }
             })
+        }
+        '^GET /api/versions$' {
+            $Id = [string]$Query["id"]
+            if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw [ArgumentException]::new("Invalid package id") }
+            # Newest first; prereleases left out
+            $Versions = @(Get-ChocoPackageVersions -ChocoName $Id | Where-Object { $_ -notmatch '-' } | Sort-Object { try { [version]($_ -replace '[^\d.].*$', '') } catch { [version]'0.0' } } -Descending | Select-Object -Unique)
+            Send-Json $Context @($Versions | Select-Object -First 40)
+        }
+        '^POST /api/app-policy$' {
+            Assert-Connected
+            $Body = Read-JsonBody $Context
+            $AppId = [string]$Body.id
+            if ($AppId -notmatch '^[0-9a-fA-F-]{36}$') { throw [ArgumentException]::new("Invalid app id") }
+            $Policy = Read-UpdatePolicy $Body
+            if ($Policy.Version -eq "current") { throw [ArgumentException]::new("Choose a version or latest") }
+            $Arguments = @{ AppId = $AppId }
+            if ($Policy.Version) { $Arguments.Version = $Policy.Version }
+            if ($Policy.UpdateMode) { $Arguments.UpdateMode = $Policy.UpdateMode }
+            if ($Policy.GraceHours) { $Arguments.GraceHours = $Policy.GraceHours }
+            $Title = if ($Body.name) { [string]$Body.name } else { $AppId }
+            $Job = Start-GuiTask -Kind "policy" -Title "Update settings: $Title" -Package ([string]$Body.package) -RunspacePool $DeployPool -Arguments @{ A = $Arguments } -Work 'param($A) Update-IntuneChocoApp @A'
+            Send-Json $Context (Get-JobView $Job)
+        }
+        '^POST /api/test$' {
+            $Body = Read-JsonBody $Context
+            $Id = [string]$Body.id
+            if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw [ArgumentException]::new("Invalid package id") }
+            if (-not (Find-SandboxStudio)) { throw [ArgumentException]::new("MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Set its folder in Settings.") }
+            if (@($Shared.Jobs | Where-Object { $_.Kind -eq "test" -and $_.Status -in "queued", "running" }).Count) { throw [ArgumentException]::new("A sandbox test is already running (Windows Sandbox runs one at a time)") }
+            $Policy = Read-UpdatePolicy $Body
+            $Arguments = @{ ChocoName = $Id }
+            if ($Policy.Version -and $Policy.Version -notin "latest", "current") { $Arguments.Version = $Policy.Version }
+            if ($Policy.UpdateMode) { $Arguments.UpdateMode = $Policy.UpdateMode }
+            if ($Policy.GraceHours) { $Arguments.GraceHours = $Policy.GraceHours }
+            $Title = if ($Body.name) { [string]$Body.name } else { $Id }
+            $Job = Start-GuiTask -Kind "test" -Title "Sandbox test: $Title" -Package $Id -RunspacePool $TestPool -Arguments @{ A = $Arguments } -Work 'param($A) $r = Test-IntuneChocoPackage @A; "$($r.Verdict): $($r.Message)"'
+            Send-Json $Context (Get-JobView $Job)
         }
         '^POST /api/deploy$' {
             Assert-Connected
@@ -414,10 +484,14 @@ function Invoke-Route($Context, [string]$Token, [int]$ListenPort) {
             $Assignment = [string]$Body.assignment
             if ($Assignment -notin "Available", "Required", "None") { throw [ArgumentException]::new("Unknown assignment") }
             $Architecture = if ($Body.architecture) { [string]$Body.architecture } else { $script:Settings.Architecture }
+            $Policy = Read-UpdatePolicy $Body
             $Work = @'
-param($Id, $Assignment, $Architecture, $IconBase64)
+param($Id, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version)
 $Params = @{ ChocoName = $Id; Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true }
 if ($IconBase64) { $Params.IconBase64 = $IconBase64 }
+if ($UpdateMode) { $Params.UpdateMode = $UpdateMode }
+if ($GraceHours) { $Params.GraceHours = $GraceHours }
+if ($Version) { $Params.Version = $Version }
 New-IntuneWin32ChocoApplication @Params
 '@
             $Jobs = foreach ($Package in @($Body.packages)) {
@@ -428,6 +502,7 @@ New-IntuneWin32ChocoApplication @Params
                 $Title = if ($Package.name) { [string]$Package.name } else { $Id }
                 Get-JobView (Start-GuiTask -Kind "deploy" -Title $Title -Package $Id -Work $Work -RunspacePool $DeployPool -Arguments @{
                     Id = $Id; Assignment = $Assignment; Architecture = $Architecture; IconBase64 = $Icon
+                    UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; Version = $Policy.Version
                 })
             }
             Send-Json $Context @($Jobs)
@@ -500,6 +575,7 @@ finally {
     if ($Running -gt 0) { Write-Warning "$Running deployment(s) were still running and have been stopped" }
     $Pool.Close()
     $DeployPool.Close()
+    $TestPool.Close()
     Write-Host "GUI stopped"
 }
 

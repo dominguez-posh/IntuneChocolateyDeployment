@@ -28,6 +28,72 @@ const ASSIGNMENTS = [
   { value: "None", label: "No assignment", help: "Create the app only, assign it in Intune yourself" }
 ];
 
+const UPDATE_MODES = [
+  { value: "Off", label: "Off", help: "No automatic updates. A version you release here is installed by Intune right away." },
+  { value: "Startup", label: "At startup", help: "Updated at every startup of the device, after a random delay." },
+  { value: "Custom", label: "User prompt and deadline", help: "The user is offered the update and can install it at once. When the grace period is over it is installed anyway, without a restart." }
+];
+
+const VERSION_MODES = [
+  { value: "Latest", label: "Always the latest version", help: "Devices follow the newest package version (according to the update mode)." },
+  { value: "Pinned", label: "Pin the current version", help: "New apps stay on today's version. You release newer versions in In tenant." }
+];
+
+function graceText(hours) {
+  const h = Number(hours) || 48;
+  return h % 24 === 0 ? `${h / 24} day${h === 24 ? "" : "s"}` : `${h} hour${h === 1 ? "" : "s"}`;
+}
+
+function modeText(mode, hours) {
+  if (mode === "Custom") return `User prompt, installed after ${graceText(hours)}`;
+  const m = UPDATE_MODES.find((x) => x.value === mode);
+  return m ? m.label : mode;
+}
+
+// Compares two versions numerically, part by part (1.10 > 1.9)
+function compareVersions(a, b) {
+  const pa = String(a).split(/[.+-]/).map((p) => parseInt(p, 10) || 0);
+  const pb = String(b).split(/[.+-]/).map((p) => parseInt(p, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+// Update mode, grace period (hours or days) and optionally the version, as form rows; read() returns the values
+function policyControls(prefix, policy, versionOptions) {
+  const mode = h("select", { class: "select", id: `${prefix}-mode` },
+    UPDATE_MODES.map((m) => h("option", { value: m.value, selected: m.value === policy.updateMode }, m.label)));
+  const hours = Number(policy.graceHours) || 48;
+  const inDays = hours % 24 === 0;
+  const graceValue = h("input", { class: "input", id: `${prefix}-grace`, type: "number", min: "1", max: inDays ? "90" : "2160", value: String(inDays ? hours / 24 : hours) });
+  const graceUnit = h("select", { class: "select", id: `${prefix}-unit` },
+    h("option", { value: "hours", selected: !inDays }, "hours"), h("option", { value: "days", selected: inDays }, "days"));
+  const graceRow = h("div", { class: "range" }, graceValue, graceUnit, h("span", { class: "muted", text: "until it is installed anyway" }));
+  const help = h("div", { class: "help" });
+  const sync = () => {
+    help.textContent = UPDATE_MODES.find((m) => m.value === mode.value).help;
+    graceRow.hidden = mode.value !== "Custom";
+  };
+  mode.addEventListener("change", sync);
+  sync();
+
+  let version = null;
+  const rows = [h("label", { for: mode.id, text: "Updates" }), h("div", { class: "field" }, mode, graceRow, help)];
+  if (versionOptions) {
+    version = h("select", { class: "select", id: `${prefix}-version` },
+      versionOptions.map((o) => h("option", { value: o.value, selected: o.value === policy.version }, o.label)));
+    rows.unshift(h("label", { for: version.id, text: "Version" }), h("div", { class: "field" }, version));
+  }
+  const read = () => {
+    const graceHours = Math.round(Number(graceValue.value) * (graceUnit.value === "days" ? 24 : 1));
+    if (mode.value === "Custom" && !(graceHours >= 1 && graceHours <= 2160)) throw new Error("The grace period must be between 1 hour and 90 days");
+    return { updateMode: mode.value, graceHours: mode.value === "Custom" ? graceHours : hours, version: version ? version.value : undefined };
+  };
+  return { el: h("div", { class: "form" }, rows), read };
+}
+
 const ARCHITECTURES = [
   { value: "x64x86", label: "x64 and x86 (default)" },
   { value: "AllWithARM64", label: "x64, x86 and ARM64 (Windows 11 on ARM)" },
@@ -499,25 +565,75 @@ function renderTenant() {
     return [head, h("div", { class: "empty" }, glyph(G.pkg), h("div", { class: "empty-title", text: "No apps yet" }), "Deploy your first app from the catalog.")];
   }
   const apps = [...state.tenant.apps].sort((a, b) => (b.isChocolatey - a.isChocolatey) || a.displayName.localeCompare(b.displayName));
+  const updates = apps.filter(updateAvailable).length;
   return [
     head,
+    updates ? h("div", { class: "banner warn" }, glyph(G.sync), h("div", { class: "banner-body" },
+      h("div", { class: "banner-title", text: `${updates} update${updates === 1 ? "" : "s"} to release` }),
+      h("p", { text: "These apps are pinned to a version and the package feed has a newer one. Release it with the button in the row: devices install it according to the app's update mode." }))) : null,
     h("table", { class: "table" },
-      h("thead", {}, h("tr", {}, h("th", { text: "App" }), h("th", { text: "Package" }), h("th", { text: "Created" }), h("th", { text: "" }))),
+      h("thead", {}, h("tr", {}, h("th", { text: "App" }), h("th", { text: "Version" }), h("th", { text: "Updates" }), h("th", { text: "" }))),
       h("tbody", {}, apps.map((app) => h("tr", {},
         h("td", {}, h("div", { class: "cell-app" }, appIcon(app.displayName, app.iconUrl, "sm"),
-          h("div", {}, h("div", { text: app.displayName }), app.isChocolatey ? h("span", { class: "badge" }, "Package manager, dependency of all apps") : null))),
-        h("td", {}, app.package ? h("span", { class: "mono", text: app.package }) : h("span", { class: "muted", text: "created by an older version" })),
-        h("td", { class: "muted", text: formatDate(app.created) }),
-        h("td", {}, h("a", {
-          href: `https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/${encodeURIComponent(app.id)}`,
-          target: "_blank", rel: "noopener noreferrer"
-        }, "Open in Intune ", glyph(G.open)))
+          h("div", {},
+            h("div", { text: app.displayName }),
+            app.isChocolatey ? h("span", { class: "badge" }, "Package manager, dependency of all apps")
+              : app.package ? h("span", { class: "mono muted", text: app.package }) : h("span", { class: "muted", text: "created by an older version" })))),
+        h("td", {}, versionCell(app)),
+        h("td", {}, updatesCell(app)),
+        h("td", {}, h("div", { class: "toolbar" }, appActions(app)))
       )))
     )
   ];
 }
 
-const KIND_LABEL = { deploy: "Deployment", connect: "Sign-in", components: "Setup" };
+// A pinned app whose package has a newer version on the feed
+function updateAvailable(app) {
+  return !app.isChocolatey && app.version && app.latest && compareVersions(app.latest, app.version) > 0;
+}
+
+function versionCell(app) {
+  if (app.isChocolatey) return h("span", { class: "muted", text: "latest" });
+  if (app.version) {
+    return h("div", {},
+      h("div", { text: app.version }),
+      updateAvailable(app) ? h("span", { class: "badge warn" }, glyph(G.up), `${app.latest} available`) : h("span", { class: "muted", text: "released version" }));
+  }
+  return h("div", {}, h("div", { text: "Always latest" }), app.latest ? h("span", { class: "muted", text: `feed: ${app.latest}` }) : null);
+}
+
+function updatesCell(app) {
+  if (app.isChocolatey || !app.package) return h("span", { class: "muted", text: "" });
+  return h("div", {},
+    h("div", { text: modeText(app.updateMode, app.graceHours) }),
+    app.hasPolicy ? null : h("span", { class: "muted", text: "older app: Update settings rolls out the new scripts" }));
+}
+
+function appActions(app) {
+  const intune = h("a", {
+    class: "btn subtle",
+    href: `https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/${encodeURIComponent(app.id)}`,
+    target: "_blank", rel: "noopener noreferrer", title: "Open in the Intune admin center"
+  }, glyph(G.open));
+  if (app.isChocolatey || !app.package) return [intune];
+  return [
+    updateAvailable(app) ? h("button", { class: "btn primary", onclick: () => releaseUpdate(app), title: `Release version ${app.latest}` }, glyph(G.up), "Release") : null,
+    h("button", { class: "btn", onclick: () => editPolicy(app), title: "Version, update mode and grace period" }, glyph(G.settings), "Update settings"),
+    testButton({ id: app.package, name: app.displayName, version: app.version || "latest", updateMode: app.updateMode, graceHours: app.graceHours }, true),
+    intune
+  ];
+}
+
+function testButton(pkg, small) {
+  const available = state.server && state.server.sandboxStudio;
+  return h("button", {
+    class: small ? "btn subtle" : "btn", disabled: !available,
+    title: available ? "Test in Windows Sandbox: Install, Detect, Uninstall in the Win32 Test Lab of MSIX Sandbox Studio" : "MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found, see Settings",
+    onclick: () => testPackage(pkg)
+  }, glyph(G.play), small ? "Test" : "Test in sandbox");
+}
+
+const KIND_LABEL = { deploy: "Deployment", connect: "Sign-in", components: "Setup", policy: "Update settings", test: "Sandbox test" };
 
 function jobStatus(job) {
   switch (job.status) {
@@ -568,19 +684,28 @@ function renderSettings() {
   const select = (id, options, value) => h("select", { class: "select", id }, options.map((o) => h("option", { value: o.value, selected: o.value === value }, o.label)));
   const number = (id, value) => h("input", { class: "input", id, type: "number", min: "0", max: "1440", value: String(value) });
 
-  const collect = () => ({
-    TenantID: document.getElementById("s-tenant").value,
-    ClientID: document.getElementById("s-client").value,
-    Assignment: document.getElementById("s-assignment").value,
-    Architecture: document.getElementById("s-arch").value,
-    UpdateDelayMinMinutes: Number(document.getElementById("s-delay-min").value),
-    UpdateDelayMaxMinutes: Number(document.getElementById("s-delay-max").value),
-    PackageSource: document.getElementById("s-source").value,
-    ChocolateyDownloadUrl: document.getElementById("s-chocourl").value,
-    MetadataFeed: document.getElementById("s-feed").value
-  });
+  const updatePolicy = policyControls("s", { updateMode: s.UpdateMode, graceHours: s.GraceHours });
+  const collect = () => {
+    const policy = updatePolicy.read();
+    return {
+      TenantID: document.getElementById("s-tenant").value,
+      ClientID: document.getElementById("s-client").value,
+      Assignment: document.getElementById("s-assignment").value,
+      Architecture: document.getElementById("s-arch").value,
+      UpdateDelayMinMinutes: Number(document.getElementById("s-delay-min").value),
+      UpdateDelayMaxMinutes: Number(document.getElementById("s-delay-max").value),
+      UpdateMode: policy.updateMode,
+      GraceHours: policy.graceHours,
+      VersionMode: document.getElementById("s-version-mode").value,
+      SandboxStudioPath: document.getElementById("s-studio").value,
+      PackageSource: document.getElementById("s-source").value,
+      ChocolateyDownloadUrl: document.getElementById("s-chocourl").value,
+      MetadataFeed: document.getElementById("s-feed").value
+    };
+  };
   const save = async (andConnect) => {
     try {
+      // collect() checks the grace period: errors go to the same toast as server errors
       state.server = await api("/api/settings", { method: "POST", body: collect() });
       state.assignment = null;
       toast("Settings saved", "ok");
@@ -620,6 +745,21 @@ function renderSettings() {
           h("div", { class: "range" }, number("s-delay-min", s.UpdateDelayMinMinutes), h("span", { class: "muted", text: "to" }), number("s-delay-max", s.UpdateDelayMaxMinutes), h("span", { class: "muted", text: "minutes after startup" })),
           h("div", { class: "help", text: "Every device picks a random wait in this range for its update task, so a whole office behind one IP does not hit the Chocolatey rate limit (about 20 downloads per minute and IP) at once." }))]
       )
+    ),
+    h("section", { class: "panel" },
+      h("h2", { text: "Updates for new apps" }),
+      h("p", { class: "hint", text: "Defaults when deploying; each app can be changed later in In tenant with Update settings, which applies the change in Intune." }),
+      h("div", { class: "form" },
+        field("Version", select("s-version-mode", VERSION_MODES.map((v) => ({ value: v.value, label: v.label })), s.VersionMode),
+          "Pinned apps show available updates in In tenant; you release them with one click.")),
+      updatePolicy.el
+    ),
+    h("section", { class: "panel" },
+      h("h2", { text: "Sandbox test" }),
+      h("p", { class: "hint", text: "The Test buttons use the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) and need Windows Sandbox." }),
+      h("div", { class: "form" },
+        field("Sandbox Studio path", text("s-studio", s.SandboxStudioPath, "Empty = found automatically"),
+          server.sandboxStudio ? `Found: ${server.sandboxStudio}` : "Not found: enter the folder of WindowsSandboxMSIXInstaller, e.g. C:\\git\\WindowsSandboxMSIXInstaller"))
     ),
     h("section", { class: "panel" },
       h("h2", { text: "Package sources" }),
@@ -724,6 +864,7 @@ async function openDrawer(id, name) {
         )
       ),
       h("div", { class: "drawer-foot" },
+        testButton({ id: info.id, name: info.title }),
         h("button", { class: "btn", onclick: toggle, text: selected ? "Remove from selection" : "Add to selection" }),
         h("button", { class: "btn primary", disabled: !connected(), title: connected() ? "" : "Sign in first",
           onclick: () => { close(); deploy([view]); } }, glyph(G.cloud), "Deploy now")
@@ -764,21 +905,77 @@ async function deploy(items) {
   const notes = items.filter((i) => i.licenseNote);
   const assignment = state.assignment || state.server.settings.Assignment;
   const assignmentLabel = ASSIGNMENTS.find((a) => a.value === assignment);
+  const s = state.server.settings;
+  const policy = policyControls("d", { updateMode: s.UpdateMode, graceHours: s.GraceHours, version: s.VersionMode === "Pinned" ? "current" : "latest" }, [
+    { value: "latest", label: "Always the latest version" },
+    { value: "current", label: "Pin the current version (release updates in In tenant)" }
+  ]);
   const body = h("div", {},
-    h("p", { text: `${items.length} app${items.length === 1 ? "" : "s"} will be created in ${state.server.settings.TenantID}: ${assignmentLabel.label.toLowerCase()} (${assignmentLabel.help.toLowerCase()}).` }),
+    h("p", { text: `${items.length} app${items.length === 1 ? "" : "s"} will be created in ${s.TenantID}: ${assignmentLabel.label.toLowerCase()} (${assignmentLabel.help.toLowerCase()}).` }),
+    policy.el,
     notes.length ? h("div", { class: "banner warn" }, glyph(G.shield), h("div", { class: "banner-body" },
       h("div", { class: "banner-title", text: "Check the licenses first" }),
       notes.map((n) => h("p", {}, h("strong", { text: n.name + ": " }), n.licenseNote))
     )) : null
   );
   if (!(await dialog("Deploy to Intune?", body, notes.length ? "Licenses are covered, deploy" : "Deploy"))) return;
+  let chosen;
+  try { chosen = policy.read(); } catch (e) { toast(e.message, "err"); return; }
   try {
     const jobs = await api("/api/deploy", {
       method: "POST",
-      body: { assignment, packages: items.map((i) => ({ id: i.id, name: i.name, iconBase64: state.icons.get(keyOf(i.id)) || null })) }
+      body: { assignment, ...chosen, packages: items.map((i) => ({ id: i.id, name: i.name, iconBase64: state.icons.get(keyOf(i.id)) || null })) }
     });
     for (const i of items) state.selection.delete(keyOf(i.id));
     toast(`${jobs.length} deployment${jobs.length === 1 ? "" : "s"} queued`, "ok");
+    await loadJobs();
+    go("activity");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function applyPolicy(app, body, okText) {
+  try {
+    await api("/api/app-policy", { method: "POST", body: { id: app.id, name: app.displayName, package: app.package, ...body } });
+    toast(`${app.displayName}: ${okText}, see Activity`, "ok");
+    await loadJobs();
+    go("activity");
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function releaseUpdate(app) {
+  const body = h("div", {},
+    h("p", { text: `${app.displayName} goes from ${app.version} to ${app.latest}. The package is rebuilt and uploaded, Intune then applies it on the devices:` }),
+    h("p", { class: "muted", text: modeText(app.updateMode, app.graceHours) + ". " + UPDATE_MODES.find((m) => m.value === app.updateMode).help })
+  );
+  if (!(await dialog(`Release ${app.latest}?`, body, "Release"))) return;
+  await applyPolicy(app, { version: app.latest }, `releasing ${app.latest}`);
+}
+
+async function editPolicy(app) {
+  let versions = [];
+  try { versions = await api("/api/versions?id=" + encodeURIComponent(app.package)); } catch (e) { toast(e.message, "err"); }
+  const options = [{ value: "latest", label: "Always the latest version" }];
+  for (const v of versions) options.push({ value: v, label: v === app.latest ? `${v} (newest)` : v });
+  if (app.version && !versions.includes(app.version)) options.push({ value: app.version, label: app.version });
+  const policy = policyControls("p", { updateMode: app.updateMode, graceHours: app.graceHours, version: app.version || "latest" }, options);
+  const body = h("div", {},
+    h("p", { class: "muted", text: "Applying rebuilds the package and changes the app in Intune. Devices no longer detect it as current and run its install script again, which applies these settings." }),
+    policy.el);
+  if (!(await dialog(`Update settings: ${app.displayName}`, body, "Apply in Intune"))) return;
+  let chosen;
+  try { chosen = policy.read(); } catch (e) { toast(e.message, "err"); return; }
+  await applyPolicy(app, chosen, "applying the update settings");
+}
+
+async function testPackage(pkg) {
+  const body = h("div", {},
+    h("p", { text: `A fresh Windows Sandbox opens with the Win32 Test Lab of MSIX Sandbox Studio. It installs Chocolatey first (in Intune it is the dependency app), then you run Install, Detect and Uninstall of ${pkg.name} with one click each, as SYSTEM like Intune, and report the result there.` }),
+    h("p", { class: "muted", text: `Tested with: ${pkg.version && pkg.version !== "latest" ? "version " + pkg.version : "the latest version"}, updates ${modeText(pkg.updateMode || state.server.settings.UpdateMode, pkg.graceHours || state.server.settings.GraceHours).toLowerCase()}. Windows Sandbox runs one at a time.` })
+  );
+  if (!(await dialog(`Test ${pkg.name} in the sandbox?`, body, "Start test"))) return;
+  try {
+    await api("/api/test", { method: "POST", body: { id: pkg.id, name: pkg.name, version: pkg.version, updateMode: pkg.updateMode, graceHours: pkg.graceHours } });
+    toast("The sandbox starts, see Activity for the result", "ok");
     await loadJobs();
     go("activity");
   } catch (e) { toast(e.message, "err"); }
