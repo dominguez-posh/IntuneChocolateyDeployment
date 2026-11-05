@@ -275,8 +275,11 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($s.Phase -eq 0) {
             $s.Phase = 1
             Show-Page 'Catalog'
-            & $script:ClickActions[$ui.BtnSource]
-            Test-Smoke 'source button switches to winget' ($script:Source -eq 'Winget' -and $ui.BtnSource.Content -eq 'winget' -and $ui.HintSearch.Text -like '*winget*') $ui.BtnSource.Content
+            Test-Smoke 'source switch shows Chocolatey as active' ($ui.SrcChocolatey.IsChecked -and -not $ui.SrcWinget.IsChecked)
+            & $script:ClickActions[$ui.SrcChocolatey]
+            Test-Smoke 'clicking the active source changes nothing' ($script:Source -eq 'Chocolatey')
+            & $script:ClickActions[$ui.SrcWinget]
+            Test-Smoke 'source switch moves to winget' ($script:Source -eq 'Winget' -and $ui.SrcWinget.IsChecked -and -not $ui.SrcChocolatey.IsChecked -and $ui.HintSearch.Text -like '*winget*')
             Test-Smoke 'winget catalog lists the apps with a winget id' (@($ui.DgCatalog.ItemsSource).Count -eq @($script:Catalog | Where-Object WingetId).Count) @($ui.DgCatalog.ItemsSource).Count
             Test-Smoke 'switching the source clears the selection' ($script:Selected.Count -eq 0)
             return $false
@@ -288,7 +291,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $vlc = $rows | Where-Object { $_.Id -eq 'VideoLAN.VLC' }
         Test-Smoke "winget infos from the manifest: $($vlc.Authors), $($vlc.License)" ($vlc.Found -and $vlc.Version -eq '3.0.24' -and $vlc.Authors -and $vlc.License) ($vlc | Select-Object Id, Version, Authors, License | ConvertTo-Json -Compress)
         Test-Smoke 'winget row lends the Chocolatey icon' ([bool]$vlc.RawIconUrl) $vlc.RawIconUrl
-        Test-Smoke 'unknown winget id shows as not found' (@($rows | Where-Object { $_.StatusText -eq 'Not found' }).Count -gt 0)
+        # Fixed package instead of the live repository (every catalog id may exist there by now)
+        $unknown = New-PackageRow -Id 'Contoso.DoesNotExist' -Name 'Contoso' -Category 'Test' -Source 'Winget' `
+            -Meta ([pscustomobject]@{ Found = $false; NotFound = $true; Name = 'Contoso.DoesNotExist'; Error = 'was not found' })
+        Test-Smoke 'unknown winget id shows as not found' ($unknown.StatusText -eq 'Not found' -and $unknown.Status -eq 'Error') "$($unknown.StatusText)|$($unknown.Status)"
         Test-Smoke 'license note on winget AnyDesk' ((@($rows | Where-Object { $_.Id -eq 'AnyDesk.AnyDesk' })[0]).LicenseNote -like '*AnyDesk license*')
         $ui.DgCatalog.SelectedItem = $vlc
         Test-Smoke 'details point to winget-pkgs' ($ui.BtnDetailChoco.Content -eq 'winget-pkgs' -and $ui.TxtDetailMeta.Text -like '*license*') $ui.TxtDetailMeta.Text
@@ -336,7 +342,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $npp = $rows | Where-Object { $_.Id -eq 'Notepad++.Notepad++' }
         Test-Smoke 'search result completed from the manifest' ($npp.Authors -like 'Notepad++*') $npp.Authors
         Save-SmokeShot '11-winget-search'
-        & $script:ClickActions[$ui.BtnSource]
+        & $script:ClickActions[$ui.SrcChocolatey]
         $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
         Test-Smoke 'back to Chocolatey, source saved' ($script:Source -eq 'Chocolatey' -and $saved.Source -eq 'Chocolatey' -and @($ui.DgCatalog.ItemsSource).Count -eq $script:Catalog.Count)
         $true } }

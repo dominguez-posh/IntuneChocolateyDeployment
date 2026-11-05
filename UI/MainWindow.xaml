@@ -13,6 +13,38 @@
                 </DataTrigger>
             </Style.Triggers>
         </Style>
+        <!-- Package source switch in the header: both sources side by side, the active one filled light -->
+        <Style x:Key="SourceSegment" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="#CBD5E1"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="GroupName" Value="PackageSource"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="3" Padding="12,6" MinWidth="92">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <TextBlock x:Name="Check" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="11" Margin="0,0,6,0"
+                                           VerticalAlignment="Center" Visibility="Collapsed" Foreground="{TemplateBinding Foreground}"/>
+                                <ContentPresenter VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#475569"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#F8FAFC"/>
+                                <Setter Property="Foreground" Value="#0F172A"/>
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <DataTemplate x:Key="NoteChip">
             <Border Style="{StaticResource NoteChipBorder}">
                 <TextBlock Text="{Binding StatusText}" FontSize="11" FontWeight="SemiBold"
@@ -49,7 +81,17 @@
                     </StackPanel>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="BtnSource" Tag="&#xE8AB;" Content="Chocolatey" Style="{StaticResource HeaderButton}" MinWidth="128" ToolTip="Package source: Chocolatey or winget"/>
+                    <StackPanel Margin="0,0,8,0" VerticalAlignment="Center">
+                        <TextBlock Text="PACKAGE SOURCE" Foreground="#94A3B8" FontSize="9" FontWeight="SemiBold" Margin="2,0,0,2"/>
+                        <Border Background="#1E293B" BorderBrush="#475569" BorderThickness="1" CornerRadius="4" Padding="2">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="SrcChocolatey" Content="Chocolatey" Style="{StaticResource SourceSegment}" IsChecked="True"
+                                             ToolTip="Packages from Chocolatey (choco install), with the Chocolatey app in the tenant"/>
+                                <RadioButton x:Name="SrcWinget" Content="winget" Style="{StaticResource SourceSegment}"
+                                             ToolTip="Packages from the winget repository (winget install as SYSTEM)"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
                     <Button x:Name="BtnHelp" Tag="&#xE897;" Content="Help" Style="{StaticResource HeaderButton}"/>
                     <Button x:Name="BtnHeaderSettings" Tag="&#xE713;" Content="Settings" Style="{StaticResource HeaderButton}"/>
                     <Button x:Name="BtnSignIn" Tag="&#xE77B;" Content="Sign in" Style="{StaticResource SplitMainButton}" ToolTip="Sign in with your Microsoft account (browser)"/>

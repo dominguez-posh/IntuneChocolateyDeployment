@@ -1304,8 +1304,9 @@ Add-Click $ui.BtnInstallModule { Start-ModuleInstall }
 function Set-PackageSource([ValidateSet('Chocolatey', 'Winget')][string]$Source, [switch]$NoSave) {
     $script:Source = $Source
     $winget = $Source -eq 'Winget'
-    $ui.BtnSource.Content = if ($winget) { 'winget' } else { 'Chocolatey' }
-    $ui.BtnSource.ToolTip = "Package source: $($ui.BtnSource.Content). Click to switch to $(if ($winget) { 'Chocolatey' } else { 'winget' })."
+    $ui.SrcWinget.IsChecked = $winget
+    $ui.SrcChocolatey.IsChecked = -not $winget
+    $name = if ($winget) { 'winget' } else { 'Chocolatey' }
     $ui.HintSearch.Text = if ($winget) { 'Search the winget repository, e.g. notepad' } else { 'Search the Chocolatey repository, e.g. notepad' }
     # The selection belongs to one source; search results of the other source are cleared
     Clear-Selection
@@ -1323,10 +1324,12 @@ function Set-PackageSource([ValidateSet('Chocolatey', 'Winget')][string]$Source,
             [void](Save-IntuneChocoSettings -Settings $s); $script:Settings = Get-IntuneChocoSettings
         }
         catch { Write-UiLog "The package source could not be saved: $($_.Exception.Message)" 'Warning' }
-        Write-UiLog "Package source: $($ui.BtnSource.Content)."
+        Write-UiLog "Package source: $name."
     }
 }
-Add-Click $ui.BtnSource { Set-PackageSource $(if ($script:Source -eq 'Winget') { 'Chocolatey' } else { 'Winget' }) }
+# Clicking the active source again changes nothing (keeps the selection)
+Add-Click $ui.SrcChocolatey { if ($script:Source -ne 'Chocolatey') { Set-PackageSource 'Chocolatey' } }
+Add-Click $ui.SrcWinget { if ($script:Source -ne 'Winget') { Set-PackageSource 'Winget' } }
 
 # ---------------------------------------------------------------- sign in / out
 function Assert-SignInSettings {

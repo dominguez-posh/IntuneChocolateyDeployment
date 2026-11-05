@@ -143,7 +143,7 @@ pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPr
 - Requirement: Windows 10 1607 or newer (includes Windows 11), x64/x86. Use `-Architecture AllWithARM64` for ARM devices.
 
 ### winget packages
-The package source button in the header switches catalog, search and deployment between Chocolatey and winget. On the
+The package source switch in the header (Chocolatey | winget, the active source is filled light) switches catalog, search and deployment between Chocolatey and winget. On the
 command line:
 ```powershell
 New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignment Available
