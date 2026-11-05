@@ -352,6 +352,22 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
         Test-Smoke 'settings saved' ($saved.UpdateDelayMaxMinutes -eq 90 -and $saved.PackageSource -eq 'https://proget.contoso.com/nuget/choco/')
         Test-Smoke 'deploy defaults follow the settings' ($ui.TxtDeployDefaults.Text -like '*proget*10 to 90*') $ui.TxtDeployDefaults.Text
+        Test-Smoke 'settings keep the app registration per tenant' ($saved.TenantClients -eq 'contoso.onmicrosoft.com=11111111-2222-3333-4444-555555555555') $saved.TenantClients
+        $true } }
+    @{ Name = 'account of another tenant (Keevault choice)'; Do = {
+        # Same tenant: nothing changes
+        $same = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
+        Test-Smoke 'account of the tenant signs in there' ($same.TenantID -eq 'contoso.onmicrosoft.com' -and $same.ClientID -eq '11111111-2222-3333-4444-555555555555')
+        # Unknown tenant: the tool switches there and offers to create its app registration
+        try { [void](Resolve-AccountTenant 'adm@fabrikam.onmicrosoft.com'); Test-Smoke 'unknown tenant stops with a reason' $false }
+        catch { Test-Smoke 'unknown tenant stops with a reason' ($_.Exception.Message -like '*fabrikam.onmicrosoft.com*no app registration*Create*') $_.Exception.Message }
+        $appreg = Get-ReadinessItems | Where-Object Key -eq 'appreg'
+        Test-Smoke 'switched to the new tenant, Create offered' ($script:Settings.TenantID -eq 'fabrikam.onmicrosoft.com' -and -not $script:Settings.ClientID -and $appreg.Fix -eq 'Create') "$($script:Settings.TenantID) / $($appreg.Fix)"
+        # Back with an account of a known tenant: its app registration is used again
+        $back = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
+        Test-Smoke 'known tenant uses its own app registration' ($back.TenantID -eq 'contoso.onmicrosoft.com' -and $back.ClientID -eq '11111111-2222-3333-4444-555555555555') "$($back.TenantID) / $($back.ClientID)"
+        Switch-Tenant $back.TenantID $back.ClientID
+        Test-Smoke 'tenant switched back' ($script:Settings.TenantID -eq 'contoso.onmicrosoft.com' -and $script:Settings.ClientID -eq '11111111-2222-3333-4444-555555555555')
         $true } }
     @{ Name = 'sign out'; Do = {
         Disconnect-Intune

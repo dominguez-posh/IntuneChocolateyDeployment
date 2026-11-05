@@ -1351,8 +1351,9 @@ function Connect-Intune {
         $window.Cursor = 'Wait'
         try {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
-            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -OnWait $pump
-            Set-IntuneChocoToken -TokenResponse $token -TenantID $tenant -ClientID $clientId
+            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
+            Set-IntuneChocoToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
+            if ($token.SignInTenantID -ne $tenant) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-IntuneChocoAuthState
             Complete-SignIn 'via Keevault'
         }
@@ -1381,6 +1382,32 @@ Get-IntuneChocoAuthState
         Complete-SignIn 'in the browser'
     })
 }
+function Get-AccountDomain([string]$User) { if ($User -match '@([^@\s]+)$') { $Matches[1].ToLower() } else { '' } }
+
+function Resolve-AccountTenant([string]$User) {
+    # The account chosen in Keevault decides the tenant. Its own app registration is needed there: the one of
+    # another tenant is used when it is known, otherwise the tool switches and offers to create one.
+    $tenant = [string]$script:Settings.TenantID
+    $domain = Get-AccountDomain $User
+    if (-not $domain -or $tenant -match '^[0-9a-f-]{36}$' -or $domain -eq $tenant.ToLower()) { return @{ TenantID = $tenant; ClientID = $script:Settings.ClientID } }
+    $known = Get-IntuneChocoTenantClient $domain
+    if ($known) {
+        Write-UiLog "$User belongs to ${domain}: signing in there with its app registration ($known)."
+        return @{ TenantID = $domain; ClientID = $known }
+    }
+    Switch-Tenant $domain ''
+    throw "$User belongs to the tenant $domain, which has no app registration for this tool yet. The tool switched to ${domain}: click Create (start page) to set it up, then sign in again."
+}
+
+function Switch-Tenant([string]$TenantID, [string]$ClientID) {
+    $s = Get-IntuneChocoSettings; $s.TenantID = $TenantID; $s.ClientID = $ClientID
+    [void](Save-IntuneChocoSettings -Settings $s); $script:Settings = Get-IntuneChocoSettings
+    $script:TenantApps = $null; $script:TenantPackages = @{}
+    Update-SettingsView
+    Update-ConnectionStatus
+    Write-UiLog "Tenant switched to $TenantID$(if ($ClientID) { " (app registration $ClientID)" } else { ', no app registration yet' })."
+}
+
 # Tests only: another authority and URL handler for the browser sign-in (set by Tests\GuiSmokeDriver.ps1)
 $script:SignInTest = @{}
 

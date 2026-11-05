@@ -48,6 +48,9 @@ $script:DefaultSettings = [ordered]@{
     UpdateDelayMaxMinutes = 60
     # Package source the interface starts with: Chocolatey or Winget
     Source                = "Chocolatey"
+    # App registrations of all tenants used so far, "tenant=client id;..." (signing in with an account of another
+    # tenant switches to that tenant and its app registration)
+    TenantClients         = ""
 }
 
 # Packages whose software license restricts business use or distribution
@@ -95,6 +98,8 @@ function Save-IntuneChocoSettings {
     $Clean = [ordered]@{}
     foreach ($Key in $script:DefaultSettings.Keys) {
         $Value = $Settings.$Key
+        # Keys the caller does not pass keep their saved value (e.g. TenantClients, which no form shows)
+        if ($null -eq $Value -and $script:Settings) { $Value = $script:Settings.$Key }
         if ($null -eq $Value) { $Value = $script:DefaultSettings[$Key] }
         if ($script:DefaultSettings[$Key] -is [int]) { $Value = [int]$Value } else { $Value = ([string]$Value).Trim() }
         $Clean[$Key] = $Value
@@ -104,12 +109,30 @@ function Save-IntuneChocoSettings {
     if ($Clean.Source -notin "Chocolatey", "Winget") { throw "Unknown package source '$($Clean.Source)'" }
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
+    # The current pair is remembered for later tenant switches
+    $Map = ConvertFrom-TenantClients $Clean.TenantClients
+    if ($Clean.TenantID -and $Clean.ClientID) { $Map[$Clean.TenantID.ToLower()] = $Clean.ClientID }
+    $Clean.TenantClients = (@($Map.Keys | Sort-Object | ForEach-Object { "$_=$($Map[$_])" })) -join ";"
 
     New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
     $Clean | ConvertTo-Json | Set-Content -Path $script:SettingsPath -Encoding UTF8
     $script:Settings = [pscustomobject]$Clean
     return $script:Settings
 }#Validates and saves the settings
+
+function ConvertFrom-TenantClients([string]$Text) {
+    $Map = @{}
+    foreach ($Pair in ($Text -split ";")) {
+        $Tenant, $Client = $Pair -split "=", 2
+        if ($Tenant -and $Client) { $Map[$Tenant.Trim().ToLower()] = $Client.Trim() }
+    }
+    return $Map
+}
+
+function Get-IntuneChocoTenantClient {
+    param([Parameter(Mandatory = $true)][string]$TenantID)
+    return (ConvertFrom-TenantClients $script:Settings.TenantClients)[$TenantID.ToLower()]
+}#The client id of the app registration used in that tenant before, or $null
 
 $script:Settings = Get-IntuneChocoSettings
 
@@ -186,7 +209,7 @@ function Connect-IntuneChoco {
     )
     Assert-IntuneChocoPrerequisites
     $Params = @{ TenantID = $TenantID; ClientID = $ClientID; TimeoutSeconds = $TimeoutSeconds; Authority = $Authority; UrlHandler = $UrlHandler; ShouldCancel = $ShouldCancel }
-    $Token = Invoke-IntuneChocoBrowserSignIn @Params
+    $Token = Invoke-IntuneChocoPkceSignIn @Params
     Set-IntuneChocoToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
     $script:Settings.TenantID = $TenantID
     $script:Settings.ClientID = $ClientID
@@ -194,7 +217,8 @@ function Connect-IntuneChoco {
     Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
 }#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
-function Invoke-IntuneChocoBrowserSignIn {
+function Invoke-IntuneChocoPkceSignIn {
+    # (Modules\Keevault.psm1 has its own Invoke-IntuneChocoBrowserSignIn for the embedded WebView2 sign-in)
     param(
         [Parameter(Mandatory = $true)][string]$TenantID,
         [Parameter(Mandatory = $true)][string]$ClientID,
@@ -314,7 +338,7 @@ function New-IntuneChocoAppRegistration {
     $SignInTenant = if ($TenantID) { $TenantID } else { "organizations" }
     $SetupScopes = (@("Application.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All", "User.Read") | ForEach-Object { "https://graph.microsoft.com/$_" }) -join " "
     Write-Host "Setup: sign in with an administrator account in your browser (creates the app registration and grants the consent)"
-    $Token = Invoke-IntuneChocoBrowserSignIn -TenantID $SignInTenant -ClientID $SetupClient -Scope $SetupScopes -Authority $Authority -UrlHandler $UrlHandler -ShouldCancel $ShouldCancel
+    $Token = Invoke-IntuneChocoPkceSignIn -TenantID $SignInTenant -ClientID $SetupClient -Scope $SetupScopes -Authority $Authority -UrlHandler $UrlHandler -ShouldCancel $ShouldCancel
     $Claims = Get-IntuneChocoTokenClaims $Token.access_token
     $Headers = @{ Authorization = "Bearer $($Token.access_token)"; "Content-Type" = "application/json" }
     $Call = {

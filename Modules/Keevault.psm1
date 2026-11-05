@@ -402,15 +402,24 @@ function Connect-IntuneChocoWithKeevault {
         [Parameter(Mandatory)][string]$CacheFolder,
         [string[]]$Scopes,
         [System.Windows.Window]$Owner,
-        [scriptblock]$OnWait
+        [scriptblock]$OnWait,
+        # Gets the chosen user name and returns @{ TenantID; ClientID } to sign in with (an account of another
+        # tenant needs that tenant's app registration), or throws to stop
+        [scriptblock]$OnAccount
     )
     $client = Connect-KeevaultMcp -OnWait $OnWait
     try {
         $request = @{ purpose = "Intune Chocolatey Deployment: sign in to Microsoft Intune (Graph), tenant $TenantID" }
+        # Keevault lists the accounts of this tenant first (older versions show only those)
         if ($TenantID -match '\.' -and $TenantID -notmatch '^[0-9a-f-]{36}$') { $request.tenant = $TenantID }
         Write-SignInLog 'Keevault: choose the Microsoft account in Keevault ...'
         $login = Invoke-KeevaultMcpTool -Client $client -Name 'request_microsoft_login' -Arguments $request -OnWait $OnWait
         Write-SignInLog "Keevault: signing in as $($login.username) ($($login.title))."
+        if ($OnAccount) {
+            $target = & $OnAccount ([string]$login.username)
+            if ($target.TenantID) { $TenantID = $target.TenantID }
+            if ($target.ClientID) { $ClientID = $target.ClientID }
+        }
         $creds = @{
             Username = [string]$login.username
             Password = [string]$login.password
@@ -442,6 +451,9 @@ function Connect-IntuneChocoWithKeevault {
         if ($creds) { $creds.Password = $null; $creds.Otp = $null }
         Close-KeevaultMcp $client
     }
+    # Where the sign-in went (another tenant when the account belongs to one)
+    $token | Add-Member -NotePropertyName SignInTenantID -NotePropertyValue $TenantID -Force
+    $token | Add-Member -NotePropertyName SignInClientID -NotePropertyValue $ClientID -Force
     $token
 }
 

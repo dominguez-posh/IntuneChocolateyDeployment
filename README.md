@@ -53,7 +53,9 @@ The tool is a WPF window for Windows PowerShell 5.1, without a console window ne
   *Cancel sign-in* meanwhile. The sign-in is renewed silently during long runs. The arrow next to it offers
   **Sign in with Keevault**: you pick the Microsoft account in [Keevault](https://keevault.de), and user name, password and
   one-time code are filled into an embedded sign-in window (WebView2). Needs Keevault with *AI agents (MCP)* switched on;
-  the token stays in this process.
+  the token stays in this process. Keevault lists the accounts of the configured tenant first, all other Microsoft
+  accounts below. Picking an account of another tenant switches the tool to that tenant: with the app registration
+  used there before, or, the first time, with *Create* on the start page to set one up.
 - **Catalog**: curated apps by category with icons, versions, publishers and license notes. Select several apps
   (Ctrl+click / Shift+click, the selection is kept across filters), choose the assignment (available, required, none)
   and deploy them in one go.
