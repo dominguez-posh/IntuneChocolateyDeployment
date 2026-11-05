@@ -210,10 +210,15 @@ $script:SignInPageScript = @'
   const q = (s) => document.querySelector(s);
   const shown = (el) => !!el && !el.disabled && el.offsetParent !== null;
   const empty = (s) => shown(q(s)) && !q(s).value;
+  // Link or tile "Face, fingerprint, PIN or security key" (only when Keevault signs the passkey and has not yet)
+  const toPasskey = () => window.__kvPasskeyShim && !window.__kvPasskeyUsed && (
+    [...document.querySelectorAll('a,button,div[role="button"],div[role="listitem"]')].find((el) => shown(el) && /fido|passkey/i.test(el.id || '') || shown(el) && (el.getAttribute('data-value') || '') === 'FidoKey')
+    || [...document.querySelectorAll('a,button,div[role="button"],div[role="listitem"]')].find((el) => shown(el) && (el.innerText || '').length < 120 && /gesicht|fingerabdruck|sicherheitsschl|face, fingerprint|security key|passkey/i.test(el.innerText || '')));
   let last = '';
   setInterval(() => {
     let step = '';
     if (empty('input[name="otc"]')) step = 'otp';
+    else if (toPasskey()) step = 'to-passkey';
     else if (empty('input[name="passwd"]')) step = 'password';
     else if (empty('input[name="loginfmt"]')) step = 'username';
     else if (shown(q('#KmsiCheckboxField')) && shown(q('#idBtn_Back'))) step = 'kmsi';
@@ -234,6 +239,58 @@ $script:SignInPageScript = @'
     }, 300);
   };
   window.__kvClick = (selector) => { const el = q(selector); if (el) el.click(); };
+  window.__kvToPasskey = () => { const el = toPasskey(); if (el) el.click(); };
+})();
+'@
+
+# Runs before the page's own scripts (only when the Keevault entry holds a passkey): the first passkey request of
+# the page (navigator.credentials.get) goes to the host, which has Keevault sign it; the private key never leaves
+# Keevault. Declined or failed: the browser's own passkey dialog (Windows Hello) as usual.
+$script:PasskeyShimScript = @'
+(() => {
+  if (window.__kvPasskeyShim || !navigator.credentials || !window.chrome || !window.chrome.webview) return;
+  window.__kvPasskeyShim = true;
+  const original = navigator.credentials.get.bind(navigator.credentials);
+  const b64u = (v) => {
+    const b = v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+  const bytes = (s) => {
+    s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '=';
+    const bin = atob(s), a = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    return a.buffer;
+  };
+  const pending = new Map();
+  let next = 0;
+  window.__kvPasskeyResult = (id, c) => {
+    const p = pending.get(id);
+    if (!p) return;
+    pending.delete(id);
+    if (!c) { p.fallback(); return; }
+    const response = { clientDataJSON: bytes(c.response.clientDataJSON), authenticatorData: bytes(c.response.authenticatorData),
+      signature: bytes(c.response.signature), userHandle: c.response.userHandle ? bytes(c.response.userHandle) : null };
+    if (window.AuthenticatorAssertionResponse) Object.setPrototypeOf(response, window.AuthenticatorAssertionResponse.prototype);
+    const cred = { id: c.id, rawId: bytes(c.rawId || c.id), type: 'public-key', authenticatorAttachment: c.authenticatorAttachment || 'platform',
+      response, getClientExtensionResults: () => c.clientExtensionResults || {}, toJSON: () => c };
+    if (window.PublicKeyCredential) Object.setPrototypeOf(cred, window.PublicKeyCredential.prototype);
+    p.resolve(cred);
+  };
+  navigator.credentials.get = function (options) {
+    const pk = options && options.publicKey;
+    // Autofill requests (conditional) and every request after the first go to the browser as usual
+    if (!pk || options.mediation === 'conditional' || window.__kvPasskeyUsed) return original(options);
+    window.__kvPasskeyUsed = true;
+    return new Promise((resolve, reject) => {
+      const id = ++next;
+      pending.set(id, { resolve, fallback: () => original(options).then(resolve, reject) });
+      window.chrome.webview.postMessage('webauthn:' + JSON.stringify({
+        id, challenge: b64u(pk.challenge), rpId: pk.rpId || location.hostname,
+        allow: (pk.allowCredentials || []).map((x) => b64u(x.id))
+      }));
+    });
+  };
 })();
 '@
 
@@ -252,6 +309,9 @@ function Invoke-IntuneChocoBrowserSignIn {
         [string]$LoginHint,
         [scriptblock]$Fill,
         [switch]$HasOtp,
+        # Signs a passkey request: gets (origin, challenge, rpId, allowed credential ids) and returns the
+        # PublicKeyCredential as object, or $null for the browser's own passkey dialog
+        [scriptblock]$Passkey,
         [string]$Title = 'Sign in to Microsoft Intune',
         [string]$Hint,
         [System.Windows.Window]$Owner,
@@ -308,12 +368,13 @@ function Invoke-IntuneChocoBrowserSignIn {
     [void]$grid.Children.Add($wv)
     $win.Content = $grid
 
-    $ctx = @{ Redirect = $null; Done = @{}; Otp = 0; Error = $null }
+    $ctx = @{ Redirect = $null; Done = @{}; Otp = 0; ToPasskey = 0; PasskeyBusy = $false; Error = $null }
     $wv.Add_CoreWebView2InitializationCompleted({
         param($s, $e)
         if (-not $e.IsSuccess) { $ctx.Error = "The embedded browser could not start: $($e.InitializationException.Message)"; $win.Close(); return }
         $s.CoreWebView2.Settings.AreDevToolsEnabled = $false
         $s.CoreWebView2.Settings.IsStatusBarEnabled = $false
+        if ($Passkey) { [void]$s.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($script:PasskeyShimScript) }
     })
     $wv.Add_NavigationStarting({
         param($s, $e)
@@ -331,7 +392,27 @@ function Invoke-IntuneChocoBrowserSignIn {
         if ($origin -notin $script:SignInHosts) { return }
         $step = $e.TryGetWebMessageAsString()
         $js = { param($f, [string[]]$a) [void]$s.ExecuteScriptAsync("window.$f(" + (($a | ForEach-Object { ConvertTo-Json $_ -Compress }) -join ',') + ')') }
+        if ($step -and $step.StartsWith('webauthn:')) {
+            # Passkey request of the page: Keevault signs it (the user confirms in Keevault), else the browser dialog
+            $req = $step.Substring(9) | ConvertFrom-Json
+            $cred = $null
+            if ($Passkey -and -not $ctx.PasskeyBusy) {
+                $ctx.PasskeyBusy = $true
+                try { $cred = & $Passkey ([Uri]$e.Source).GetLeftPart([UriPartial]::Authority) ([string]$req.challenge) ([string]$req.rpId) @($req.allow) }
+                catch { Write-SignInLog "Keevault: passkey not signed ($($_.Exception.Message)). Windows asks for the passkey instead." 'Warning' }
+                finally { $ctx.PasskeyBusy = $false }
+            }
+            $answer = if ($cred) { ConvertTo-Json $cred -Depth 6 -Compress } else { 'null' }
+            [void]$s.ExecuteScriptAsync("window.__kvPasskeyResult($([int]$req.id), $answer)")
+            return
+        }
         switch ($step) {
+            'to-passkey' {
+                # Keevault has the passkey: take "Face, fingerprint, PIN or security key" instead of the password
+                if (-not $Passkey -or $ctx.ToPasskey -ge 2) { return }
+                $ctx.ToPasskey++
+                [void]$s.ExecuteScriptAsync('window.__kvToPasskey()')
+            }
             'username' {
                 if ($ctx.Done.username -or -not $Fill) { return }
                 $ctx.Done.username = $true
@@ -443,9 +524,23 @@ function Connect-IntuneChocoWithKeevault {
                 }
             }
         }
-        $hint = "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time."
+        # Entry with a passkey (or without password): Keevault signs the passkey request, the user confirms in Keevault
+        $passkey = $null
+        if ($login.passkey -or -not $login.password) {
+            $passkey = {
+                param($origin, $challenge, $rpId, $allow)
+                Write-SignInLog 'Keevault: confirm the passkey sign-in in Keevault ...'
+                $a = @{ vaultId = $login.vaultId; entryId = $login.entryId; origin = $origin; challenge = $challenge }
+                if ($rpId) { $a.rpId = $rpId.ToLower() }
+                $r = Invoke-KeevaultMcpTool -Client $client -Name 'sign_in_with_passkey' -Arguments $a -TimeoutSeconds 180 -OnWait $OnWait
+                Write-SignInLog 'Keevault: passkey signed.'
+                $r.credential
+            }
+        }
+        $hint = if ($passkey) { "Keevault signs in $($login.username) with the passkey; confirm it in Keevault. You can type yourself or choose another sign-in method at any time." }
+        else { "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time." }
         $token = Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -Scopes $Scopes -LoginHint $login.username `
-            -Fill $fill -HasOtp:([bool]$login.totp) -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
+            -Fill $fill -HasOtp:([bool]$login.totp) -Passkey $passkey -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
     }
     finally {
         if ($creds) { $creds.Password = $null; $creds.Otp = $null }
