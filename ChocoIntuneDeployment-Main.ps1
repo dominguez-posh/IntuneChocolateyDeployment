@@ -218,23 +218,38 @@ function Connect-IntuneChoco {
 
         $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         $Answer = $null
-        while ($null -eq $Answer) {
-            $Pending = $Listener.GetContextAsync()
-            while (-not $Pending.Wait(250)) {
-                if ($ShouldCancel -and (& $ShouldCancel)) { throw "Sign-in cancelled." }
-                if ((Get-Date) -gt $Deadline) { throw "No sign-in within $TimeoutSeconds seconds. Sign in again and complete the sign-in in the browser." }
+        $Pending = $null
+        $Linger = $null   # after the answer the port stays open a moment: the browser may still fetch the page again
+        while ($true) {
+            if (-not $Pending) { $Pending = $Listener.GetContextAsync() }
+            if ($Answer) {
+                if (-not $Pending.Wait([Math]::Max(0, [int]($Linger - (Get-Date)).TotalMilliseconds))) { break }
+            }
+            else {
+                while (-not $Pending.Wait(250)) {
+                    if ($ShouldCancel -and (& $ShouldCancel)) { throw "Sign-in cancelled." }
+                    if ((Get-Date) -gt $Deadline) { throw "No sign-in within $TimeoutSeconds seconds. Sign in again and complete the sign-in in the browser." }
+                }
             }
             $Context = $Pending.Result
+            $Pending = $null
             $Request = $Context.Request.QueryString
             $Done = [bool]($Request["code"] -or $Request["error"])
-            $Page = if (-not $Done) { "" } elseif ($Request["error"]) { "<h2>Sign-in failed</h2><p>Details are shown in Intune Chocolatey Deployment. You can close this window.</p>" }
+            $Failed = if ($Answer) { [bool]$Answer["error"] } else { [bool]$Request["error"] }
+            $Page = if (-not $Done) { "" } elseif ($Failed) { "<h2>Sign-in failed</h2><p>Details are shown in Intune Chocolatey Deployment. You can close this window.</p>" }
                     else { "<h2>Sign-in complete</h2><p>You can close this window and return to Intune Chocolatey Deployment.</p>" }
             $Html = [Text.Encoding]::UTF8.GetBytes("<html><body style='font-family:Segoe UI,sans-serif;margin:48px;color:#0F172A'>$Page</body></html>")
-            $Context.Response.StatusCode = if ($Done) { 200 } else { 404 }
-            $Context.Response.ContentType = "text/html; charset=utf-8"
-            $Context.Response.OutputStream.Write($Html, 0, $Html.Length)
-            $Context.Response.Close()
-            if ($Done) { $Answer = $Request }   # anything else (e.g. the browser asking for a favicon) is ignored
+            try {
+                $Context.Response.StatusCode = if ($Done) { 200 } else { 404 }
+                $Context.Response.ContentType = "text/html; charset=utf-8"
+                $Context.Response.KeepAlive = $false
+                $Context.Response.ContentLength64 = $Html.Length
+                $Context.Response.OutputStream.Write($Html, 0, $Html.Length)
+                $Context.Response.OutputStream.Close()
+                $Context.Response.Close()
+            }
+            catch { }   # the browser went away; the answer counts anyway
+            if ($Done -and -not $Answer) { $Answer = $Request; $Linger = (Get-Date).AddSeconds(3) }   # anything else (e.g. a favicon) is ignored
         }
     }
     finally {
