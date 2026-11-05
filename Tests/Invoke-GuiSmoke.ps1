@@ -58,6 +58,31 @@ $authority = [powershell]::Create()
             $context.Response.ContentType = 'application/json'
             $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
         }
+        elseif ($request.Url.AbsolutePath -like '/v1.0/*') {
+            # Stand-in for the Graph calls of the app registration setup; checks what the tool sends
+            $path = $request.Url.AbsolutePath; $query = [uri]::UnescapeDataString($request.Url.Query)
+            $sent = if ($request.HasEntityBody) { (New-Object IO.StreamReader($request.InputStream)).ReadToEnd() | ConvertFrom-Json } else { $null }
+            $scopes = 'DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementRBAC.Read.All', 'Group.Read.All'
+            $answer = switch -Wildcard ("$($request.HttpMethod) $path") {
+                'GET /v1.0/organization' { @{ value = @(@{ verifiedDomains = @(@{ name = 'other.example'; isInitial = $false }, @{ name = 'contoso.onmicrosoft.com'; isInitial = $true }) }) } }
+                'GET /v1.0/servicePrincipals' {
+                    if ($query -like "*00000003-0000-0000-c000-000000000000*") { @{ value = @(@{ id = 'graph-sp'; oauth2PermissionScopes = @($scopes | ForEach-Object { @{ id = "scope-$_"; value = $_ } }) }) } }
+                    elseif ($State.Sp) { @{ value = @(@{ id = 'sp-1' }) } } else { @{ value = @() } } }
+                'GET /v1.0/applications' { @{ value = @() } }
+                'POST /v1.0/applications' {
+                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 4
+                    if ($okApp) { $State.App = $true; @{ id = 'app-obj'; appId = '11111111-2222-3333-4444-555555555555' } } else { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: unexpected app registration' } } } }
+                'POST /v1.0/servicePrincipals' { $State.Sp = $true; @{ id = 'sp-1' } }
+                'GET /v1.0/oauth2PermissionGrants' { @{ value = @() } }
+                'POST /v1.0/oauth2PermissionGrants' {
+                    if ($sent.consentType -eq 'AllPrincipals' -and $sent.clientId -eq 'sp-1' -and $sent.resourceId -eq 'graph-sp' -and $sent.scope -eq ($scopes -join ' ')) { @{ id = 'grant-1' } }
+                    else { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: unexpected consent' } } } }
+                default { $context.Response.StatusCode = 404; @{ error = @{ message = "Fake Graph: $($request.HttpMethod) $path" } } }
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($answer | ConvertTo-Json -Depth 8 -Compress))
+            $context.Response.ContentType = 'application/json'
+            $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        }
         else { $context.Response.StatusCode = 404 }
         $context.Response.Close()
     }

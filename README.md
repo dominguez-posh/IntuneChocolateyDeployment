@@ -30,7 +30,10 @@ chocolatey.org feed, SVG icons are converted with Microsoft Edge.
 Install-IntunechocoComponents
 ```
 3. Create an app registration in Entra ID (once per tenant). Microsoft retired the shared "Microsoft Intune PowerShell" app,
-   so IntuneWin32App needs your own:
+   so IntuneWin32App needs your own. **The graphical interface does this for you** (*Set up everything* or *Create* on
+   the start page, or `New-IntuneChocoAppRegistration` on the command line): you sign in once with a Global Administrator
+   through Microsoft's "Microsoft Graph Command Line Tools" app, and the tool creates the registration "Intune Chocolatey
+   Deployment" with the permissions below, grants the admin consent and saves tenant and client ID. By hand:
    - Entra admin center > App registrations > New registration, any name (e.g. "Intune Choco Deployment")
    - Authentication > Add a platform > Mobile and desktop applications > Redirect URI `http://localhost`
    - API permissions > Microsoft Graph > Delegated: `DeviceManagementApps.ReadWrite.All`, `DeviceManagementConfiguration.ReadWrite.All`,
@@ -43,8 +46,9 @@ The tool is a WPF window for Windows PowerShell 5.1, without a console window ne
 
 - **Package source**: the button in the header switches between **Chocolatey** and **winget** (see below); the choice
   is remembered.
-- **Start**: guided steps and a readiness list (module, app registration, sign-in, package source, Chocolatey app in the tenant),
-  each item with the button that fixes it.
+- **Start**: guided steps and a readiness list (modules, app registration, sign-in, Chocolatey app in the tenant). An item
+  that is not ready is red, says why and has the button that fixes it; **Set up everything** runs all fixes one after
+  another (install the modules, create the app registration with admin consent, sign in, deploy the Chocolatey app).
 - **Sign in**: opens the Microsoft sign-in in your browser and waits up to five minutes for it; the button turns into
   *Cancel sign-in* meanwhile. The sign-in is renewed silently during long runs. The arrow next to it offers
   **Sign in with Keevault**: you pick the Microsoft account in [Keevault](https://keevault.de), and user name, password and

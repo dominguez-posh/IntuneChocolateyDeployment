@@ -52,16 +52,36 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'cancelled sign-in ends and is logged' ((-not (Test-SignedIn)) -and (Get-SmokeLog) -match 'Sign-in cancelled')
         Test-Smoke 'sign in is offered again' ($ui.BtnSignIn.Content -eq 'Sign in' -and $ui.BtnSignIn.IsEnabled -and $ui.BtnSignInMenu.IsEnabled) $ui.BtnSignIn.Content
         $true } }
-    @{ Name = 'sign in'; Started = $false; Do = {
+    @{ Name = 'set up everything'; Started = $false; Waited = 0; Do = {
         param($s)
         if (-not $s.Started) {
             $s.Started = $true
+            # No app registration yet: the item is red, says why and offers Create; green items have no button
+            $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
+            Show-Page 'Start'
+            $cards = @(Get-ReadinessItems)
+            $appreg = $cards | Where-Object Key -eq 'appreg'
+            Test-Smoke 'missing app registration is red with a reason' ($appreg.State -eq 'bad' -and $appreg.Text -like '*app registration*') $appreg.Text
+            $buttons = @($ui.ReadinessPanel.Children | ForEach-Object { @($_.Child.Children | Where-Object { $_ -is [System.Windows.Controls.Button] }) | ForEach-Object { [string]$_.Content } })
+            Test-Smoke 'only items that are not ready have a button (Create, Sign in)' (($buttons -join ',') -eq 'Create,Sign in') ($buttons -join ',')
+            Test-Smoke 'set up everything offered' ($ui.BtnSetupAll.Visibility -eq 'Visible' -and $ui.TxtReadinessSummary.Text -like '*not ready*') $ui.TxtReadinessSummary.Text
+            Save-SmokeShot '02-readiness'
             # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
             $script:SignInTest.UrlHandler = 'param($Url) $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
-            Connect-Intune
+            $script:SignInTest.GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
+            & $script:ClickActions[$ui.BtnSetupAll]
             return $false
         }
-        if (-not (Test-Idle 'connect')) { return $false }
+        $s.Waited++
+        if (($script:SetupRunning -or -not (Test-Idle)) -and $s.Waited -lt 1200) { return $false }
+        $log = Get-SmokeLog
+        Test-Smoke 'set up finished' ((-not $script:SetupRunning) -and $log -match 'Everything is set up') (($log -split "`n" | Select-Object -Last 3) -join ' | ')
+        Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'Intune Chocolatey Deployment' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
+        Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com') "$((Get-IntuneChocoSettings).TenantID) / $((Get-IntuneChocoSettings).ClientID)"
+        Test-Smoke 'Chocolatey deployed by the set up' (@($script:TenantApps | Where-Object IsChocolatey).Count -eq 1)
+        Test-Smoke 'all items green, no buttons left' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
+        $true } }
+    @{ Name = 'sign in'; Do = {
         Test-Smoke 'signed in through the browser flow (PKCE, loopback)' (Test-SignedIn)
         Test-Smoke 'header shows the account' ($ui.TxtConnectionStatus.Text -like '*admin@contoso.onmicrosoft.com*') $ui.TxtConnectionStatus.Text
         Test-Smoke 'sign in disabled, sign out enabled' ((-not $ui.BtnSignIn.IsEnabled) -and $ui.BtnSignOut.IsEnabled)
@@ -79,7 +99,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         do { $direct = @(Get-IntuneWin32App).Count } while ($false)
         Test-Smoke 'fake module gives up silently when called directly (like the real one)' ($direct -eq 'not reached') $direct
         # ... through Invoke-IntuneModule the same call works, and a give-up becomes an error
-        Test-Smoke 'module call works through Invoke-IntuneModule' (@(Invoke-IntuneModule { Get-IntuneWin32App }).Count -eq 0)
+        Test-Smoke 'module call works through Invoke-IntuneModule' (@(Invoke-IntuneModule { Get-IntuneWin32App }).Count -eq 1)   # Chocolatey, from the set up
         try { Invoke-IntuneModule { Write-Warning 'gave up' 3>$null; break }; Test-Smoke 'a module give-up becomes an error' $false }
         catch { Test-Smoke 'a module give-up becomes an error' ($_.Exception.Message -like '*gave up without a result*') $_.Exception.Message }
         Test-Smoke 'culture restored after the module call' ([Threading.Thread]::CurrentThread.CurrentCulture.Name -eq $cultureBefore) [Threading.Thread]::CurrentThread.CurrentCulture.Name

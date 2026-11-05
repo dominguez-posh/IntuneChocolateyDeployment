@@ -303,13 +303,17 @@ function Update-Busy {
     $ui.BtnInstallModule.IsEnabled = -not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'components' }).Count
     Update-SignInButton
     Update-SelectionView
+    # The readiness items show running steps ("Installing ...") instead of their button
+    if ($script:CurrentPage -eq 'Start' -and ($running.Count -or $visible.Count -ne $script:LastVisibleTasks)) { Update-Readiness }
+    $script:LastVisibleTasks = $visible.Count
 }
+$script:LastVisibleTasks = 0
 
 function Test-TaskRunning([string]$Kind) { @($script:Tasks | Where-Object { $_.Job.Kind -eq $Kind }).Count -gt 0 }
 
 function Update-SignInButton {
     # While the browser sign-in waits, the button cancels it; only the button that applies is enabled (as in the MFA tool)
-    $connecting = Test-TaskRunning 'connect'
+    $connecting = (Test-TaskRunning 'connect') -or (Test-TaskRunning 'appreg')
     $signedIn = [bool]$script:Shared.Auth
     $ui.BtnSignIn.Content = if ($connecting) { 'Cancel sign-in' } else { 'Sign in' }
     $ui.BtnSignIn.Tag = [string]$(if ($connecting) { [char]0xE711 } else { [char]0xE77B })
@@ -591,7 +595,7 @@ $script:HelpTexts = @{
         @('Chocolatey or winget', 'The button in the header switches the package source. Catalog and search show the packages of that source. winget installs straight from the vendors (no rate limit, Microsoft-run repository) and needs Windows 10 1809 or newer; Chocolatey can use your own repository.'),
         @('Requirements', 'The IntuneWin32App module 1.5.0 or newer (Settings > Components) and an Entra ID app registration with redirect URI http://localhost and the delegated Graph permissions listed in the settings. Chocolatey and Inkscape are not needed on this computer.'),
         @('Sign in', 'Sign in opens the Microsoft sign-in in your browser. The arrow next to it offers the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in.'),
-        @('Readiness', 'All items should be green before the first deployment. Each one links to the place where it is fixed.'))
+        @('Readiness', 'All items should be green before the first deployment. A red item says why and has the button that fixes it. Set up everything runs all fixes one after another: modules, app registration (one sign-in with a Global Administrator, admin consent included), sign-in, Chocolatey app.'))
     Catalog  = @(
         @('Catalog', 'A curated list of common packages by category (catalog.json next to the scripts, edit it to add your own; "winget" holds the id of the same app in winget). Versions, publishers and icons come from the active source and are cached for 24 hours.'),
         @('Selecting', 'Click an app for its details. Ctrl+click or Shift+click selects several apps; the selection is kept while you switch categories or search. Select shown picks every row of the current view.'),
@@ -668,31 +672,148 @@ function New-ReadinessCard {
     $border
 }
 
+function Get-ReadinessItems {
+    <#
+    Everything the tool needs, in the order it is set up. Each item: state, the reason when it is not ok, and the fix
+    (Key names the step for "Set up everything"; Wait = a task for it is running).
+    #>
+    $m = $script:ModuleState
+    $winget = $script:Source -eq 'Winget'
+    $busyModules = Test-TaskRunning 'components'
+    $busyAppReg = Test-TaskRunning 'appreg'
+    $busyConnect = Test-TaskRunning 'connect'
+    $items = @(
+        $(if ($m.Ok) { @{ Key = 'module'; Glyph = [char]0xE7B8; Title = 'IntuneWin32App module'; State = 'ok'; Text = "Version $($m.Version) is installed." } }
+          else { @{ Key = 'module'; Glyph = [char]0xE7B8; Title = 'IntuneWin32App module'; State = 'bad'; Wait = $busyModules
+                    Text = $(if ($busyModules) { 'Installing from the PowerShell Gallery ...' } elseif ($m.Version) { "Version $($m.Version) is installed, but $($script:MinimumModuleVersion) or newer is needed: older versions break packaging and dependencies." } else { 'Not installed. It packages the apps and talks to Intune; installed for your user, no admin rights needed.' })
+                    Fix = 'Install'; Action = { Start-ModuleInstall } } })
+        $(if ($winget) {
+            if ($m.Winget) { @{ Key = 'winget'; Glyph = [char]0xE753; Title = 'winget module'; State = 'ok'; Text = "Microsoft.WinGet.Client $($m.WingetVersion) is installed." } }
+            else { @{ Key = 'winget'; Glyph = [char]0xE753; Title = 'winget module'; State = 'bad'; Wait = $busyModules
+                      Text = $(if ($busyModules) { 'Installing from the PowerShell Gallery ...' } else { 'Microsoft.WinGet.Client is not installed. winget is the package source, and package infos and the search need it.' })
+                      Fix = 'Install'; Action = { Start-ModuleInstall } } }
+          })
+        $(if ($script:Settings.TenantID -and $script:Settings.ClientID) { @{ Key = 'appreg'; Glyph = [char]0xE713; Title = 'Tenant and app registration'; State = 'ok'; Text = "$($script:Settings.TenantID), client ID $($script:Settings.ClientID)." } }
+          else { @{ Key = 'appreg'; Glyph = [char]0xE713; Title = 'Tenant and app registration'; State = 'bad'; Wait = $busyAppReg
+                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif (-not $script:Settings.ClientID) { 'No app registration yet: the tool signs in with its own Entra ID app. Create creates it with admin consent (needs a Global Administrator once); an existing one is entered in the settings.' } else { 'The tenant is missing (Settings).' })
+                    Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
+        $(if (Test-SignedIn) { @{ Key = 'signin'; Glyph = [char]0xE77B; Title = 'Signed in to Intune'; State = 'ok'; Text = $ui.TxtConnectionStatus.Text } }
+          else { @{ Key = 'signin'; Glyph = [char]0xE77B; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
+                    Text = $(if ($busyConnect) { 'Waiting for the sign-in in your browser ...' } else { 'Not signed in. Deploying and the tenant view need a sign-in with an Intune administrator account.' })
+                    Fix = 'Sign in'; Action = { Connect-Intune } } })
+    )
+    if (-not $winget) {
+        $busyChoco = Test-TaskRunning 'chocolatey'
+        $items += $(if (-not (Test-SignedIn)) { @{ Key = 'choco'; Glyph = [char]0xE896; Title = 'Chocolatey app in tenant'; State = 'warn'; Text = 'Checked after the sign-in.' } }
+                    elseif ($null -eq $script:TenantApps) {
+                        $reading = Test-TaskRunning 'tenant'
+                        @{ Key = 'tenant'; Glyph = [char]0xE896; Title = 'Chocolatey app in tenant'; State = 'warn'; Wait = $reading
+                           Text = $(if ($reading) { 'Reading the apps in the tenant ...' } else { 'The apps in the tenant could not be read yet.' }); Fix = 'Check'; Action = { Start-TenantRefresh } } }
+                    elseif (@($script:TenantApps | Where-Object IsChocolatey).Count) { @{ Key = 'choco'; Glyph = [char]0xE896; Title = 'Chocolatey app in tenant'; State = 'ok'; Text = "Deployed; $(@($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count) apps created by this tool." } }
+                    else { @{ Key = 'choco'; Glyph = [char]0xE896; Title = 'Chocolatey app in tenant'; State = 'bad'; Wait = $busyChoco
+                              Text = $(if ($busyChoco) { 'Deploying Chocolatey to Intune ...' } else { 'Not in the tenant yet. Every Chocolatey app depends on it; it is also created with the first app.' })
+                              Fix = 'Deploy'; Action = { Start-ChocolateyDeploy } } })
+    }
+    $items
+}
+
 function Update-Readiness {
     if (-not $ui.ReadinessPanel) { return }
     $ui.ReadinessPanel.Children.Clear()
     $script:ReadinessActions.Clear()
-    $m = $script:ModuleState
-    $cards = @(
-        $(if ($m.Ok) { New-ReadinessCard ([char]0xE7B8) 'IntuneWin32App module' 'ok' "Version $($m.Version) is installed." }
-          else { New-ReadinessCard ([char]0xE7B8) 'IntuneWin32App module' 'bad' $(if ($m.Version) { "Version $($m.Version) is too old, $($script:MinimumModuleVersion) or newer is needed." } else { 'Not installed yet.' }) 'Install' { Start-ModuleInstall } })
-        $(if ($script:Settings.TenantID -and $script:Settings.ClientID) { New-ReadinessCard ([char]0xE713) 'Tenant and app registration' 'ok' "$($script:Settings.TenantID), client ID set." 'Settings' { Show-Page 'Settings' } }
-          else { New-ReadinessCard ([char]0xE713) 'Tenant and app registration' 'bad' 'Enter tenant and the client ID of your app registration.' 'Settings' { Show-Page 'Settings' } })
-        $(if (Test-SignedIn) { New-ReadinessCard ([char]0xE77B) 'Signed in to Intune' 'ok' $ui.TxtConnectionStatus.Text }
-          else { New-ReadinessCard ([char]0xE77B) 'Signed in to Intune' 'warn' 'Sign in with your Microsoft account or an account from Keevault.' 'Sign in' { Connect-Intune } })
-        $(if ($script:Source -eq 'Winget') {
-            if ($m.Winget) { New-ReadinessCard ([char]0xE753) 'Package source: winget' 'ok' "Microsoft.WinGet.Client $($m.WingetVersion) is installed. Devices install with winget from the vendors' download sites." 'Chocolatey' { Set-PackageSource 'Chocolatey' } }
-            else { New-ReadinessCard ([char]0xE753) 'Package source: winget' 'bad' 'The Microsoft.WinGet.Client module is needed for winget package infos and the search.' 'Install' { Start-ModuleInstall } }
-          }
-          elseif ($script:Settings.PackageSource) { New-ReadinessCard ([char]0xE753) 'Package source: Chocolatey' 'ok' "Devices install from $($script:Settings.PackageSource)." 'winget' { Set-PackageSource 'Winget' } }
-          else { New-ReadinessCard ([char]0xE753) 'Package source: Chocolatey' 'warn' 'Devices install from the Chocolatey community repository (rate limited, not recommended for larger environments). winget installs from the vendors directly.' 'winget' { Set-PackageSource 'Winget' } })
-    )
-    if ($null -ne $script:TenantApps) {
-        $choco = @($script:TenantApps | Where-Object IsChocolatey).Count -gt 0
-        $cards += $(if ($choco) { New-ReadinessCard ([char]0xE896) 'Chocolatey app in tenant' 'ok' "Deployed; $(@($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count) apps created by this tool." 'Show' { Show-Page 'Tenant' } }
-                    else { New-ReadinessCard ([char]0xE896) 'Chocolatey app in tenant' 'warn' 'Not deployed yet, it is created with the first app.' 'Show' { Show-Page 'Tenant' } })
+    $items = @(Get-ReadinessItems)
+    foreach ($i in $items) {
+        # Only items that are not ok get a button, and it fixes that item
+        $action = if ($i.State -ne 'ok' -and $i.Action -and -not $i.Wait) { $i.Action } else { $null }
+        [void]$ui.ReadinessPanel.Children.Add((New-ReadinessCard $i.Glyph $i.Title $i.State $i.Text $i.Fix $action))
     }
-    foreach ($card in $cards) { [void]$ui.ReadinessPanel.Children.Add($card) }
+    $open = @($items | Where-Object { $_.State -ne 'ok' })
+    $ui.TxtReadinessSummary.Text = if ($script:SetupRunning) { 'Setting up, step by step ...' }
+                                   elseif ($open.Count -eq 0) { 'Everything is set up.' }
+                                   else { "$($open.Count) of $($items.Count) not ready: $(($open | ForEach-Object { $_.Title }) -join ', ')." }
+    $ui.BtnSetupAll.Visibility = if ($open.Count -eq 0) { 'Collapsed' } else { 'Visible' }
+    $ui.BtnSetupAll.IsEnabled = -not $script:SetupRunning
+}
+
+# ---------------------------------------------------------------- set up everything
+# Runs the fixes of the readiness items one after another; each task calls Complete-SetupStep when it is done.
+$script:SetupRunning = $false
+$script:SetupDone = @{}
+function Start-SetupAll {
+    $script:SetupRunning = $true
+    $script:SetupDone = @{}
+    Write-UiLog 'Setting up everything that is not ready yet ...'
+    Step-Setup
+}
+function Stop-Setup([string]$Message, [string]$Level = 'Warning') {
+    $script:SetupRunning = $false
+    if ($Message) { Write-UiLog $Message $Level }
+    Update-Readiness
+}
+function Step-Setup {
+    if (-not $script:SetupRunning) { return }
+    $items = @(Get-ReadinessItems)
+    if (@($items | Where-Object Wait).Count) { Update-Readiness; return }   # a step is still running
+    $next = $items | Where-Object { $_.State -ne 'ok' -and $_.Action } | Select-Object -First 1
+    if (-not $next) {
+        if (@($items | Where-Object { $_.State -ne 'ok' }).Count) { Stop-Setup 'Set up stopped: an item is left that has no automatic fix.' }
+        else { Stop-Setup 'Everything is set up.' 'Success' }
+        return
+    }
+    if ($script:SetupDone[$next.Key]) { Stop-Setup "Set up stopped at '$($next.Title)': $($next.Text)"; return }   # tried once, it did not help
+    $script:SetupDone[$next.Key] = $true
+    try { & $next.Action } catch { Stop-Setup "Set up stopped at '$($next.Title)': $($_.Exception.Message)"; return }
+    Update-Readiness
+    if (-not @(Get-ReadinessItems | Where-Object Wait).Count) { Step-Setup }   # the fix was immediate
+}
+function Complete-SetupStep([bool]$Ok, [string]$What) {
+    if (-not $script:SetupRunning) { Update-Readiness; return }
+    if (-not $Ok) { Stop-Setup "Set up stopped: $What did not work, see the messages above."; return }
+    Step-Setup
+}
+Add-Click $ui.BtnSetupAll { Start-SetupAll }
+
+function Start-AppRegistration {
+    if (Test-TaskRunning 'appreg') { return }
+    if (Test-TaskRunning 'connect') { throw 'A sign-in is waiting in the browser. Finish or cancel it first.' }
+    $script:Shared.CancelSignIn = $false
+    $work = @'
+param($TenantID, $Authority, $UrlHandler, $GraphUrl)
+$Params = @{ ShouldCancel = { $Shared.CancelSignIn } }
+if ($TenantID) { $Params.TenantID = $TenantID }
+if ($Authority) { $Params.Authority = $Authority }
+if ($GraphUrl) { $Params.GraphUrl = $GraphUrl }
+if ($UrlHandler) { $Params.UrlHandler = [scriptblock]::Create($UrlHandler) }
+New-IntuneChocoAppRegistration @Params
+'@
+    $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl }
+    [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration: sign in with an administrator account in your browser and accept the consent' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
+        param($Result, $Job)
+        $reg = @($Result | Where-Object { $_ -and $_.ClientID }) | Select-Object -First 1
+        if ($Job.Status -eq 'succeeded' -and $reg) {
+            $s = Get-IntuneChocoSettings; $s.TenantID = $reg.TenantID; $s.ClientID = $reg.ClientID
+            [void](Save-IntuneChocoSettings -Settings $s); $script:Settings = Get-IntuneChocoSettings
+            Update-SettingsView
+            Write-UiLog "App registration ready: tenant $($reg.TenantID), client ID $($reg.ClientID). Saved in the settings." 'Success'
+            Update-ConnectionStatus
+            Complete-SetupStep $true
+        }
+        else { Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
+    })
+    Update-SignInButton
+    Update-Readiness
+}
+
+function Start-ChocolateyDeploy {
+    if (Test-TaskRunning 'chocolatey') { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the Chocolatey app to Intune' -NeedsAuth -Work 'get-ChocoWin32ID' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'Chocolatey is in the tenant.' 'Success' }
+        $script:TenantApps = $null
+        if ($Job.Status -eq 'succeeded') { Start-TenantRefresh } else { Update-Readiness; Complete-SetupStep $false 'deploying Chocolatey' }
+    })
+    Update-Readiness
 }
 
 # ---------------------------------------------------------------- packages: catalog, search, selection, details
@@ -1062,7 +1183,7 @@ Get-IntuneChocoTenantApps | ForEach-Object {
 '@
     [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -NeedsAuth -Work $work -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'failed') { $ui.TxtTenantCount.Text = 'Could not read the tenant, see the activity panel'; return }
+        if ($Job.Status -eq 'failed') { $ui.TxtTenantCount.Text = 'Could not read the tenant, see the activity panel'; Complete-SetupStep $false 'reading the tenant'; return }
         $script:TenantApps = @($Result | Where-Object { $_ -and $_.Id } | ForEach-Object {
             $created = try { ([datetime]$_.Created).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } catch { $_.Created }
             [pscustomobject]@{
@@ -1084,8 +1205,9 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         Update-CatalogGrid
         if ($script:SearchIds.Count) { Update-SearchRows }
         Update-TenantButtons
-        Update-Readiness
+        Complete-SetupStep $true
     })
+    Update-Readiness
 }
 Add-Click $ui.BtnTenantRefresh { Start-TenantRefresh }
 
@@ -1172,7 +1294,9 @@ function Start-ModuleInstall {
         Update-ConnectionStatus
         if ($Job.Status -eq 'succeeded') { Write-UiLog "IntuneWin32App $($script:ModuleState.Version) and Microsoft.WinGet.Client $($script:ModuleState.WingetVersion) are ready." 'Success' }
         if ($script:CurrentPage -eq 'Catalog') { Start-CatalogPrefetch }
+        Complete-SetupStep ($Job.Status -eq 'succeeded') 'installing the modules'
     })
+    Update-Readiness
 }
 Add-Click $ui.BtnInstallModule { Start-ModuleInstall }
 
@@ -1251,7 +1375,7 @@ Get-IntuneChocoAuthState
     [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
         $state = @($Result | Where-Object { $_ -is [hashtable] -and $_.AccessToken })
-        if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Update-ConnectionStatus; return }   # the reason is in the activity panel
+        if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Update-ConnectionStatus; Complete-SetupStep $false 'the sign-in'; return }   # the reason is in the activity panel
         $script:Shared.Auth = $state[0]
         Set-IntuneChocoAuthState $script:Shared.Auth
         Complete-SignIn 'in the browser'
@@ -1314,7 +1438,7 @@ function Show-SignInMenu($Target) {
     $menu.IsOpen = $true
 }
 Add-Click $ui.BtnSignIn {
-    if (Test-TaskRunning 'connect') {
+    if ((Test-TaskRunning 'connect') -or (Test-TaskRunning 'appreg')) {
         $script:Shared.CancelSignIn = $true
         Write-UiLog 'Cancelling the sign-in ...'
     }

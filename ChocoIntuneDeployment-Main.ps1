@@ -185,7 +185,26 @@ function Connect-IntuneChoco {
         [scriptblock]$ShouldCancel
     )
     Assert-IntuneChocoPrerequisites
+    $Params = @{ TenantID = $TenantID; ClientID = $ClientID; TimeoutSeconds = $TimeoutSeconds; Authority = $Authority; UrlHandler = $UrlHandler; ShouldCancel = $ShouldCancel }
+    $Token = Invoke-IntuneChocoBrowserSignIn @Params
+    Set-IntuneChocoToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
+    $script:Settings.TenantID = $TenantID
+    $script:Settings.ClientID = $ClientID
+    $Identity = Get-IntuneChocoIdentity
+    Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
+}#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
+function Invoke-IntuneChocoBrowserSignIn {
+    param(
+        [Parameter(Mandatory = $true)][string]$TenantID,
+        [Parameter(Mandatory = $true)][string]$ClientID,
+        [string]$Scope = $script:GraphScopeString,
+        [int]$TimeoutSeconds = 300,
+        [string]$Authority = $script:DefaultAuthority,
+        [scriptblock]$UrlHandler,
+        [scriptblock]$ShouldCancel,
+        [string]$Prompt = "select_account"
+    )
     # Authorization code flow with PKCE in the browser, answer on a loopback port. Done here and not with
     # Connect-MSIntuneGraph -Interactive, which waits forever when the browser window is closed.
     $Random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -206,11 +225,11 @@ function Connect-IntuneChoco {
             response_type         = "code"
             redirect_uri          = $RedirectUri
             response_mode         = "query"
-            scope                 = $script:GraphScopeString
+            scope                 = $Scope
             state                 = $State
             code_challenge        = $Challenge
             code_challenge_method = "S256"
-            prompt                = "select_account"
+            prompt                = $Prompt
         }
         $Url = "$($Authority.TrimEnd('/'))/$TenantID/oauth2/v2.0/authorize?" + (($Query.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, [uri]::EscapeDataString($_.Value) }) -join "&")
         Write-Host "Waiting for the Microsoft sign-in in your browser (up to $TimeoutSeconds seconds)"
@@ -259,18 +278,115 @@ function Connect-IntuneChoco {
 
     if ($Answer["error"]) { throw "Sign-in failed: $(($Answer['error_description'] -split "`r?`n")[0])" }
     if ($Answer["state"] -ne $State) { throw "Sign-in failed: the answer does not belong to this sign-in." }
-    $Token = Invoke-IntuneChocoTokenRequest -TenantID $TenantID -ClientID $ClientID -Authority $Authority -Body @{
+    return Invoke-IntuneChocoTokenRequest -TenantID $TenantID -ClientID $ClientID -Authority $Authority -Body @{
         grant_type    = "authorization_code"
         code          = $Answer["code"]
         redirect_uri  = $RedirectUri
         code_verifier = $Verifier
+        scope         = $Scope
     }
-    Set-IntuneChocoToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
-    $script:Settings.TenantID = $TenantID
-    $script:Settings.ClientID = $ClientID
-    $Identity = Get-IntuneChocoIdentity
-    Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
-}#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
+}#Browser sign-in (authorization code with PKCE), returns the token response
+
+function Get-IntuneChocoTokenClaims {
+    param([string]$AccessToken)
+    $Payload = $AccessToken.Split(".")[1].Replace("-", "+").Replace("_", "/")
+    $Payload = $Payload.PadRight($Payload.Length + (4 - $Payload.Length % 4) % 4, "=")
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
+}
+
+function New-IntuneChocoAppRegistration {
+    param(
+        # Empty: the tenant of the account that signs in
+        [string]$TenantID,
+        [string]$DisplayName = "Intune Chocolatey Deployment",
+        [string]$Authority = $script:DefaultAuthority,
+        [scriptblock]$UrlHandler,
+        [scriptblock]$ShouldCancel,
+        # Graph endpoint (tests point it to a stand-in)
+        [string]$GraphUrl = "https://graph.microsoft.com"
+    )
+    # Signs in once with Microsoft's own "Microsoft Graph Command Line Tools" app (the one Connect-MgGraph uses) to
+    # create the app registration this tool signs in with, and grants the admin consent for it. Needs an account that
+    # may create apps and grant consent (Global Administrator, or Application Administrator plus Privileged Role
+    # Administrator); the browser asks to consent to the setup permissions first.
+    $SetupClient = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+    $Graph = $GraphUrl.TrimEnd("/")
+    $SignInTenant = if ($TenantID) { $TenantID } else { "organizations" }
+    $SetupScopes = (@("Application.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All", "User.Read") | ForEach-Object { "https://graph.microsoft.com/$_" }) -join " "
+    Write-Host "Setup: sign in with an administrator account in your browser (creates the app registration and grants the consent)"
+    $Token = Invoke-IntuneChocoBrowserSignIn -TenantID $SignInTenant -ClientID $SetupClient -Scope $SetupScopes -Authority $Authority -UrlHandler $UrlHandler -ShouldCancel $ShouldCancel
+    $Claims = Get-IntuneChocoTokenClaims $Token.access_token
+    $Headers = @{ Authorization = "Bearer $($Token.access_token)"; "Content-Type" = "application/json" }
+    $Call = {
+        param([string]$Method, [string]$Path, $Body)
+        $Request = @{ Method = $Method; Uri = "$Graph$Path"; Headers = $Headers; TimeoutSec = 60; ErrorAction = "Stop" }
+        if ($null -ne $Body) { $Request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 8 -Compress)) }
+        try { Invoke-RestMethod @Request }
+        catch {
+            $Detail = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch { $null }
+            throw "Graph $Method $Path failed: $(if ($Detail) { $Detail } else { $_.Exception.Message })"
+        }
+    }
+
+    # The tenant: its initial domain, as in the settings field
+    $Tenant = [string]$Claims.tid
+    try {
+        $Org = (& $Call GET "/v1.0/organization?`$select=verifiedDomains" $null).value | Select-Object -First 1
+        $Initial = $Org.verifiedDomains | Where-Object isInitial | Select-Object -First 1
+        if ($Initial.name) { $Tenant = [string]$Initial.name }
+    }
+    catch { Write-Warning "The tenant domain could not be read, the tenant id is used: $($_.Exception.Message)" }
+
+    $GraphApp = "00000003-0000-0000-c000-000000000000"
+    $GraphSp = (& $Call GET "/v1.0/servicePrincipals?`$filter=appId eq '$GraphApp'&`$select=id,oauth2PermissionScopes" $null).value | Select-Object -First 1
+    if (-not $GraphSp) { throw "Microsoft Graph was not found in the tenant." }
+    $ScopeNames = @($script:GraphScopeString -split " " | Where-Object { $_ -like "https://graph.microsoft.com/*" } | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' })
+    $Access = foreach ($Name in $ScopeNames) {
+        $Scope = $GraphSp.oauth2PermissionScopes | Where-Object value -eq $Name | Select-Object -First 1
+        if (-not $Scope) { throw "The Graph permission $Name was not found." }
+        @{ id = $Scope.id; type = "Scope" }
+    }
+
+    # An app registration of an earlier setup is reused
+    $Filter = [uri]::EscapeDataString("displayName eq '$($DisplayName.Replace("'", "''"))'")
+    $App = (& $Call GET "/v1.0/applications?`$filter=$Filter&`$select=id,appId,publicClient,isFallbackPublicClient" $null).value |
+        Where-Object { $_.publicClient.redirectUris -contains "http://localhost" } | Select-Object -First 1
+    $Definition = @{
+        isFallbackPublicClient = $true
+        publicClient           = @{ redirectUris = @("http://localhost") }
+        requiredResourceAccess = @(@{ resourceAppId = $GraphApp; resourceAccess = @($Access) })
+    }
+    if ($App) {
+        Write-Host "App registration '$DisplayName' exists already ($($App.appId)), its permissions are updated"
+        & $Call PATCH "/v1.0/applications/$($App.id)" $Definition | Out-Null
+    }
+    else {
+        $Definition.displayName = $DisplayName
+        $Definition.signInAudience = "AzureADMyOrg"
+        $App = & $Call POST "/v1.0/applications" $Definition
+        Write-Host "App registration '$DisplayName' created ($($App.appId))"
+    }
+
+    # Enterprise app (service principal); right after creating the app registration Graph may not know it yet
+    $Sp = $null
+    for ($Attempt = 1; -not $Sp; $Attempt++) {
+        $Sp = (& $Call GET "/v1.0/servicePrincipals?`$filter=appId eq '$($App.appId)'&`$select=id" $null).value | Select-Object -First 1
+        if ($Sp) { break }
+        try { $Sp = & $Call POST "/v1.0/servicePrincipals" @{ appId = $App.appId } }
+        catch { if ($Attempt -ge 6) { throw }; Start-Sleep -Seconds (5 * $Attempt) }
+    }
+
+    # Admin consent for the whole organization
+    $ScopeText = $ScopeNames -join " "
+    $Grant = (& $Call GET "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$($Sp.id)' and consentType eq 'AllPrincipals' and resourceId eq '$($GraphSp.id)'" $null).value | Select-Object -First 1
+    if ($Grant) { & $Call PATCH "/v1.0/oauth2PermissionGrants/$($Grant.id)" @{ scope = $ScopeText } | Out-Null }
+    else { & $Call POST "/v1.0/oauth2PermissionGrants" @{ clientId = $Sp.id; consentType = "AllPrincipals"; resourceId = $GraphSp.id; scope = $ScopeText } | Out-Null }
+    Write-Host "Admin consent granted: $ScopeText"
+
+    $script:Settings.TenantID = $Tenant
+    $script:Settings.ClientID = [string]$App.appId
+    return [pscustomobject]@{ TenantID = $Tenant; ClientID = [string]$App.appId; Account = [string]$(if ($Claims.upn) { $Claims.upn } else { $Claims.preferred_username }) }
+}#Creates (or updates) the Entra ID app registration of this tool with admin consent, returns tenant and client id
 
 function Invoke-IntuneModule {
     param([Parameter(Mandatory = $true)][scriptblock]$Script)
@@ -371,9 +487,7 @@ function Get-IntuneChocoIdentity {
     # Name, account and tenant from the access token (display only, Graph checks the signature)
     if ($null -eq $Global:AccessToken) { return $null }
     try {
-        $Payload = ([string]$Global:AccessToken.access_token).Split(".")[1].Replace("-", "+").Replace("_", "/")
-        $Payload = $Payload.PadRight($Payload.Length + (4 - $Payload.Length % 4) % 4, "=")
-        $Claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
+        $Claims = Get-IntuneChocoTokenClaims ([string]$Global:AccessToken.access_token)
         $Account = if ($Claims.upn) { $Claims.upn } elseif ($Claims.preferred_username) { $Claims.preferred_username } else { $Claims.unique_name }
         return [pscustomobject]@{ Name = $Claims.name; Account = $Account; TenantId = $Claims.tid; ExpiresOn = $Global:AccessToken.ExpiresOn }
     }

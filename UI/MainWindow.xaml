@@ -102,7 +102,7 @@
                                     <Border Style="{StaticResource StepDot}"><TextBlock Text="1" Style="{StaticResource StepNumber}"/></Border>
                                     <StackPanel Grid.Column="1">
                                         <TextBlock Text="Prepare once" Style="{StaticResource StepTitle}"/>
-                                        <TextBlock Text="Install the IntuneWin32App module (Settings > Components) and enter tenant and the client ID of your Entra ID app registration. Chocolatey is not needed on this computer." Style="{StaticResource StepText}"/>
+                                        <TextBlock Text="Set up everything (right) installs the modules, creates the Entra ID app registration with admin consent and signs you in. Chocolatey is not needed on this computer." Style="{StaticResource StepText}"/>
                                     </StackPanel>
                                 </Grid>
                                 <Grid Margin="0,0,0,12">
@@ -140,7 +140,15 @@
                         </GroupBox>
                     </StackPanel>
                     <StackPanel Grid.Column="2">
-                        <TextBlock Text="Readiness" Style="{StaticResource CardTitle}" Margin="0,0,0,8"/>
+                        <Grid Margin="0,0,14,8">
+                            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Readiness" Style="{StaticResource CardTitle}"/>
+                                <TextBlock x:Name="TxtReadinessSummary" Style="{StaticResource Hint}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                            <Button x:Name="BtnSetupAll" Grid.Column="1" Tag="&#xE768;" Content="Set up everything" VerticalAlignment="Center" Margin="10,0,0,0"
+                                    ToolTip="Fixes every item that is not green, one after another: modules, app registration with admin consent, sign-in, Chocolatey app."/>
+                        </Grid>
                         <StackPanel x:Name="ReadinessPanel" Margin="0,0,14,0"/>
                     </StackPanel>
                 </Grid>
