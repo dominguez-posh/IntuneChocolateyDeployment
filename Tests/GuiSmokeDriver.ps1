@@ -72,6 +72,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $identity = Get-IntuneChocoIdentity
         Test-Smoke 'expiring token renewed silently' ($identity.Name -eq 'Test Admin renewed' -and ([datetime]$identity.ExpiresOn) -gt (Get-Date).ToUniversalTime().AddMinutes(30)) $identity.Name
         Test-Smoke 'renewed token handed to the tasks' ($script:Shared.Auth.AccessToken.RefreshToken -eq 'refresh-Test Admin renewed')
+        # The module leaves with "break" when it distrusts the sign-in: that must surface as an error, not as silence.
+        # Called directly (as the module's own check sees it under a German date format) nothing comes back ...
+        $cultureBefore = [Threading.Thread]::CurrentThread.CurrentCulture.Name
+        $direct = 'not reached'
+        do { $direct = @(Get-IntuneWin32App).Count } while ($false)
+        Test-Smoke 'fake module gives up silently when called directly (like the real one)' ($direct -eq 'not reached') $direct
+        # ... through Invoke-IntuneModule the same call works, and a give-up becomes an error
+        Test-Smoke 'module call works through Invoke-IntuneModule' (@(Invoke-IntuneModule { Get-IntuneWin32App }).Count -eq 0)
+        try { Invoke-IntuneModule { Write-Warning 'gave up' 3>$null; break }; Test-Smoke 'a module give-up becomes an error' $false }
+        catch { Test-Smoke 'a module give-up becomes an error' ($_.Exception.Message -like '*gave up without a result*') $_.Exception.Message }
+        Test-Smoke 'culture restored after the module call' ([Threading.Thread]::CurrentThread.CurrentCulture.Name -eq $cultureBefore) [Threading.Thread]::CurrentThread.CurrentCulture.Name
         $true } }
     @{ Name = 'catalog infos'; Started = $false; Waited = 0; Do = {
         param($s)

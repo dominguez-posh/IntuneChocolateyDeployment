@@ -142,6 +142,12 @@ pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPr
   Azure Artifacts) in front and set it as package source.
 - Package infos are read with the NuGet v2 queries choco itself sends (choco 1.x style, falling back to the choco 2.x
   style). Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
+### IntuneWin32App on non-English Windows
+IntuneWin32App 1.5.0 checks the token expiry by writing the date in the current culture and reading it back in US
+format. On a German (or any day-first) Windows a fresh token then counts as expired, the module tries to renew it
+and gives up with `break`, which silently ends the calling script. This tool runs every module call with the invariant
+culture and turns such a give-up into a visible error, so it works on any Windows language.
+
 ## Tests
 `Tests\Invoke-GuiSmoke.ps1` starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`) and its own
 `%LOCALAPPDATA%`, drives every page (sign-in with cancel and token renewal against a local stand-in for the Microsoft

@@ -677,6 +677,7 @@ $script:DetailItem = $null
 $script:MetaRefreshPending = $false
 $script:TenantApps = $null
 $script:TenantPackages = @{}         # package id (lower case) of the apps already in the tenant
+$script:RecentDeploys = @{}          # package id (lower case) -> time it was created by this window
 
 function New-PackageRow {
     param([string]$Id, [string]$Name, [string]$Category, $Meta)
@@ -949,7 +950,12 @@ New-IntuneWin32ChocoApplication @Params
         [void](Start-UiTask -Kind 'deploy' -Title "Deploying $($item.Title) ($intent)" -Package $item.Id -NeedsAuth -Work $work -OnDone {
             param($Result, $Job)
             switch ($Job.Status) {
-                'succeeded' { Write-UiLog "[$($Job.Package)] created in Intune (app id $(@($Result | Where-Object { $_ -is [string] }) -join ', '))." 'Success' }
+                'succeeded' {
+                    Write-UiLog "[$($Job.Package)] created in Intune (app id $(@($Result | Where-Object { $_ -is [string] }) -join ', '))." 'Success'
+                    # Graph lists a new app only after a few seconds: mark it right away, so it is not queued twice
+                    $script:TenantPackages[$Job.Package.ToLower()] = $true
+                    $script:RecentDeploys[$Job.Package.ToLower()] = Get-Date
+                }
                 'skipped'   { Write-UiLog "[$($Job.Package)] skipped." 'Warning' }
                 default     { Write-UiLog "[$($Job.Package)] failed." 'Error' }
             }
@@ -995,9 +1001,13 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         $ui.DgTenant.ItemsSource = $script:TenantApps
         $apps = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count
         $ui.TxtTenantCount.Text = "$apps app(s) created by this tool" + $(if (@($script:TenantApps | Where-Object IsChocolatey).Count) { ', Chocolatey deployed' } else { ', Chocolatey not deployed yet' })
-        # Catalog and search mark what is already there
+        # Catalog and search mark what is already there, including apps created in the last minutes that Graph
+        # does not list yet
         $script:TenantPackages = @{}
         foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { $script:TenantPackages[$app.Package.ToLower()] = $true } }
+        foreach ($key in @($script:RecentDeploys.Keys)) {
+            if ($script:RecentDeploys[$key] -gt (Get-Date).AddMinutes(-5)) { $script:TenantPackages[$key] = $true } else { $script:RecentDeploys.Remove($key) }
+        }
         Update-CatalogGrid
         if ($script:SearchIds.Count) { Update-SearchRows }
         Update-TenantButtons
@@ -1021,7 +1031,10 @@ Add-Click $ui.BtnTenantRemove {
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id } -Work 'param($Id) Remove-IntuneChocoApplication -Id $Id' -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Package)] removed from Intune." 'Success' }
+        if ($Job.Status -eq 'succeeded') {
+            Write-UiLog "[$($Job.Package)] removed from Intune." 'Success'
+            if ($Job.Package) { $script:RecentDeploys.Remove($Job.Package.ToLower()) }
+        }
         $script:TenantApps = $null
         Start-TenantRefresh
     })

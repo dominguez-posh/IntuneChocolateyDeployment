@@ -238,6 +238,28 @@ function Connect-IntuneChoco {
     Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
 }#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
+function Invoke-IntuneModule {
+    param([Parameter(Mandatory = $true)][scriptblock]$Script)
+
+    # Every call into the IntuneWin32App module goes through here, for two reasons:
+    # 1. The module checks the token expiry by writing the date as text in the current culture and reading it back
+    #    as en-US. With a German date format 05.11. becomes May 11th, the fresh token counts as expired and the
+    #    call is given up (on days after the 12th the check throws). The invariant culture avoids that.
+    # 2. The module leaves its functions with "break" when something is wrong with the sign-in. Without a loop
+    #    around the call that silently ends the caller as well: a deployment would stop without any error.
+    $Thread = [System.Threading.Thread]::CurrentThread
+    $Culture = $Thread.CurrentCulture
+    $Completed = $false
+    try {
+        $Thread.CurrentCulture = [System.Globalization.CultureInfo]::InvariantCulture
+        do { & $Script; $Completed = $true } while ($false)
+    }
+    finally { $Thread.CurrentCulture = $Culture }
+    if (-not $Completed) {
+        throw "The IntuneWin32App module gave up without a result (see the warning above). Usually the sign-in has expired or lacks a permission: sign in again."
+    }
+}#Runs a call into the IntuneWin32App module safely
+
 function Assert-IntuneChocoConnection {
     # The module functions call "break" when no token exists, which would silently stop the whole script
     if ($null -eq $Global:AccessToken) {
@@ -296,6 +318,7 @@ function Set-IntuneChocoToken {
     # Same shape as the module's own New-DelegatedAccessToken, which the module functions expect
     if (-not $TokenResponse.access_token) { throw "The token response contains no access token" }
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "ClientID" -Value $ClientID -Force
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "client_id" -Value $ClientID -Force   # read by the module's own renewal
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "Authority" -Value $Authority -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "ExpiresOn" -Value ((Get-Date).AddSeconds([int]$TokenResponse.expires_in).ToUniversalTime()) -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "Scopes" -Value @([string]$TokenResponse.scope -split " " | Where-Object { $_ }) -Force
@@ -486,7 +509,13 @@ function ConvertTo-PngBytes {
             "--screenshot=`"$Png`"", ("file:///" + $Html.Replace('\', '/'))
         )
         # Headless Edge sometimes keeps running after writing the screenshot: wait for the file, not for the process.
-        # Now and then it hangs without writing anything; a second start almost always works.
+        # Two headless instances at the same time (icon previews next to a deployment) often hang, so only one
+        # renders at a time, across runspaces and processes; a hang now and then is covered by a second start.
+        $Mutex = New-Object System.Threading.Mutex($false, "Local\IntuneChocoEdgeRender")
+        $Owned = $false
+        try { $Owned = $Mutex.WaitOne([TimeSpan]::FromMinutes(3)) } catch [System.Threading.AbandonedMutexException] { $Owned = $true }
+        if (-not $Owned) { $Mutex.Dispose(); throw "Another icon conversion with Edge did not finish within 3 minutes" }
+        try {
         for ($Attempt = 1; $Attempt -le 2; $Attempt++) {
             $Process = Start-Process -FilePath $Edge -ArgumentList $Arguments -WindowStyle Hidden -PassThru
             $Deadline = (Get-Date).AddSeconds(30)
@@ -505,6 +534,8 @@ function ConvertTo-PngBytes {
             if ((Test-Path $Png) -and (Get-Item $Png).Length -gt 0) { break }
             if ($Attempt -eq 1) { Write-Verbose "Edge did not render the SVG icon, trying once more"; Start-Sleep -Seconds 2 }
         }
+        }
+        finally { $Mutex.ReleaseMutex(); $Mutex.Dispose() }
         if (-not (Test-Path $Png) -or (Get-Item $Png).Length -eq 0) { throw "Edge did not render the SVG icon (two attempts of 30 seconds)" }
         return ,[IO.File]::ReadAllBytes($Png)
     }
@@ -689,7 +720,7 @@ function New-IntuneChocoPackage {
         [Parameter(Mandatory = $true)][string]$WorkPath
     )
     $SourcePath = Join-Path $WorkPath "source"
-    $Package = New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath -Force
+    $Package = Invoke-IntuneModule { New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath -Force }
     if ($null -eq $Package -or -not (Test-Path $Package.Path)) {
         throw "Packaging with IntuneWinAppUtil.exe failed. Make sure IntuneWin32App $($script:MinimumModuleVersion)+ is loaded; if it still fails, delete $env:TEMP\IntuneWinAppUtil.exe so a fresh copy is downloaded."
     }
@@ -736,7 +767,7 @@ function New-IntuneWin32ChocoApplication {
 
                 # Already there: same name, or created by this tool for the same package (also when renamed).
                 # The module reads the whole list for a name filter anyway, so the full list costs the same.
-                $Existing = @(Get-IntuneWin32App | Where-Object { $_.displayName -eq $AppName -or [string]$_.notes -eq "$($script:AppMarker);package=$Name" })
+                $Existing = @(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.displayName -eq $AppName -or [string]$_.notes -eq "$($script:AppMarker);package=$Name" })
                 if ($Existing.Count -gt 0) {
                     Write-Warning "$AppName is already deployed ($($Existing[0].displayName)), please update or remove first"
                     continue
@@ -772,8 +803,8 @@ function New-IntuneWin32ChocoApplication {
                 $DetectionFile = New-ChocoPackageScripts @ScriptParams
                 $IntuneWinFile = New-IntuneChocoPackage -WorkPath $WorkPath
 
-                $DetectionRule = New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile
-                $RequirementRule = New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease W10_1607
+                $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
+                $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease W10_1607 }
 
                 ### Deploy Application
                 Write-Host "Creating and Uploading $AppName as win32 App to Intune"
@@ -793,21 +824,23 @@ function New-IntuneWin32ChocoApplication {
                 if ($Infos.SoftwareSite) { $AppParams.InformationURL = $Infos.SoftwareSite }
                 if ($Icon) { $AppParams.Icon = $Icon }
 
-                $IntuneApp = Add-IntuneWin32App @AppParams
+                $IntuneApp = Invoke-IntuneModule { Add-IntuneWin32App @AppParams }
                 if ($null -eq $IntuneApp -or -not $IntuneApp.id) { throw "Intune did not return the created app" }
 
                 Write-Host "Adding dependency for chocolatey to the created Application"
-                $Dependency = New-IntuneWin32AppDependency -ID $ChocoID -DependencyType AutoInstall
-                Add-IntuneWin32AppDependency -ID $IntuneApp.id -Dependency $Dependency | Out-Null
+                Invoke-IntuneModule {
+                    $Dependency = New-IntuneWin32AppDependency -ID $ChocoID -DependencyType AutoInstall
+                    Add-IntuneWin32AppDependency -ID $IntuneApp.id -Dependency $Dependency
+                } | Out-Null
 
                 switch ($Assignment) {
                     "Required" {
                         Write-Host "Enable autodeployment for all users"
-                        Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent required -Notification showReboot | Out-Null
+                        Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent required -Notification showReboot } | Out-Null
                     }
                     "Available" {
                         Write-Host "Making application available in companyportal for all users"
-                        Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent available -Notification showReboot | Out-Null
+                        Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent available -Notification showReboot } | Out-Null
                     }
                     default { Write-Host "No assignment created, assign the app in Intune yourself" }
                 }
@@ -894,15 +927,15 @@ exit 0
     $AppPackage = New-IntuneChocoPackage -WorkPath $WorkPath
 
     write-host "Creating Detection Rule"
-    $DetectionRule = New-IntuneWin32AppDetectionRuleFile -Existence -DetectionType exists -Path "C:\ProgramData\chocolatey" -FileOrFolder "choco.exe"
-    $RequirementRule = New-IntuneWin32AppRequirementRule -Architecture "AllWithARM64" -MinimumSupportedWindowsRelease W10_1607
+    $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleFile -Existence -DetectionType exists -Path "C:\ProgramData\chocolatey" -FileOrFolder "choco.exe" }
+    $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture "AllWithARM64" -MinimumSupportedWindowsRelease W10_1607 }
 
     write-host "Starting uploading to intune"
-    $APP = Add-IntuneWin32App -FilePath $AppPackage.Path -DisplayName "Chocolatey" -RequirementRule $RequirementRule -Notes $script:ChocoAppMarker -Description "Chocolatey Package Manager" -Publisher "www.linkedin.com/in/LuEd" -RestartBehavior suppress -InstallExperience system -Icon $Icon -InstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1" -UninstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1" -DetectionRule $DetectionRule
+    $APP = Invoke-IntuneModule { Add-IntuneWin32App -FilePath $AppPackage.Path -DisplayName "Chocolatey" -RequirementRule $RequirementRule -Notes $script:ChocoAppMarker -Description "Chocolatey Package Manager" -Publisher "www.linkedin.com/in/LuEd" -RestartBehavior suppress -InstallExperience system -Icon $Icon -InstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1" -UninstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1" -DetectionRule $DetectionRule }
     if ($null -eq $APP -or -not $APP.id) { throw "Chocolatey could not be created in Intune" }
 
     write-host "Make application installable for everyone in the company"
-    Add-IntuneWin32AppAssignmentAllUsers -ID $APP.id -Intent available -Notification hideAll | Out-Null
+    Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $APP.id -Intent available -Notification hideAll } | Out-Null
 
     write-host "chocolatey successfully deployed"
     return $APP.id
@@ -911,7 +944,7 @@ exit 0
 
 function get-ChocoWin32ID {
 
-    $APP = Get-IntuneWin32App -DisplayName "Chocolatey" | Where-Object { $_.displayName -eq "Chocolatey" -and $_.notes -like "*$($script:ChocoAppMarker)*" } | Select-Object -First 1
+    $APP = Invoke-IntuneModule { Get-IntuneWin32App -DisplayName "Chocolatey" } | Where-Object { $_.displayName -eq "Chocolatey" -and $_.notes -like "*$($script:ChocoAppMarker)*" } | Select-Object -First 1
     if ($APP) {
         write-host "chocolatey found"
         return $APP.id
@@ -929,7 +962,7 @@ function Get-IntuneChocoTenantApps {
     Assert-IntuneChocoConnection
     Update-IntuneChocoToken
 
-    foreach ($App in @(Get-IntuneWin32App)) {
+    foreach ($App in @(Invoke-IntuneModule { Get-IntuneWin32App })) {
         $Notes = [string]$App.notes
         $IsChocolatey = $Notes -like "*$($script:ChocoAppMarker)*" -and $App.displayName -eq "Chocolatey"
         if (-not $IsChocolatey -and $Notes -notlike "$($script:AppMarker)*") { continue }
@@ -962,8 +995,8 @@ function Remove-IntuneChocoApplication {
         throw "Chocolatey is the dependency of $($Others.Count) app(s) created by this tool. Remove those first."
     }
     Write-Host "Removing $($App.DisplayName) from Intune"
-    Remove-IntuneWin32App -ID $Id | Out-Null
-    if (@(Get-IntuneWin32App | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
+    Invoke-IntuneModule { Remove-IntuneWin32App -ID $Id } | Out-Null
+    if (@(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
     Write-Host "$($App.DisplayName) was removed from Intune. Devices keep the installed software and its update task."
 }#Removes an app this tool created from the tenant
 
