@@ -39,7 +39,7 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="Intune Chocolatey Deployment" Foreground="White" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock Text="Deploy Chocolatey packages as Win32 apps to Microsoft Intune, kept up to date on every device" Foreground="#94A3B8" FontSize="12" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="Deploy Chocolatey and winget packages as Win32 apps to Microsoft Intune, kept up to date on every device" Foreground="#94A3B8" FontSize="12" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                         <TextBlock x:Name="TxtConnectionStatus" Text="Not signed in to Intune" Foreground="#FCA5A5" FontWeight="SemiBold" FontSize="12"/>
                         <TextBlock Text="·" Foreground="#64748B" FontSize="12" Margin="8,0"/>
@@ -49,6 +49,7 @@
                     </StackPanel>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnSource" Tag="&#xE8AB;" Content="Chocolatey" Style="{StaticResource HeaderButton}" MinWidth="128" ToolTip="Package source: Chocolatey or winget"/>
                     <Button x:Name="BtnHelp" Tag="&#xE897;" Content="Help" Style="{StaticResource HeaderButton}"/>
                     <Button x:Name="BtnHeaderSettings" Tag="&#xE713;" Content="Settings" Style="{StaticResource HeaderButton}"/>
                     <Button x:Name="BtnSignIn" Tag="&#xE77B;" Content="Sign in" Style="{StaticResource SplitMainButton}" ToolTip="Sign in with your Microsoft account (browser)"/>
@@ -412,7 +413,7 @@
         </GroupBox>
 
         <TextBlock Grid.Row="4" x:Name="FooterText" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedText}"
-                   Text="Deployments run one after another in the background; the window stays usable. Package infos come from the Chocolatey feed and are cached for 24 hours."/>
+                   Text="Deployments run one after another in the background; the window stays usable. Package infos are cached for 24 hours."/>
 
         <!-- Help flyout -->
         <Border x:Name="HelpPanel" Grid.Row="1" Grid.RowSpan="4" Style="{StaticResource HelpPanel}">

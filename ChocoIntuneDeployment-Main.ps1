@@ -26,6 +26,7 @@ $script:CatalogPath = Join-Path $PSScriptRoot "catalog.json"
 $script:MinimumModuleVersion = [version]"1.5.0"
 $script:ChocoAppMarker = "FiredWithPowershell"
 $script:AppMarker = "PoweredByChocolatey"
+$script:WingetMarker = "PoweredByWinget"
 $script:DefaultAuthority = "https://login.microsoftonline.com"
 # Delegated Graph permissions the IntuneWin32App module works with
 $script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManagementConfiguration.ReadWrite.All", "DeviceManagementRBAC.Read.All", "Group.Read.All" |
@@ -45,6 +46,8 @@ $script:DefaultSettings = [ordered]@{
     # The startup update task waits a random time in this range, so devices behind one IP don't download at once
     UpdateDelayMinMinutes = 5
     UpdateDelayMaxMinutes = 60
+    # Package source the interface starts with: Chocolatey or Winget
+    Source                = "Chocolatey"
 }
 
 # Packages whose software license restricts business use or distribution
@@ -59,6 +62,16 @@ $script:LicenseNotes = @{
     "adobe-creative-cloud" = "Requires Adobe Creative Cloud licenses for the users."
     "sublimetext4"         = "Sublime Text requires a paid license for continued use."
     "1password"            = "Requires a 1Password subscription for the users."
+    # The same apps in the winget repository
+    "teamviewer.teamviewer"               = "The free TeamViewer version is for private use only. Business use requires a TeamViewer license."
+    "teamviewer.teamviewer.host"          = "The free TeamViewer version is for private use only. Business use requires a TeamViewer license."
+    "teamviewer.teamviewer.quicksupport"  = "The free TeamViewer version is for private use only. Business use requires a TeamViewer license."
+    "anydesk.anydesk"                     = "The free AnyDesk version is for private use only. Business use requires an AnyDesk license."
+    "adobe.acrobat.reader.64-bit"         = "Distributing Acrobat Reader inside an organization requires a (free) Adobe distribution agreement."
+    "adobe.acrobat.reader.32-bit"         = "Distributing Acrobat Reader inside an organization requires a (free) Adobe distribution agreement."
+    "sublimehq.sublimetext.4"             = "Sublime Text requires a paid license for continued use."
+    "agilebits.1password"                 = "Requires a 1Password subscription for the users."
+    "oracle.javaruntimeenvironment"       = "Oracle Java: commercial use requires a paid Oracle Java SE subscription. Use Eclipse Temurin instead."
 }
 
 function Get-IntuneChocoSettings {
@@ -88,6 +101,7 @@ function Save-IntuneChocoSettings {
     }
     if ($Clean.Architecture -notin "x64", "x86", "arm64", "x64x86", "AllWithARM64") { throw "Unknown architecture '$($Clean.Architecture)'" }
     if ($Clean.Assignment -notin "Available", "Required", "None") { throw "Unknown assignment '$($Clean.Assignment)'" }
+    if ($Clean.Source -notin "Chocolatey", "Winget") { throw "Unknown package source '$($Clean.Source)'" }
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
 
@@ -115,6 +129,11 @@ function Install-IntunechocoComponents {
     Install-Module IntuneWin32App -MinimumVersion $script:MinimumModuleVersion -Scope CurrentUser -Force -AllowClobber
     Remove-Module IntuneWin32App -ErrorAction SilentlyContinue
     Import-Module IntuneWin32App -MinimumVersion $script:MinimumModuleVersion -Force
+    # winget packages: Microsoft's winget module for the package infos and the search
+    if (-not (Get-Module -ListAvailable Microsoft.WinGet.Client)) {
+        Install-Module Microsoft.WinGet.Client -Scope CurrentUser -Force -AllowClobber
+        Write-Host "Microsoft.WinGet.Client $((Get-Module -ListAvailable Microsoft.WinGet.Client | Sort-Object Version -Descending | Select-Object -First 1).Version) is installed."
+    }
     Write-Host "IntuneWin32App $((Get-Module IntuneWin32App).Version) is installed. Chocolatey and Inkscape are no longer needed on this machine."
 }#Installs all required script components
 
@@ -561,13 +580,15 @@ function Get-ChocoIconBase64 {
         [Parameter(Mandatory = $true)][string]$ChocoName,
         [string]$IconUrl,
         [string]$IconFile,
-        [switch]$NoIconPrompt
+        [switch]$NoIconPrompt,
+        # Do not look the icon up on the Chocolatey feed (winget packages)
+        [switch]$NoFeedLookup
     )
 
     $WorkPath = Join-Path $script:WorkRoot "icons\$ChocoName"
     New-Item -Path $WorkPath -ItemType Directory -Force | Out-Null
 
-    if (-not $IconFile -and -not $IconUrl) {
+    if (-not $IconFile -and -not $IconUrl -and -not $NoFeedLookup) {
         try { $IconUrl = (Get-ChocoInfo -ChocoName $ChocoName).IconUrl } catch { Write-Warning $_ }
     }
 
@@ -584,7 +605,7 @@ function Get-ChocoIconBase64 {
         catch { Write-Warning "Icon could not be downloaded from $IconUrl ($($_.Exception.Message))" }
     }
     else {
-        Write-Warning "Package $ChocoName has no icon on chocolatey.org"
+        Write-Warning "Package $ChocoName has no icon$(if (-not $NoFeedLookup) { ' on chocolatey.org' })"
     }
 
     if ($null -ne $Bytes) {
@@ -833,17 +854,7 @@ function New-IntuneWin32ChocoApplication {
                     Add-IntuneWin32AppDependency -ID $IntuneApp.id -Dependency $Dependency
                 } | Out-Null
 
-                switch ($Assignment) {
-                    "Required" {
-                        Write-Host "Enable autodeployment for all users"
-                        Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent required -Notification showReboot } | Out-Null
-                    }
-                    "Available" {
-                        Write-Host "Making application available in companyportal for all users"
-                        Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $IntuneApp.id -Intent available -Notification showReboot } | Out-Null
-                    }
-                    default { Write-Host "No assignment created, assign the app in Intune yourself" }
-                }
+                Set-IntuneChocoAssignment -Id $IntuneApp.id -Assignment $Assignment
 
                 Write-Host "Deployment of $AppName was successful"
                 $IntuneApp.id
@@ -855,6 +866,24 @@ function New-IntuneWin32ChocoApplication {
     }
 
 }#Main function for deploying The Applications
+
+function Set-IntuneChocoAssignment {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet("Available", "Required", "None")][string]$Assignment
+    )
+    switch ($Assignment) {
+        "Required" {
+            Write-Host "Enable autodeployment for all users"
+            Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $Id -Intent required -Notification showReboot } | Out-Null
+        }
+        "Available" {
+            Write-Host "Making application available in companyportal for all users"
+            Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $Id -Intent available -Notification showReboot } | Out-Null
+        }
+        default { Write-Host "No assignment created, assign the app in Intune yourself" }
+    }
+}#Assigns an app to all users (available or required)
 
 function install-chocolatey {
 
@@ -965,17 +994,19 @@ function Get-IntuneChocoTenantApps {
     foreach ($App in @(Invoke-IntuneModule { Get-IntuneWin32App })) {
         $Notes = [string]$App.notes
         $IsChocolatey = $Notes -like "*$($script:ChocoAppMarker)*" -and $App.displayName -eq "Chocolatey"
-        if (-not $IsChocolatey -and $Notes -notlike "$($script:AppMarker)*") { continue }
+        $IsWinget = $Notes -like "$($script:WingetMarker)*"
+        if (-not $IsChocolatey -and -not $IsWinget -and $Notes -notlike "$($script:AppMarker)*") { continue }
 
         # Apps created before the package id was stored in the notes only carry "PoweredByChocolatey"
         $Package = $null
-        if ($Notes -match 'package=([A-Za-z0-9._-]+)') { $Package = $Matches[1] }
+        if ($Notes -match 'package=([A-Za-z0-9._+-]+)') { $Package = $Matches[1] }
         if ($IsChocolatey) { $Package = "chocolatey" }
 
         [pscustomobject]@{
             Id           = $App.id
             DisplayName  = $App.displayName
             Package      = $Package
+            Source       = $(if ($IsWinget) { "Winget" } else { "Chocolatey" })
             IsChocolatey = $IsChocolatey
             Created      = $App.createdDateTime
         }
@@ -990,7 +1021,7 @@ function Remove-IntuneChocoApplication {
     $Apps = @(Get-IntuneChocoTenantApps)
     $App = $Apps | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
     if (-not $App) { throw "App $Id was not created by this tool or does not exist anymore, nothing was removed" }
-    $Others = @($Apps | Where-Object { -not $_.IsChocolatey })
+    $Others = @($Apps | Where-Object { -not $_.IsChocolatey -and $_.Source -eq "Chocolatey" })
     if ($App.IsChocolatey -and $Others.Count -gt 0) {
         throw "Chocolatey is the dependency of $($Others.Count) app(s) created by this tool. Remove those first."
     }
@@ -1006,6 +1037,8 @@ function Get-IntuneChocoCatalog {
     foreach ($Entry in $Catalog) {
         [pscustomobject]@{
             Id          = $Entry.id
+            # Optional: the same app in the winget community repository
+            WingetId    = $Entry.winget
             Name        = $Entry.name
             Category    = $Entry.category
             LicenseNote = Get-ChocoLicenseNote $Entry.id
@@ -1029,6 +1062,9 @@ function New-IntuneWin32ChocoApplicationInstallFromRepo {
     }
 
 }
+
+# winget packages (same helpers, own install script)
+. (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Winget.ps1")
 
 # Run interactively when started as a script, only load the functions when dot-sourced
 if ($MyInvocation.InvocationName -ne '.') {

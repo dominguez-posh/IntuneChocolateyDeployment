@@ -41,6 +41,8 @@ Install-IntunechocoComponents
 Double-click **Start.cmd** (or run `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`).
 The tool is a WPF window for Windows PowerShell 5.1, without a console window next to it.
 
+- **Package source**: the button in the header switches between **Chocolatey** and **winget** (see below); the choice
+  is remembered.
 - **Start**: guided steps and a readiness list (module, app registration, sign-in, package source, Chocolatey app in the tenant),
   each item with the button that fixes it.
 - **Sign in**: opens the Microsoft sign-in in your browser and waits up to five minutes for it; the button turns into
@@ -90,8 +92,10 @@ Everything else is done automaticly now
 ### Adding Applications to the Softwarelist
 The software list lives in [catalog.json](catalog.json), used by the GUI and by the command line:
 ```json
-{ "id": "<choconame>", "name": "<Description>", "category": "<Category>" }
+{ "id": "<choconame>", "winget": "<winget id, optional>", "name": "<Description>", "category": "<Category>" }
 ```
+`winget` is the id of the same app in the winget repository (e.g. `7zip.7zip`); entries without it only show up when
+Chocolatey is the package source.
 
 ### Install Chocolatey Manually
 This step is only required, if you want to install it manually or the automatic process is not working.
@@ -131,6 +135,24 @@ pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPr
 - The app gets a dependency to the Chocolatey app (auto install), which is deployed once per tenant.
   Its installer retries with a random wait when the Chocolatey download is rate limited.
 - Requirement: Windows 10 1607 or newer (includes Windows 11), x64/x86. Use `-Architecture AllWithARM64` for ARM devices.
+
+### winget packages
+The package source button in the header switches catalog, search and deployment between Chocolatey and winget. On the
+command line:
+```powershell
+New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignment Available
+```
+- Package infos and the search come from Microsoft's `Microsoft.WinGet.Client` module (installed by
+  `Install-IntunechocoComponents`) and the manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs).
+- `install.ps1` runs `winget install --id <id> --exact --scope machine --silent` as SYSTEM (falling back to no scope
+  for packages without a machine installer). winget is not in SYSTEM's path, so the script takes the newest App
+  Installer from `WindowsApps` and waits up to ten minutes when it is not registered yet (right after Autopilot).
+- The startup task `\Intune-Winget-Updates\Update <id> on startup` runs `winget upgrade` with the same random delay.
+  Uninstall runs `winget uninstall` and removes the task. Logs: `%ProgramData%\IntuneWingetDeployment\Logs`.
+- The detection script runs `winget list --id <id> --exact`. Requirement: Windows 10 1809 or newer.
+- No dependency app: winget is part of Windows. winget downloads from the vendors' sites, so there is no repository
+  rate limit. Packages rarely have an icon in winget; catalog apps use the icon of their Chocolatey package.
+- An app that already exists under the same name (e.g. from Chocolatey) is skipped, so nothing is installed twice.
 
 ## Licenses and rate limits
 - Chocolatey itself is Apache 2.0. The installed software keeps its own license. The tool shows a note for packages with

@@ -250,6 +250,76 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'icon column shows an image in every browser row' ($shown -eq $rows.Count) "$shown of $($rows.Count)"
         $ui.CmbCategory.SelectedIndex = 0
         $true } }
+    @{ Name = 'winget catalog'; Phase = 0; Waited = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            Show-Page 'Catalog'
+            & $script:ClickActions[$ui.BtnSource]
+            Test-Smoke 'source button switches to winget' ($script:Source -eq 'Winget' -and $ui.BtnSource.Content -eq 'winget' -and $ui.HintSearch.Text -like '*winget*') $ui.BtnSource.Content
+            Test-Smoke 'winget catalog lists the apps with a winget id' (@($ui.DgCatalog.ItemsSource).Count -eq @($script:Catalog | Where-Object WingetId).Count) @($ui.DgCatalog.ItemsSource).Count
+            Test-Smoke 'switching the source clears the selection' ($script:Selected.Count -eq 0)
+            return $false
+        }
+        $s.Waited++
+        if (-not (Test-Idle 'meta') -and $s.Waited -lt 1200) { return $false }
+        if ($s.Waited -lt 4) { return $false }
+        $rows = @($ui.DgCatalog.ItemsSource)
+        $vlc = $rows | Where-Object { $_.Id -eq 'VideoLAN.VLC' }
+        Test-Smoke "winget infos from the manifest: $($vlc.Authors), $($vlc.License)" ($vlc.Found -and $vlc.Version -eq '3.0.24' -and $vlc.Authors -and $vlc.License) ($vlc | Select-Object Id, Version, Authors, License | ConvertTo-Json -Compress)
+        Test-Smoke 'winget row lends the Chocolatey icon' ([bool]$vlc.RawIconUrl) $vlc.RawIconUrl
+        Test-Smoke 'unknown winget id shows as not found' (@($rows | Where-Object { $_.StatusText -eq 'Not found' }).Count -gt 0)
+        Test-Smoke 'license note on winget AnyDesk' ((@($rows | Where-Object { $_.Id -eq 'AnyDesk.AnyDesk' })[0]).LicenseNote -like '*AnyDesk license*')
+        $ui.DgCatalog.SelectedItem = $vlc
+        Test-Smoke 'details point to winget-pkgs' ($ui.BtnDetailChoco.Content -eq 'winget-pkgs' -and $ui.TxtDetailMeta.Text -like '*license*') $ui.TxtDetailMeta.Text
+        Save-SmokeShot '10-winget-catalog'
+        $true } }
+    @{ Name = 'winget deploy'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            Clear-Selection
+            # VLC is new; 7-Zip already exists in the tenant as the Chocolatey app of the same name
+            foreach ($id in 'VideoLAN.VLC', '7zip.7zip') { [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq $id })[0]) }
+            Test-Smoke 'two winget apps selected' ($script:Selected.Count -eq 2 -and $script:Selected.Contains('winget:videolan.vlc')) (@($script:Selected.Keys) -join ',')
+            Start-Deploy
+            return $false
+        }
+        if (-not (Test-Idle)) { return $false }
+        $apps = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+        $vlc = $apps | Where-Object { $_.notes -eq 'PoweredByWinget;package=VideoLAN.VLC' }
+        Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
+        Test-Smoke 'winget VLC has the borrowed icon and the publisher from the manifest' ($vlc.hasIcon -and $vlc.iconValid -and $vlc.publisher -and $vlc.publisher -ne '-') $vlc.publisher
+        Test-Smoke 'winget app has no Chocolatey dependency step' (-not ((Get-SmokeLog) -match '\[VideoLAN\.VLC\] Adding dependency'))
+        Test-Smoke 'same app from the other source is not created twice' ((Get-SmokeLog) -match '\[7zip\.7zip\] .*already deployed' -and @($apps | Where-Object { $_.displayName -eq '7-Zip' }).Count -eq 1)
+        $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
+        Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'" -and (Get-Content $pkg.FullName -Raw) -match 'Intune-Winget-Updates')
+        $true } }
+    @{ Name = 'winget tenant and search'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) { $s.Phase = 1; if (Test-Idle 'tenant') { Start-TenantRefresh }; return $false }
+        if ($s.Phase -eq 1) {
+            if (-not (Test-Idle 'tenant')) { return $false }
+            $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'VideoLAN.VLC' })[0]
+            Test-Smoke 'tenant shows the winget app with its source' ($row -and $row.Source -eq 'Winget' -and $row.StatusText -eq 'winget') ($row | ConvertTo-Json -Compress)
+            Test-Smoke 'winget catalog marks VLC as in tenant' ((@($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq 'VideoLAN.VLC' })[0]).StatusText -eq 'In tenant')
+            Test-Smoke 'Chocolatey catalog does not mark the winget VLC' (-not $script:TenantPackages.ContainsKey('vlc'))
+            $s.Phase = 2
+            Show-Page 'Search'
+            $ui.TxtSearch.Text = 'notepad'
+            Start-Search
+            return $false
+        }
+        if (-not (Test-Idle 'search') -or -not (Test-Idle 'meta')) { return $false }
+        $rows = @($ui.DgSearch.ItemsSource)
+        Test-Smoke "winget search finds and ranks: $(($rows | ForEach-Object Id) -join ', ')" ($rows.Count -ge 2 -and $rows[0].Id -like 'Notepad*' -and $rows[0].Source -eq 'Winget') ''
+        $npp = $rows | Where-Object { $_.Id -eq 'Notepad++.Notepad++' }
+        Test-Smoke 'search result completed from the manifest' ($npp.Authors -like 'Notepad++*') $npp.Authors
+        Save-SmokeShot '11-winget-search'
+        & $script:ClickActions[$ui.BtnSource]
+        $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
+        Test-Smoke 'back to Chocolatey, source saved' ($script:Source -eq 'Chocolatey' -and $saved.Source -eq 'Chocolatey' -and @($ui.DgCatalog.ItemsSource).Count -eq $script:Catalog.Count)
+        $true } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'
         Test-Smoke 'settings show the tenant' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com') $ui.TxtTenantId.Text
@@ -261,7 +331,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Save-Settings
         $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
         Test-Smoke 'settings saved' ($saved.UpdateDelayMaxMinutes -eq 90 -and $saved.PackageSource -eq 'https://proget.contoso.com/nuget/choco/')
-        Test-Smoke 'deploy defaults follow the settings' ($ui.TxtDeployDefaults.Text -like '*10 to 90*proget*') $ui.TxtDeployDefaults.Text
+        Test-Smoke 'deploy defaults follow the settings' ($ui.TxtDeployDefaults.Text -like '*proget*10 to 90*') $ui.TxtDeployDefaults.Text
         $true } }
     @{ Name = 'sign out'; Do = {
         Disconnect-Intune

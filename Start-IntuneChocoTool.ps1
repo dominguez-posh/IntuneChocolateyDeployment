@@ -244,6 +244,7 @@ function Start-UiTask {
         Kind     = $Kind
         Title    = $Title
         Package  = $Package
+        Source   = $Arguments['Source']
         Status   = 'queued'
         HadError = $false
         Log      = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
@@ -377,43 +378,55 @@ function ConvertTo-MetaEntry($Info) {
         LicenseUrl  = $Info.SoftwareLicense
         Downloads   = $Info.Downloads
         LicenseNote = $Info.LicenseNote
+        License     = $Info.License
+        # A winget search result has no manifest infos yet (publisher, description): those are read afterwards
+        Partial     = ($Info.Source -eq 'Winget' -and -not $Info.Authors)
     }
 }
 
+# Package infos of both sources live in one cache: Chocolatey under the id, winget under "winget:<id>"
+function Get-MetaKey([string]$Id, [string]$Source = $script:Source) {
+    if ($Source -eq 'Winget') { "winget:$($Id.ToLower())" } else { $Id.ToLower() }
+}
+
 $script:MetaWork = @'
-param($Ids)
+param($Ids, $Source)
 foreach ($Id in $Ids) {
+    $Key = if ($Source -eq 'Winget') { "winget:$($Id.ToLower())" } else { $Id.ToLower() }
     try {
-        $Info = Get-ChocoInfo -ChocoName $Id
-        $Shared.Meta[$Id.ToLower()] = [pscustomobject]@{
+        $Info = if ($Source -eq 'Winget') { Get-WingetInfo -WingetId $Id } else { Get-ChocoInfo -ChocoName $Id }
+        $Shared.Meta[$Key] = [pscustomobject]@{
             Fetched = (Get-Date).ToString('o'); Found = $true; Name = $Info.Name; Title = $Info.Title; Version = $Info.Version
             Summary = $Info.Summary; Description = $Info.Description; Authors = $Info.Authors; IconUrl = $Info.IconUrl
             ProjectUrl = $Info.SoftwareSite; LicenseUrl = $Info.SoftwareLicense; Downloads = $Info.Downloads; LicenseNote = $Info.LicenseNote
+            License = $Info.License; Partial = $false
         }
     }
     catch {
-        # "Not found" is an answer of the feed; anything else (offline, rate limit) is tried again next time
-        $Shared.Meta[$Id.ToLower()] = [pscustomobject]@{
-            Fetched = (Get-Date).ToString('o'); Found = $false; NotFound = ($_.Exception.Message -like '*was not found on*'); Name = $Id; Error = $_.Exception.Message
+        # "Not found" is an answer of the source; anything else (offline, rate limit) is tried again next time
+        $Shared.Meta[$Key] = [pscustomobject]@{
+            Fetched = (Get-Date).ToString('o'); Found = $false; NotFound = ($_.Exception.Message -like '*was not found*'); Name = $Id; Error = $_.Exception.Message
         }
     }
 }
 '@
 
-function Test-MetaMissing([string]$Id) {
-    $entry = $script:Shared.Meta[$Id.ToLower()]
-    return (-not $entry -or (-not $entry.Found -and -not $entry.NotFound))
+function Test-MetaMissing([string]$Id, [string]$Source = $script:Source) {
+    $entry = $script:Shared.Meta[(Get-MetaKey $Id $Source)]
+    return (-not $entry -or $entry.Partial -or (-not $entry.Found -and -not $entry.NotFound))
 }
 
 function Complete-MetaPrefetch {
-    # All lookups are done: show the result, remember it, and say so when the feed could not be reached
+    # All lookups are done: show the result, remember it, and say so when the source could not be reached
     Update-CatalogGrid
+    if ($script:SearchIds.Count) { Update-SearchRows }
     Save-MetaCache
     $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
-    if ($failed.Count -gt 0) {
-        Write-UiLog "Infos for $($failed.Count) package(s) could not be read from the feed ($($failed[0].Error)). 'Refresh infos' in the catalog tries again." 'Warning'
+    if ($failed.Count -gt 0 -and -not $script:MetaQueued) {
+        Write-UiLog "Infos for $($failed.Count) package(s) could not be read ($($failed[0].Error)). 'Refresh infos' in the catalog tries again." 'Warning'
     }
     Start-IconRender
+    if ($script:MetaQueued) { $next = $script:MetaQueued; $script:MetaQueued = $null; Start-MetaPrefetch -Ids $next.Ids -Source $next.Source }
 }
 
 # ---------------------------------------------------------------- icon previews
@@ -480,27 +493,33 @@ function Start-IconRender {
 }
 
 function Start-MetaPrefetch {
-    param([string[]]$Ids, [switch]$Force)
-    if (Test-TaskRunning 'meta') { return }
-    $missing = @($Ids | Where-Object { $Force -or (Test-MetaMissing $_) })
+    param([string[]]$Ids, [switch]$Force, [string]$Source = $script:Source)
+    if (Test-TaskRunning 'meta') { $script:MetaQueued = @{ Ids = $Ids; Source = $Source }; return }   # picked up when the running lookup ends
+    if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { return }
+    $missing = @($Ids | Where-Object { $_ -and ($Force -or (Test-MetaMissing $_ $Source)) })
     if ($missing.Count -eq 0) { return }
     $script:MetaDirty = $true
-    # Three parallel lookups: the feed has no batch query, and politeness matters more than speed
+    # Three parallel lookups: neither source has a batch query, and politeness matters more than speed
     for ($i = 0; $i -lt 3; $i++) {
         $chunk = @(for ($j = $i; $j -lt $missing.Count; $j += 3) { $missing[$j] })
         if ($chunk.Count -gt 0) {
-            [void](Start-UiTask -Kind 'meta' -Title 'Reading package infos from the Chocolatey feed' -Work $script:MetaWork -Arguments @{ Ids = $chunk } -Pool $script:MetaPool -Hidden -OnDone { $script:MetaRefreshPending = $true })
+            [void](Start-UiTask -Kind 'meta' -Title 'Reading package infos' -Work $script:MetaWork -Arguments @{ Ids = $chunk; Source = $Source } -Pool $script:MetaPool -Hidden -OnDone { $script:MetaRefreshPending = $true })
         }
     }
-    Write-UiLog "Reading infos for $($missing.Count) packages from $($script:Settings.MetadataFeed) ..."
+    $from = if ($Source -eq 'Winget') { 'the winget source and the winget-pkgs manifests' } else { $script:Settings.MetadataFeed }
+    Write-UiLog "Reading infos for $($missing.Count) packages from $from ..."
 }
+$script:MetaQueued = $null
 
 # ---------------------------------------------------------------- connection state
 function Get-ModuleState {
     $module = Get-Module -ListAvailable IntuneWin32App | Sort-Object Version -Descending | Select-Object -First 1
+    $winget = Get-Module -ListAvailable Microsoft.WinGet.Client | Sort-Object Version -Descending | Select-Object -First 1
     [pscustomobject]@{
-        Version = $(if ($module) { $module.Version.ToString() } else { $null })
-        Ok      = ($null -ne $module -and $module.Version -ge $script:MinimumModuleVersion)
+        Version       = $(if ($module) { $module.Version.ToString() } else { $null })
+        Ok            = ($null -ne $module -and $module.Version -ge $script:MinimumModuleVersion)
+        Winget        = ($null -ne $winget)
+        WingetVersion = $(if ($winget) { $winget.Version.ToString() } else { $null })
     }
 }
 
@@ -509,9 +528,12 @@ function Update-ModuleState {
     $m = $script:ModuleState
     $ui.TxtModuleState.Text = if ($m.Ok) { "IntuneWin32App $($m.Version)" } elseif ($m.Version) { "IntuneWin32App $($m.Version) is too old" } else { 'IntuneWin32App module missing' }
     $ui.TxtModuleState.Foreground = ConvertTo-Brush $(if ($m.Ok) { '#CBD5E1' } else { '#FCA5A5' })
-    $ui.TxtModuleInfo.Text = if ($m.Ok) { "IntuneWin32App $($m.Version) is installed (minimum $($script:MinimumModuleVersion)). It packages the .intunewin files and talks to Microsoft Graph." }
-                             elseif ($m.Version) { "IntuneWin32App $($m.Version) is installed, but $($script:MinimumModuleVersion) or newer is required: older versions break packaging and dependencies." }
-                             else { "The IntuneWin32App module is not installed. It is installed for the current user from the PowerShell Gallery (no admin rights needed)." }
+    $intune = if ($m.Ok) { "IntuneWin32App $($m.Version) is installed (minimum $($script:MinimumModuleVersion)). It packages the .intunewin files and talks to Microsoft Graph." }
+              elseif ($m.Version) { "IntuneWin32App $($m.Version) is installed, but $($script:MinimumModuleVersion) or newer is required: older versions break packaging and dependencies." }
+              else { "The IntuneWin32App module is not installed." }
+    $wingetText = if ($m.Winget) { "Microsoft.WinGet.Client $($m.WingetVersion) is installed (winget package infos and search)." }
+                  else { "Microsoft.WinGet.Client is not installed; it is needed for winget packages only." }
+    $ui.TxtModuleInfo.Text = "$intune`n$wingetText`nBoth are installed for the current user from the PowerShell Gallery (no admin rights needed)."
 }
 
 function Test-SignedIn { [bool]$script:Shared.Auth }
@@ -549,7 +571,7 @@ function Show-Page([string]$Name) {
     $ui.SidePanel.Visibility = if ($Name -in 'Catalog', 'Search') { 'Visible' } else { 'Collapsed' }
     switch ($Name) {
         'Start'    { Update-Readiness }
-        'Catalog'  { Update-CatalogGrid; Start-MetaPrefetch -Ids @($script:Catalog | ForEach-Object { $_.Id }) }
+        'Catalog'  { Update-CatalogGrid; Start-CatalogPrefetch }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'tenant' }).Count) { Start-TenantRefresh } }
         'Settings' { Update-SettingsView }
     }
@@ -565,21 +587,22 @@ foreach ($p in $pages) {
 
 $script:HelpTexts = @{
     Start    = @(
-        @('What it does', 'Deploys Chocolatey packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs choco upgrade as SYSTEM, a detection rule, a startup task that keeps the package up to date and a dependency on the Chocolatey app, which is created once per tenant.'),
+        @('What it does', 'Deploys Chocolatey or winget packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs as SYSTEM, a detection rule and a startup task that keeps the package up to date. Chocolatey apps depend on the Chocolatey app, which is created once per tenant; winget is part of Windows.'),
+        @('Chocolatey or winget', 'The button in the header switches the package source. Catalog and search show the packages of that source. winget installs straight from the vendors (no rate limit, Microsoft-run repository) and needs Windows 10 1809 or newer; Chocolatey can use your own repository.'),
         @('Requirements', 'The IntuneWin32App module 1.5.0 or newer (Settings > Components) and an Entra ID app registration with redirect URI http://localhost and the delegated Graph permissions listed in the settings. Chocolatey and Inkscape are not needed on this computer.'),
         @('Sign in', 'Sign in opens the Microsoft sign-in in your browser. The arrow next to it offers the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in.'),
         @('Readiness', 'All items should be green before the first deployment. Each one links to the place where it is fixed.'))
     Catalog  = @(
-        @('Catalog', 'A curated list of common packages by category (catalog.json next to the scripts, edit it to add your own). Versions, publishers and icons come from the Chocolatey feed and are cached for 24 hours.'),
+        @('Catalog', 'A curated list of common packages by category (catalog.json next to the scripts, edit it to add your own; "winget" holds the id of the same app in winget). Versions, publishers and icons come from the active source and are cached for 24 hours.'),
         @('Selecting', 'Click an app for its details. Ctrl+click or Shift+click selects several apps; the selection is kept while you switch categories or search. Select shown picks every row of the current view.'),
         @('Deploy', 'Choose the assignment (Available in the Company Portal, Required on every device, or None) and click Deploy selected. Deployments run one after another in the background; progress shows in the activity panel.'),
         @('License notes', 'Packages whose software license restricts business use or distribution carry a note. The tool deploys them only after a confirmation; the license is still yours to clear.'))
     Search   = @(
-        @('Search', 'Searches the whole Chocolatey community repository (or your metadata feed) by name or package id. Results show the latest stable version with its download count.'),
-        @('Which package?', 'Many apps exist as "app" (meta package) and "app.install". Prefer the plain package: it follows the install package and updates cleanly.'),
+        @('Search', 'Searches the active source by name or package id: the Chocolatey community repository (or your metadata feed) with download counts, or the winget community repository with publisher and license from its manifests.'),
+        @('Which package?', 'Chocolatey: many apps exist as "app" (meta package) and "app.install"; prefer the plain package. winget: ids are Publisher.App (e.g. 7zip.7zip); check the publisher in the details.'),
         @('Custom icon', 'If a package has no icon, or you want your own, choose a PNG, JPEG, SVG or ICO file in the details. It is used for this deployment only.'))
     Tenant   = @(
-        @('In tenant', 'The Win32 apps this tool created in the tenant, recognized by their notes. The Chocolatey app is the dependency of all others and is not removed automatically.'),
+        @('In tenant', 'The Win32 apps this tool created in the tenant, recognized by their notes, from both sources. The Chocolatey app is the dependency of the Chocolatey apps and stays while one of them exists.'),
         @('Update or remove', 'Open in Intune admin center opens the selected app. An app that already exists is skipped on deployment; remove it in Intune first to deploy it again.'))
     Settings = @(
         @('Tenant and client ID', 'The tenant (domain or ID) and the application (client) ID of your app registration. Both are saved in %LOCALAPPDATA%\IntuneChocoDeployment\settings.json and also used by the command line functions.'),
@@ -657,8 +680,12 @@ function Update-Readiness {
           else { New-ReadinessCard ([char]0xE713) 'Tenant and app registration' 'bad' 'Enter tenant and the client ID of your app registration.' 'Settings' { Show-Page 'Settings' } })
         $(if (Test-SignedIn) { New-ReadinessCard ([char]0xE77B) 'Signed in to Intune' 'ok' $ui.TxtConnectionStatus.Text }
           else { New-ReadinessCard ([char]0xE77B) 'Signed in to Intune' 'warn' 'Sign in with your Microsoft account or an account from Keevault.' 'Sign in' { Connect-Intune } })
-        $(if ($script:Settings.PackageSource) { New-ReadinessCard ([char]0xE753) 'Package source' 'ok' "Devices install from $($script:Settings.PackageSource)." 'Settings' { Show-Page 'Settings' } }
-          else { New-ReadinessCard ([char]0xE753) 'Package source' 'warn' 'Devices install from the Chocolatey community repository (rate limited, not recommended for larger environments).' 'Settings' { Show-Page 'Settings' } })
+        $(if ($script:Source -eq 'Winget') {
+            if ($m.Winget) { New-ReadinessCard ([char]0xE753) 'Package source: winget' 'ok' "Microsoft.WinGet.Client $($m.WingetVersion) is installed. Devices install with winget from the vendors' download sites." 'Chocolatey' { Set-PackageSource 'Chocolatey' } }
+            else { New-ReadinessCard ([char]0xE753) 'Package source: winget' 'bad' 'The Microsoft.WinGet.Client module is needed for winget package infos and the search.' 'Install' { Start-ModuleInstall } }
+          }
+          elseif ($script:Settings.PackageSource) { New-ReadinessCard ([char]0xE753) 'Package source: Chocolatey' 'ok' "Devices install from $($script:Settings.PackageSource)." 'winget' { Set-PackageSource 'Winget' } }
+          else { New-ReadinessCard ([char]0xE753) 'Package source: Chocolatey' 'warn' 'Devices install from the Chocolatey community repository (rate limited, not recommended for larger environments). winget installs from the vendors directly.' 'winget' { Set-PackageSource 'Winget' } })
     )
     if ($null -ne $script:TenantApps) {
         $choco = @($script:TenantApps | Where-Object IsChocolatey).Count -gt 0
@@ -670,6 +697,7 @@ function Update-Readiness {
 
 # ---------------------------------------------------------------- packages: catalog, search, selection, details
 $script:Catalog = @(Get-IntuneChocoCatalog)
+$script:Source = if ($script:Settings.Source -eq 'Winget') { 'Winget' } else { 'Chocolatey' }
 $script:Selected = [ordered]@{}      # package id (lower case) -> row item
 $script:CustomIcons = @{}            # package id (lower case) -> PNG/JPEG base64
 $script:Rebuilding = $false
@@ -680,25 +708,30 @@ $script:TenantPackages = @{}         # package id (lower case) of the apps alrea
 $script:RecentDeploys = @{}          # package id (lower case) -> time it was created by this window
 
 function New-PackageRow {
-    param([string]$Id, [string]$Name, [string]$Category, $Meta)
+    # $IconMeta: winget packages rarely have an icon, a catalog entry lends the one of its Chocolatey package
+    param([string]$Id, [string]$Name, [string]$Category, $Meta, $IconMeta, [string]$Source = $script:Source)
     $found = $Meta -and $Meta.Found
     $note = if ($Meta -and $Meta.LicenseNote) { $Meta.LicenseNote } else { Get-ChocoLicenseNote $Id }
-    $inTenant = $script:TenantPackages.ContainsKey($Id.ToLower())
+    $key = Get-MetaKey $Id $Source
+    $inTenant = $script:TenantPackages.ContainsKey($key)
+    $iconSource = if ($found -and $Meta.IconUrl) { $Meta.IconUrl } elseif ($IconMeta -and $IconMeta.Found) { $IconMeta.IconUrl } else { $null }
     # One chip per row, the most important note first
     $statusText = if ($inTenant) { 'In tenant' } elseif ($note) { 'License' } elseif ($Meta -and $Meta.NotFound) { 'Not found' }
                   elseif ($Meta -and -not $Meta.Found) { 'No infos' } elseif (-not $Meta) { 'Loading' } else { '' }
     $status = switch ($statusText) { 'In tenant' { 'OK' } 'License' { 'Warning' } 'Not found' { 'Error' } default { '' } }
     [pscustomobject]@{
         Id          = $(if ($found -and $Meta.Name) { $Meta.Name } else { $Id })
-        Key         = $Id.ToLower()
+        Key         = $key
+        Source      = $Source
         # The name the app gets in Intune (catalog name, or the feed title without "(Install)")
         Title       = $(if ($Name) { $Name } elseif ($found -and $Meta.Title) { $Meta.Title } else { $Id }) -replace '\s*\((Install|Portable)\)\s*$', ''
         Category    = $Category
         Version     = $(if ($found) { $Meta.Version } else { '' })
         Authors     = $(if ($found) { $Meta.Authors } else { '' })
         Downloads   = $(if ($found -and $Meta.Downloads) { try { ('{0:N0}' -f [int64]$Meta.Downloads) } catch { $Meta.Downloads } } else { '' })
-        IconUrl     = $(if ($found) { $p = Get-IconPreview $Meta.IconUrl; if ($p) { $p.ToString() } } else { $null })
-        RawIconUrl  = $(if ($found) { $Meta.IconUrl } else { $null })
+        IconUrl     = $(if ($iconSource) { $p = Get-IconPreview $iconSource; if ($p) { $p.ToString() } } else { $null })
+        RawIconUrl  = $iconSource
+        License     = $(if ($found) { $Meta.License } else { '' })
         Summary     = $(if ($found) { $Meta.Summary } else { '' })
         Description = $(if ($found) { $Meta.Description } else { '' })
         ProjectUrl  = $(if ($found) { $Meta.ProjectUrl } else { '' })
@@ -723,14 +756,25 @@ function Find-VisualChild($Parent, [type]$Type) {
 function Update-CatalogGrid {
     $category = [string]$ui.CmbCategory.SelectedItem
     $filter = $ui.TxtCatalogFilter.Text.Trim()
-    $rows = foreach ($entry in $script:Catalog) {
+    $entries = @(Get-CatalogEntries)
+    $rows = foreach ($entry in $entries) {
         if ($category -and $category -ne 'All categories' -and $entry.Category -ne $category) { continue }
-        if ($filter -and $entry.Name -notlike "*$filter*" -and $entry.Id -notlike "*$filter*") { continue }
-        New-PackageRow -Id $entry.Id -Name $entry.Name -Category $entry.Category -Meta $script:Shared.Meta[$entry.Id.ToLower()]
+        $id = Get-CatalogPackageId $entry
+        if ($filter -and $entry.Name -notlike "*$filter*" -and $id -notlike "*$filter*") { continue }
+        New-PackageRow -Id $id -Name $entry.Name -Category $entry.Category -Meta $script:Shared.Meta[(Get-MetaKey $id)] -IconMeta $script:Shared.Meta[$entry.Id.ToLower()]
     }
     Set-GridRows $ui.DgCatalog @($rows)
     $loading = @($rows | Where-Object { $_.StatusText -eq 'Loading' }).Count
-    $ui.TxtCatalogCount.Text = "$(@($rows).Count) of $($script:Catalog.Count) apps" + $(if ($loading) { ", $loading still loading" } else { '' })
+    $ui.TxtCatalogCount.Text = "$(@($rows).Count) of $($entries.Count) apps" + $(if ($loading) { ", $loading still loading" } else { '' })
+}
+
+# The catalog of the active source: every entry for Chocolatey, the entries with a winget id for winget
+function Get-CatalogEntries { if ($script:Source -eq 'Winget') { $script:Catalog | Where-Object WingetId } else { $script:Catalog } }
+function Get-CatalogPackageId($Entry) { if ($script:Source -eq 'Winget') { $Entry.WingetId } else { $Entry.Id } }
+function Start-CatalogPrefetch {
+    Start-MetaPrefetch -Ids @(Get-CatalogEntries | ForEach-Object { Get-CatalogPackageId $_ })
+    # winget rows show the icon of the same app's Chocolatey package
+    if ($script:Source -eq 'Winget') { $script:MetaQueued = @{ Ids = @($script:Catalog | Where-Object WingetId | ForEach-Object { $_.Id } | Where-Object { Test-MetaMissing $_ 'Chocolatey' }); Source = 'Chocolatey' } }
 }
 
 function Set-GridRows($Grid, $Rows) {
@@ -780,10 +824,13 @@ function Update-SelectionView {
     $count = $script:Selected.Count
     $ui.TxtSelectionCount.Text = switch ($count) { 0 { 'No app selected' } 1 { '1 app selected' } default { "$count apps selected" } }
     $ui.SelectionList.ItemsSource = @($script:Selected.Values | ForEach-Object { "$($_.Title)  ($($_.Id))" })
-    $ui.BtnDeploy.IsEnabled = $count -gt 0 -and (Test-SignedIn) -and $script:ModuleState.Ok
+    $wingetMissing = $script:Source -eq 'Winget' -and -not $script:ModuleState.Winget
+    $ui.BtnDeploy.IsEnabled = $count -gt 0 -and (Test-SignedIn) -and $script:ModuleState.Ok -and -not $wingetMissing
     $ui.BtnDeploy.Content = if ($count -gt 1) { "Deploy $count apps" } else { 'Deploy selected' }
-    $ui.BtnDeploy.ToolTip = if (-not (Test-SignedIn)) { 'Sign in first' } elseif (-not $script:ModuleState.Ok) { 'Install the IntuneWin32App module first (Settings)' } else { 'Creates the apps in Intune one after another' }
-    $ui.TxtDeployDefaults.Text = "Architecture $($script:Settings.Architecture), update task waits $($script:Settings.UpdateDelayMinMinutes) to $($script:Settings.UpdateDelayMaxMinutes) min after startup" + $(if ($script:Settings.PackageSource) { ", source $($script:Settings.PackageSource)" } else { '' }) + ' (Settings).'
+    $ui.BtnDeploy.ToolTip = if (-not (Test-SignedIn)) { 'Sign in first' } elseif (-not $script:ModuleState.Ok) { 'Install the IntuneWin32App module first (Settings)' }
+                            elseif ($wingetMissing) { 'Install the Microsoft.WinGet.Client module first (Settings)' } else { 'Creates the apps in Intune one after another' }
+    $how = if ($script:Source -eq 'Winget') { 'winget as SYSTEM, Windows 10 1809 or newer' } elseif ($script:Settings.PackageSource) { "choco from $($script:Settings.PackageSource)" } else { 'choco from the community repository' }
+    $ui.TxtDeployDefaults.Text = "Installs with $how. Architecture $($script:Settings.Architecture), update task waits $($script:Settings.UpdateDelayMinMinutes) to $($script:Settings.UpdateDelayMaxMinutes) min after startup (Settings)."
 }
 
 function Clear-Selection {
@@ -800,7 +847,7 @@ Add-Click $ui.BtnCatalogSelectShown {
     Update-SelectionView
 }
 Add-Click $ui.BtnCatalogRefresh {
-    Start-MetaPrefetch -Ids @($script:Catalog | ForEach-Object { $_.Id }) -Force
+    Start-MetaPrefetch -Ids @(Get-CatalogEntries | ForEach-Object { Get-CatalogPackageId $_ }) -Force
 }
 
 function Show-Details($Item) {
@@ -815,8 +862,11 @@ function Show-Details($Item) {
     if ($Item.Version) { $meta += "version $($Item.Version)" }
     if ($Item.Authors) { $meta += $Item.Authors }
     if ($Item.Downloads) { $meta += "$($Item.Downloads) downloads" }
+    if ($Item.License) { $meta += "license $($Item.License)" }
     $ui.TxtDetailMeta.Text = $meta -join "  $([char]0x00B7)  "   # kept out of the source: PS 5.1 reads BOM-less files as ANSI
-    $summary = if ($Item.Summary) { $Item.Summary } elseif ($Item.Description) { $Item.Description } elseif ($Item.StatusText -eq 'Loading') { 'Package infos are still loading ...' } elseif (-not $Item.Found) { 'This package was not found on the metadata feed.' } else { '' }
+    $summary = if ($Item.Summary) { $Item.Summary } elseif ($Item.Description) { $Item.Description } elseif ($Item.StatusText -eq 'Loading') { 'Package infos are still loading ...' }
+               elseif (-not $Item.Found) { $(if ($Item.Source -eq 'Winget') { 'This package was not found in the winget source.' } else { 'This package was not found on the metadata feed.' }) } else { '' }
+    $ui.BtnDetailChoco.Content = if ($Item.Source -eq 'Winget') { 'winget-pkgs' } else { 'chocolatey.org' }
     $ui.TxtDetailSummary.Text = ($summary -replace '\s+', ' ').Trim()
     $ui.BoxLicense.Visibility = if ($Item.LicenseNote) { 'Visible' } else { 'Collapsed' }
     $ui.TxtLicenseNote.Text = $Item.LicenseNote
@@ -849,6 +899,7 @@ function Update-DetailIcon {
     $ui.TxtCustomIcon.Text = if ($custom) { "Custom icon set ($([math]::Round($custom.Length * 3 / 4 / 1024)) KB PNG/JPEG), used instead of the one from chocolatey.org." }
                              elseif ($item.RawIconUrl -match '\.svg(\?|#|$)') { 'SVG icon from chocolatey.org, converted to PNG with Edge for Intune.' }
                              elseif ($item.RawIconUrl) { 'Icon from chocolatey.org.' }
+                             elseif ($item.Source -eq 'Winget') { 'winget packages have no icon; the app is created without one unless you choose a file.' }
                              elseif ($item.Found) { 'This package has no icon on chocolatey.org; the app is created without one unless you choose a file.' }
                              else { '' }
     $ui.BtnCustomIconRemove.Visibility = if ($custom) { 'Visible' } else { 'Collapsed' }
@@ -879,7 +930,15 @@ function Set-CustomIcon([string]$Key, [string]$Path) {
 Add-Click $ui.BtnCustomIconRemove { if ($script:DetailItem) { $script:CustomIcons.Remove($script:DetailItem.Key); Update-DetailIcon } }
 Add-Click $ui.BtnDetailSite { if ($script:DetailItem.ProjectUrl -match '^https?://') { Start-Process $script:DetailItem.ProjectUrl } }
 Add-Click $ui.BtnDetailLicense { if ($script:DetailItem.LicenseUrl -match '^https?://') { Start-Process $script:DetailItem.LicenseUrl } }
-Add-Click $ui.BtnDetailChoco { if ($script:DetailItem) { Start-Process "https://community.chocolatey.org/packages/$([Uri]::EscapeDataString($script:DetailItem.Id))" } }
+Add-Click $ui.BtnDetailChoco {
+    $item = $script:DetailItem
+    if (-not $item) { return }
+    if ($item.Source -eq 'Winget') {
+        $path = @($item.Id.Split('.') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+        Start-Process "https://github.com/microsoft/winget-pkgs/tree/master/manifests/$($item.Id.Substring(0, 1).ToLower())/$path"
+    }
+    else { Start-Process "https://community.chocolatey.org/packages/$([Uri]::EscapeDataString($item.Id))" }
+}
 
 # Catalog filters
 $ui.CmbCategory.ItemsSource = @('All categories') + @($script:Catalog | ForEach-Object { $_.Category } | Sort-Object -Unique)
@@ -896,24 +955,33 @@ function Start-Search {
     $term = $ui.TxtSearch.Text.Trim()
     if ($term.Length -lt 2) { throw 'Enter at least two characters.' }
     if (Test-TaskRunning 'search') { return }
+    if ($script:Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'The winget search needs the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $ui.TxtSearchCount.Text = 'Searching ...'
-    [void](Start-UiTask -Kind 'search' -Title "Searching the feed for '$term'" -Pool $script:UserPool -Arguments @{ Term = $term } -Work 'param($Term) Search-ChocoPackage -SearchPattern $Term -Top 40' -OnDone {
+    $work = if ($script:Source -eq 'Winget') { 'param($Term, $Source) Search-WingetPackage -SearchPattern $Term -Top 40' } else { 'param($Term, $Source) Search-ChocoPackage -SearchPattern $Term -Top 40' }
+    $where = if ($script:Source -eq 'Winget') { 'the winget source' } else { 'the Chocolatey feed' }
+    [void](Start-UiTask -Kind 'search' -Title "Searching $where for '$term'" -Pool $script:UserPool -Arguments @{ Term = $term; Source = $script:Source } -Work $work -OnDone {
         param($Result, $Job)
+        $source = $Job.Source
+        $script:SearchSource = $source
         $script:SearchIds = @(foreach ($info in @($Result | Where-Object { $_ -and $_.Name })) {
-            $script:Shared.Meta[$info.Name.ToLower()] = ConvertTo-MetaEntry $info
+            # A full entry from an earlier lookup is kept; a winget hit alone has no publisher and description yet
+            $key = Get-MetaKey $info.Name $source
+            if (-not ($script:Shared.Meta[$key] -and $script:Shared.Meta[$key].Found -and -not $script:Shared.Meta[$key].Partial)) { $script:Shared.Meta[$key] = ConvertTo-MetaEntry $info }
             $info.Name
         })
         $script:MetaDirty = $true
         Update-SearchRows
         $ui.TxtSearchCount.Text = if ($Job.Status -eq 'failed') { 'Search failed, see the activity panel' } else { "$($script:SearchIds.Count) packages found" }
+        if ($source -eq 'Winget') { Start-MetaPrefetch -Ids $script:SearchIds -Source 'Winget' }
         Start-IconRender
     })
 }
 $script:SearchIds = @()
+$script:SearchSource = 'Chocolatey'
 function Update-SearchRows {
     $rows = foreach ($id in $script:SearchIds) {
-        $meta = $script:Shared.Meta[$id.ToLower()]
-        New-PackageRow -Id $id -Name $meta.Title -Category '' -Meta $meta
+        $meta = $script:Shared.Meta[(Get-MetaKey $id $script:SearchSource)]
+        New-PackageRow -Id $id -Name $meta.Title -Category '' -Meta $meta -Source $script:SearchSource
     }
     Set-GridRows $ui.DgSearch @($rows)
 }
@@ -938,30 +1006,34 @@ function Start-Deploy {
     }
     $intent = Get-Intent
     if ($intent -eq 'Required' -and -not (Confirm-Action "Required installs the $($items.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment')) { return }
+    if (@($items | Where-Object { $_.Source -eq 'Winget' }).Count -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     Update-UiToken
     $work = @'
-param($Id, $Assignment, $Architecture, $IconBase64)
-$Params = @{ ChocoName = $Id; Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true }
+param($Id, $Source, $Assignment, $Architecture, $IconBase64)
+$Params = @{ Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true }
 if ($IconBase64) { $Params.IconBase64 = $IconBase64 }
-New-IntuneWin32ChocoApplication @Params
+if ($Source -eq 'Winget') { New-IntuneWin32WingetApplication -WingetId $Id @Params }
+else { New-IntuneWin32ChocoApplication -ChocoName $Id @Params }
 '@
     foreach ($item in $items) {
         $icon = $script:CustomIcons[$item.Key]
-        [void](Start-UiTask -Kind 'deploy' -Title "Deploying $($item.Title) ($intent)" -Package $item.Id -NeedsAuth -Work $work -OnDone {
+        $label = if ($item.Source -eq 'Winget') { 'winget' } else { 'Chocolatey' }
+        [void](Start-UiTask -Kind 'deploy' -Title "Deploying $($item.Title) from $label ($intent)" -Package $item.Id -NeedsAuth -Work $work -OnDone {
             param($Result, $Job)
             switch ($Job.Status) {
                 'succeeded' {
                     Write-UiLog "[$($Job.Package)] created in Intune (app id $(@($Result | Where-Object { $_ -is [string] }) -join ', '))." 'Success'
                     # Graph lists a new app only after a few seconds: mark it right away, so it is not queued twice
-                    $script:TenantPackages[$Job.Package.ToLower()] = $true
-                    $script:RecentDeploys[$Job.Package.ToLower()] = Get-Date
+                    $key = Get-MetaKey $Job.Package $Job.Source
+                    $script:TenantPackages[$key] = $true
+                    $script:RecentDeploys[$key] = Get-Date
                 }
                 'skipped'   { Write-UiLog "[$($Job.Package)] skipped." 'Warning' }
                 default     { Write-UiLog "[$($Job.Package)] failed." 'Error' }
             }
             $script:TenantApps = $null
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count) { Start-TenantRefresh }
-        } -Arguments @{ Id = $item.Id; Assignment = $intent; Architecture = $script:Settings.Architecture; IconBase64 = $icon })
+        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $intent; Architecture = $script:Settings.Architecture; IconBase64 = $icon })
     }
     Write-UiLog "$($items.Count) deployment(s) queued, assignment $intent." 'Info'
     Clear-Selection
@@ -985,7 +1057,7 @@ function Start-TenantRefresh {
     Update-UiToken
     $work = @'
 Get-IntuneChocoTenantApps | ForEach-Object {
-    [pscustomobject]@{ Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created }
+    [pscustomobject]@{ Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; Source = [string]$_.Source; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created }
 }
 '@
     [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -NeedsAuth -Work $work -OnDone {
@@ -994,8 +1066,9 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         $script:TenantApps = @($Result | Where-Object { $_ -and $_.Id } | ForEach-Object {
             $created = try { ([datetime]$_.Created).ToLocalTime().ToString('yyyy-MM-dd HH:mm') } catch { $_.Created }
             [pscustomobject]@{
-                Id = $_.Id; DisplayName = $_.DisplayName; Package = $_.Package; IsChocolatey = $_.IsChocolatey; CreatedText = $created
-                StatusText = $(if ($_.IsChocolatey) { 'Dependency' } else { 'App' }); Status = $(if ($_.IsChocolatey) { 'assigned' } else { '' })
+                Id = $_.Id; DisplayName = $_.DisplayName; Package = $_.Package; Source = $_.Source; IsChocolatey = $_.IsChocolatey; CreatedText = $created
+                StatusText = $(if ($_.IsChocolatey) { 'Dependency' } elseif ($_.Source -eq 'Winget') { 'winget' } else { 'Chocolatey' })
+                Status = $(if ($_.IsChocolatey) { 'assigned' } elseif ($_.Source -eq 'Winget') { 'available' } else { '' })
             }
         } | Sort-Object { -not $_.IsChocolatey }, DisplayName)
         $ui.DgTenant.ItemsSource = $script:TenantApps
@@ -1004,7 +1077,7 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         # Catalog and search mark what is already there, including apps created in the last minutes that Graph
         # does not list yet
         $script:TenantPackages = @{}
-        foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { $script:TenantPackages[$app.Package.ToLower()] = $true } }
+        foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { $script:TenantPackages[(Get-MetaKey $app.Package $app.Source)] = $true } }
         foreach ($key in @($script:RecentDeploys.Keys)) {
             if ($script:RecentDeploys[$key] -gt (Get-Date).AddMinutes(-5)) { $script:TenantPackages[$key] = $true } else { $script:RecentDeploys.Remove($key) }
         }
@@ -1025,15 +1098,15 @@ $ui.DgTenant.Add_SelectionChanged({ Update-TenantButtons })
 Add-Click $ui.BtnTenantRemove {
     $app = $ui.DgTenant.SelectedItem
     if (-not $app) { return }
-    $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count
+    $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Source -eq 'Chocolatey' }).Count
     if ($app.IsChocolatey -and $others -gt 0) { throw "Chocolatey is the dependency of the $others app(s) created by this tool. Remove those first." }
     if (-not (Confirm-Action "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." 'Remove from Intune')) { return }
     Update-UiToken
-    [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id } -Work 'param($Id) Remove-IntuneChocoApplication -Id $Id' -OnDone {
+    [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-IntuneChocoApplication -Id $Id' -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'succeeded') {
             Write-UiLog "[$($Job.Package)] removed from Intune." 'Success'
-            if ($Job.Package) { $script:RecentDeploys.Remove($Job.Package.ToLower()) }
+            if ($Job.Package) { $script:RecentDeploys.Remove((Get-MetaKey $Job.Package $Job.Source)) }
         }
         $script:TenantApps = $null
         Start-TenantRefresh
@@ -1078,6 +1151,7 @@ function Save-Settings {
         Assignment            = [string]$ui.CmbAssignment.SelectedItem
         UpdateDelayMinMinutes = $(if ($ui.TxtDelayMin.Text -match '^\d+$') { [int]$ui.TxtDelayMin.Text } else { throw 'The update delay must be a whole number of minutes.' })
         UpdateDelayMaxMinutes = $(if ($ui.TxtDelayMax.Text -match '^\d+$') { [int]$ui.TxtDelayMax.Text } else { throw 'The update delay must be a whole number of minutes.' })
+        Source                = $script:Source
     }
     $feedChanged = $new.MetadataFeed.Trim() -ne $script:Settings.MetadataFeed
     [void](Save-IntuneChocoSettings -Settings ([pscustomobject]$new))
@@ -1092,14 +1166,43 @@ Add-Click $ui.BtnOpenWorkFolder { New-Item -Path $script:WorkRoot -ItemType Dire
 
 function Start-ModuleInstall {
     if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'components' }).Count) { return }
-    [void](Start-UiTask -Kind 'components' -Title "Installing the IntuneWin32App module ($($script:MinimumModuleVersion) or newer) from the PowerShell Gallery" -Work 'Install-IntunechocoComponents' -Pool $script:UserPool -OnDone {
+    [void](Start-UiTask -Kind 'components' -Title "Installing the IntuneWin32App ($($script:MinimumModuleVersion) or newer) and Microsoft.WinGet.Client modules from the PowerShell Gallery" -Work 'Install-IntunechocoComponents' -Pool $script:UserPool -OnDone {
         param($Result, $Job)
         Update-ModuleState
         Update-ConnectionStatus
-        if ($Job.Status -eq 'succeeded') { Write-UiLog "IntuneWin32App $($script:ModuleState.Version) is ready." 'Success' }
+        if ($Job.Status -eq 'succeeded') { Write-UiLog "IntuneWin32App $($script:ModuleState.Version) and Microsoft.WinGet.Client $($script:ModuleState.WingetVersion) are ready." 'Success' }
+        if ($script:CurrentPage -eq 'Catalog') { Start-CatalogPrefetch }
     })
 }
 Add-Click $ui.BtnInstallModule { Start-ModuleInstall }
+
+# ---------------------------------------------------------------- package source (Chocolatey or winget)
+function Set-PackageSource([ValidateSet('Chocolatey', 'Winget')][string]$Source, [switch]$NoSave) {
+    $script:Source = $Source
+    $winget = $Source -eq 'Winget'
+    $ui.BtnSource.Content = if ($winget) { 'winget' } else { 'Chocolatey' }
+    $ui.BtnSource.ToolTip = "Package source: $($ui.BtnSource.Content). Click to switch to $(if ($winget) { 'Chocolatey' } else { 'winget' })."
+    $ui.HintSearch.Text = if ($winget) { 'Search the winget repository, e.g. notepad' } else { 'Search the Chocolatey repository, e.g. notepad' }
+    # The selection belongs to one source; search results of the other source are cleared
+    Clear-Selection
+    Show-Details $null
+    $script:SearchIds = @(); $ui.DgSearch.ItemsSource = $null; $ui.TxtSearchCount.Text = ''
+    $ui.CmbCategory.ItemsSource = @('All categories') + @(Get-CatalogEntries | ForEach-Object { $_.Category } | Sort-Object -Unique)
+    $ui.CmbCategory.SelectedIndex = 0
+    Update-CatalogGrid
+    Update-SelectionView
+    Update-Readiness
+    if ($script:CurrentPage -eq 'Catalog') { Start-CatalogPrefetch }
+    if (-not $NoSave) {
+        try {
+            $s = Get-IntuneChocoSettings; $s.Source = $Source
+            [void](Save-IntuneChocoSettings -Settings $s); $script:Settings = Get-IntuneChocoSettings
+        }
+        catch { Write-UiLog "The package source could not be saved: $($_.Exception.Message)" 'Warning' }
+        Write-UiLog "Package source: $($ui.BtnSource.Content)."
+    }
+}
+Add-Click $ui.BtnSource { Set-PackageSource $(if ($script:Source -eq 'Winget') { 'Chocolatey' } else { 'Winget' }) }
 
 # ---------------------------------------------------------------- sign in / out
 function Assert-SignInSettings {
@@ -1253,9 +1356,9 @@ Write-UiLog "Intune Chocolatey Deployment $script:ToolVersion started. Work fold
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it under Settings > Components." 'Warning' }
 Update-ConnectionStatus
 Show-Page 'Start'
-Update-CatalogGrid
-Start-MetaPrefetch -Ids @($script:Catalog | ForEach-Object { $_.Id })
-if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'meta' }).Count) { Start-IconRender }   # all infos came from the cache
+Set-PackageSource $script:Source -NoSave
+Start-CatalogPrefetch
+if (-not (Test-TaskRunning 'meta')) { Start-IconRender }   # all infos came from the cache
 $timer.Start()
 # Test hook: INTUNECHOCO_SMOKE names a script that drives the window off-screen and renders every page.
 if ($env:INTUNECHOCO_SMOKE) { . $env:INTUNECHOCO_SMOKE }
