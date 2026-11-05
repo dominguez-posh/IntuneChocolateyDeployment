@@ -37,13 +37,41 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.HelpPanel.Visibility = 'Collapsed'
         Test-Smoke 'Keevault detection runs' ($null -ne (Find-KeevaultMcp).Installed)
         $true } }
+    @{ Name = 'sign-in can be cancelled'; Phase = 0; Do = {
+        param($s)
+        # A browser that never answers (the user closed the window): the sign-in must end on Cancel
+        if ($s.Phase -eq 0) { $s.Phase = 1; $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; UrlHandler = 'param($Url)' }; Connect-Intune; return $false }
+        if ($s.Phase -eq 1) {
+            if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'connect' -and $_.Job.Status -eq 'running' }).Count) { return $false }
+            $s.Phase = 2
+            Test-Smoke 'button offers to cancel while the sign-in waits' ($ui.BtnSignIn.Content -eq 'Cancel sign-in' -and $ui.BtnSignIn.IsEnabled -and -not $ui.BtnSignInMenu.IsEnabled) $ui.BtnSignIn.Content
+            & $script:ClickActions[$ui.BtnSignIn]
+            return $false
+        }
+        if (-not (Test-Idle 'connect')) { return $false }
+        Test-Smoke 'cancelled sign-in ends and is logged' ((-not (Test-SignedIn)) -and (Get-SmokeLog) -match 'Sign-in cancelled')
+        Test-Smoke 'sign in is offered again' ($ui.BtnSignIn.Content -eq 'Sign in' -and $ui.BtnSignIn.IsEnabled -and $ui.BtnSignInMenu.IsEnabled) $ui.BtnSignIn.Content
+        $true } }
     @{ Name = 'sign in'; Started = $false; Do = {
         param($s)
-        if (-not $s.Started) { $s.Started = $true; Connect-Intune; return $false }
+        if (-not $s.Started) {
+            $s.Started = $true
+            # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
+            $script:SignInTest.UrlHandler = 'param($Url) $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
+            Connect-Intune
+            return $false
+        }
         if (-not (Test-Idle 'connect')) { return $false }
-        Test-Smoke 'signed in through the module' (Test-SignedIn)
+        Test-Smoke 'signed in through the browser flow (PKCE, loopback)' (Test-SignedIn)
         Test-Smoke 'header shows the account' ($ui.TxtConnectionStatus.Text -like '*admin@contoso.onmicrosoft.com*') $ui.TxtConnectionStatus.Text
         Test-Smoke 'sign in disabled, sign out enabled' ((-not $ui.BtnSignIn.IsEnabled) -and $ui.BtnSignOut.IsEnabled)
+        Test-Smoke 'token carries refresh token and client id' ($Global:AccessToken.RefreshToken -eq 'refresh-Test Admin' -and $Global:AccessToken.ClientID -eq '11111111-2222-3333-4444-555555555555')
+        # An expiring token is renewed silently with the refresh token
+        $Global:AccessToken.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(2)
+        Update-UiToken
+        $identity = Get-IntuneChocoIdentity
+        Test-Smoke 'expiring token renewed silently' ($identity.Name -eq 'Test Admin renewed' -and ([datetime]$identity.ExpiresOn) -gt (Get-Date).ToUniversalTime().AddMinutes(30)) $identity.Name
+        Test-Smoke 'renewed token handed to the tasks' ($script:Shared.Auth.AccessToken.RefreshToken -eq 'refresh-Test Admin renewed')
         $true } }
     @{ Name = 'catalog infos'; Started = $false; Waited = 0; Do = {
         param($s)
@@ -123,22 +151,52 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $rows = @($ui.DgTenant.ItemsSource)
         Test-Smoke 'tenant lists 3 apps, Chocolatey first' ($rows.Count -eq 3 -and $rows[0].IsChocolatey) (($rows | ForEach-Object { $_.DisplayName }) -join ', ')
         $ui.DgTenant.SelectedIndex = 1
-        Test-Smoke 'open and copy enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantCopy.IsEnabled)
+        Test-Smoke 'open, copy and remove enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantCopy.IsEnabled -and $ui.BtnTenantRemove.IsEnabled)
         Save-SmokeShot '05-tenant'
         $true } }
-    @{ Name = 'redeploy is skipped'; Started = $false; Do = {
+    @{ Name = 'catalog knows the tenant'; Do = {
+        Show-Page 'Catalog'
+        $rows = @($ui.DgCatalog.ItemsSource)
+        $marked = @($rows | Where-Object { $_.StatusText -eq 'In tenant' } | ForEach-Object { $_.Key }) -join ','
+        Test-Smoke 'deployed apps are marked in the catalog' ($marked -eq '7zip.install,scratch') $marked
+        # List position and sorting survive a rebuild of the rows (infos and icons come in while the user scrolls)
+        $ui.DgCatalog.Items.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription('Title', 'Descending')))
+        $ui.DgCatalog.UpdateLayout()
+        $scroll = Find-VisualChild $ui.DgCatalog ([System.Windows.Controls.ScrollViewer])
+        $scroll.ScrollToVerticalOffset(30); $ui.DgCatalog.UpdateLayout()
+        Update-CatalogGrid
+        $ui.DgCatalog.UpdateLayout()
+        $scroll = Find-VisualChild $ui.DgCatalog ([System.Windows.Controls.ScrollViewer])
+        Test-Smoke 'scroll position kept on rebuild' ($scroll.VerticalOffset -eq 30) $scroll.VerticalOffset
+        Test-Smoke 'sorting kept on rebuild' ($ui.DgCatalog.Items[0].Title -eq (@($rows | ForEach-Object { $_.Title } | Sort-Object -Descending)[0])) $ui.DgCatalog.Items[0].Title
+        $ui.DgCatalog.Items.SortDescriptions.Clear()
+        Update-CatalogGrid
+        # An app that is already there is not queued again
+        $ui.TxtCatalogFilter.Text = 'scratch'
+        Test-Smoke 'filter hint hidden while typing' ($ui.HintCatalogFilter.Visibility -eq 'Collapsed')
+        [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
+        try { Start-Deploy; Test-Smoke 'app in the tenant is not deployed again' $false }
+        catch { Test-Smoke 'app in the tenant is not deployed again' ($_.Exception.Message -like '*already in the tenant*' -and (Test-Idle 'deploy')) $_.Exception.Message }
+        Clear-Selection
+        $ui.TxtCatalogFilter.Text = ''
+        $true } }
+    @{ Name = 'remove from Intune'; Phase = 0; Do = {
         param($s)
-        if (-not $s.Started) {
-            $s.Started = $true
-            Show-Page 'Catalog'
-            $ui.TxtCatalogFilter.Text = 'scratch'
-            [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
-            $ui.TxtCatalogFilter.Text = ''
-            Start-Deploy
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            Show-Page 'Tenant'
+            # Chocolatey stays while other apps depend on it
+            $ui.DgTenant.SelectedItem = @($ui.DgTenant.ItemsSource | Where-Object IsChocolatey)[0]
+            try { & $script:ClickActions[$ui.BtnTenantRemove]; Test-Smoke 'Chocolatey is not removed while apps depend on it' $false }
+            catch { Test-Smoke 'Chocolatey is not removed while apps depend on it' ($_.Exception.Message -like '*dependency of*') $_.Exception.Message }
+            $ui.DgTenant.SelectedItem = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'scratch' })[0]
+            & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }
-        if (-not (Test-Idle)) { return $false }
-        Test-Smoke 'existing app is skipped' ((Get-SmokeLog) -match '\[scratch\] skipped')
+        if (-not (Test-Idle 'remove') -or -not (Test-Idle 'tenant')) { return $false }
+        $rows = @($ui.DgTenant.ItemsSource)
+        Test-Smoke 'Scratch removed from the tenant' ($rows.Count -eq 2 -and -not @($rows | Where-Object { $_.Package -eq 'scratch' }).Count -and (Get-SmokeLog) -match '\[scratch\] removed from Intune') $rows.Count
+        Test-Smoke 'catalog no longer marks Scratch' (-not $script:TenantPackages.ContainsKey('scratch') -and $script:TenantPackages.ContainsKey('7zip.install'))
         $true } }
     @{ Name = 'search'; Started = $false; Do = {
         param($s)
@@ -186,7 +244,6 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'settings show the tenant' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com') $ui.TxtTenantId.Text
         Save-SmokeShot '07-settings'
         $ui.TxtDelayMin.Text = '30'; $ui.TxtDelayMax.Text = '10'
-        $before = $ui.LogList.Items.Count
         try { Save-Settings; Test-Smoke 'invalid delay range rejected' $false } catch { Test-Smoke 'invalid delay range rejected' ($_.Exception.Message -like '*delay*') $_.Exception.Message }
         $ui.TxtDelayMin.Text = '10'; $ui.TxtDelayMax.Text = '90'
         $ui.TxtPackageSource.Text = 'https://proget.contoso.com/nuget/choco/'
@@ -199,6 +256,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Disconnect-Intune
         Test-Smoke 'signed out' ((-not (Test-SignedIn)) -and $ui.TxtConnectionStatus.Text -eq 'Not signed in to Intune' -and $ui.BtnSignIn.IsEnabled)
         Test-Smoke 'deploy disabled when signed out' ($(Show-Page 'Catalog'; -not $ui.BtnDeploy.IsEnabled))
+        Test-Smoke 'tenant marks cleared on sign-out' (-not @($ui.DgCatalog.ItemsSource | Where-Object { $_.StatusText -eq 'In tenant' }).Count)
+        $logFile = Join-Path $script:LogFolder ('{0:yyyy-MM-dd}.log' -f (Get-Date))
+        Test-Smoke 'activity is written to the log file' ((Test-Path $logFile) -and (Get-Content $logFile -Raw) -match 'created in Intune')
         Show-Page 'Start'
         Save-SmokeShot '08-start-signed-out'
         $true } }

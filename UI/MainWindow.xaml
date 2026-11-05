@@ -156,7 +156,11 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <ComboBox x:Name="CmbCategory" Width="210" Margin="0,0,10,0"/>
-                    <TextBox x:Name="TxtCatalogFilter" Grid.Column="1" Width="260" ToolTip="Filter by name or package id"/>
+                    <Grid Grid.Column="1" Width="260">
+                        <TextBox x:Name="TxtCatalogFilter" ToolTip="Filter by name or package id"/>
+                        <TextBlock x:Name="HintCatalogFilter" Text="Filter by name or package id" IsHitTestVisible="False"
+                                   Foreground="{StaticResource MutedText}" VerticalAlignment="Center" Margin="12,0"/>
+                    </Grid>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0,0,0">
                         <Button x:Name="BtnCatalogSelectShown" Content="Select shown" Style="{StaticResource SmallButton}"/>
                         <Button x:Name="BtnCatalogRefresh" Content="Refresh infos" Style="{StaticResource SmallButton}" ToolTip="Reads versions, publishers and icons from the Chocolatey feed again"/>
@@ -191,7 +195,11 @@
                         <ColumnDefinition/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="TxtSearch" Width="340" ToolTip="Name or part of a package id, e.g. 'notepad' (Enter searches)"/>
+                    <Grid Width="340">
+                        <TextBox x:Name="TxtSearch" ToolTip="Name or part of a package id, e.g. 'notepad' (Enter searches)"/>
+                        <TextBlock x:Name="HintSearch" Text="Search the Chocolatey repository, e.g. notepad" IsHitTestVisible="False"
+                                   Foreground="{StaticResource MutedText}" VerticalAlignment="Center" Margin="12,0" TextTrimming="CharacterEllipsis"/>
+                    </Grid>
                     <Button x:Name="BtnSearch" Grid.Column="1" Tag="&#xE721;" Content="Search" Margin="8,0,0,0"/>
                     <TextBlock x:Name="TxtSearchCount" Grid.Column="3" VerticalAlignment="Center" Style="{StaticResource Hint}"/>
                 </Grid>
@@ -226,6 +234,8 @@
                         <Button x:Name="BtnTenantRefresh" Tag="&#xE72C;" Content="Refresh" Margin="0,4,4,4"/>
                         <Button x:Name="BtnTenantOpen" Tag="&#xE8A7;" Content="Open in Intune admin center" Style="{StaticResource SecondaryButton}" IsEnabled="False"/>
                         <Button x:Name="BtnTenantCopy" Tag="&#xE8C8;" Content="Copy app id" Style="{StaticResource SecondaryButton}" IsEnabled="False"/>
+                        <Button x:Name="BtnTenantRemove" Tag="&#xE74D;" Content="Remove from Intune" Style="{StaticResource DangerButton}" IsEnabled="False"
+                                ToolTip="Deletes the selected app in Intune. Devices keep the installed software."/>
                     </StackPanel>
                     <TextBlock x:Name="TxtTenantCount" Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource Hint}" Text="Sign in to see the apps this tool created in the tenant."/>
                 </Grid>
@@ -391,6 +401,7 @@
             <GroupBox.Header>
                 <DockPanel>
                     <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                        <Button x:Name="BtnLogFolder" Content="Log files" Style="{StaticResource SmallButton}" ToolTip="Everything shown here is also written to a log file per day"/>
                         <Button x:Name="BtnLogClear" Content="Clear" Style="{StaticResource SmallButton}"/>
                         <Button x:Name="BtnLogToggle" Content="Hide" Style="{StaticResource SmallButton}"/>
                     </StackPanel>

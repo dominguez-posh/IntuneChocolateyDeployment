@@ -130,7 +130,17 @@ function Add-LogLine {
     while ($ui.LogList.Items.Count -gt 1000) { $ui.LogList.Items.RemoveAt(0) }
     $ui.LogList.ScrollIntoView($item)
 }
-function Write-UiLog([string]$Text, [string]$Level = 'Info') { Add-LogLine ('{0:HH:mm:ss}  {1}' -f (Get-Date), $Text) $Level }
+$script:LogFolder = Join-Path $script:WorkRoot 'logs'
+function Write-UiLog([string]$Text, [string]$Level = 'Info') {
+    $now = Get-Date
+    Add-LogLine ('{0:HH:mm:ss}  {1}' -f $now, $Text) $Level
+    # Also into a log file per day, so deployments can be traced later
+    try {
+        if (-not (Test-Path $script:LogFolder)) { New-Item -Path $script:LogFolder -ItemType Directory -Force | Out-Null }
+        Add-Content -Path (Join-Path $script:LogFolder ('{0:yyyy-MM-dd}.log' -f $now)) -Value ('{0:yyyy-MM-dd HH:mm:ss}  {1,-7}  {2}' -f $now, $Level, $Text) -Encoding UTF8
+    }
+    catch { }
+}
 Set-IntuneChocoSignInLog { param($Text, $Level) Write-UiLog $Text $(if ($Level) { $Level } else { 'Info' }) }
 
 function Show-Error([string]$Message) {
@@ -159,12 +169,16 @@ function Add-Click {
 # ---------------------------------------------------------------- background tasks
 # Shared with the task runspaces: the sign-in and the package infos from the feed
 $script:Shared = [hashtable]::Synchronized(@{
-    Auth = $null
-    Meta = [hashtable]::Synchronized(@{})
+    Auth         = $null
+    Meta         = [hashtable]::Synchronized(@{})
+    CancelSignIn = $false
 })
-# Deployments and tenant reads one after another; feed lookups and searches in parallel next to them
+# Deployments and tenant changes one after another; what the user starts (sign-in, search, module installation)
+# next to them; feed lookups and icon rendering on their own pool, so they never hold up a click
 $script:WorkPool = [runspacefactory]::CreateRunspacePool(1, 1)
 $script:WorkPool.Open()
+$script:UserPool = [runspacefactory]::CreateRunspacePool(1, 3)
+$script:UserPool.Open()
 $script:MetaPool = [runspacefactory]::CreateRunspacePool(1, 3)
 $script:MetaPool.Open()
 $script:Tasks = New-Object System.Collections.ArrayList
@@ -286,7 +300,21 @@ function Update-Busy {
         $ui.BusyText.Text = if ($more -gt 0) { "$current ($more more queued)" } else { $current }
     }
     $ui.BtnInstallModule.IsEnabled = -not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'components' }).Count
+    Update-SignInButton
     Update-SelectionView
+}
+
+function Test-TaskRunning([string]$Kind) { @($script:Tasks | Where-Object { $_.Job.Kind -eq $Kind }).Count -gt 0 }
+
+function Update-SignInButton {
+    # While the browser sign-in waits, the button cancels it; only the button that applies is enabled (as in the MFA tool)
+    $connecting = Test-TaskRunning 'connect'
+    $signedIn = [bool]$script:Shared.Auth
+    $ui.BtnSignIn.Content = if ($connecting) { 'Cancel sign-in' } else { 'Sign in' }
+    $ui.BtnSignIn.Tag = [string]$(if ($connecting) { [char]0xE711 } else { [char]0xE77B })
+    $ui.BtnSignIn.IsEnabled = $connecting -or -not $signedIn
+    $ui.BtnSignInMenu.IsEnabled = -not $connecting -and -not $signedIn
+    $ui.BtnSignOut.IsEnabled = $signedIn
 }
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -303,7 +331,7 @@ $timer.Add_Tick({
         if ($script:MetaRefreshPending -and $script:Tick % 4 -eq 0) {
             $script:MetaRefreshPending = $false
             if ($script:CurrentPage -eq 'Catalog') { Update-CatalogGrid }
-            if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'meta' }).Count) { Update-CatalogGrid; Save-MetaCache; Start-IconRender }
+            if (-not (Test-TaskRunning 'meta')) { Complete-MetaPrefetch }
         }
         if ($script:Tick % 240 -eq 0 -and $script:Shared.Auth) { Update-ConnectionStatus }
     }
@@ -325,7 +353,8 @@ function Save-MetaCache {
     if (-not $script:MetaDirty) { return }
     try {
         $copy = @{}
-        foreach ($key in @($script:Shared.Meta.Keys)) { $copy[$key] = $script:Shared.Meta[$key] }
+        # A lookup that failed (offline, rate limit) is not remembered, only a real "not found"
+        foreach ($key in @($script:Shared.Meta.Keys)) { $entry = $script:Shared.Meta[$key]; if ($entry.Found -or $entry.NotFound) { $copy[$key] = $entry } }
         New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
         $copy | ConvertTo-Json -Depth 4 | Set-Content -Path $script:MetaCachePath -Encoding UTF8
         $script:MetaDirty = $false
@@ -363,10 +392,29 @@ foreach ($Id in $Ids) {
         }
     }
     catch {
-        $Shared.Meta[$Id.ToLower()] = [pscustomobject]@{ Fetched = (Get-Date).ToString('o'); Found = $false; Name = $Id; Error = $_.Exception.Message }
+        # "Not found" is an answer of the feed; anything else (offline, rate limit) is tried again next time
+        $Shared.Meta[$Id.ToLower()] = [pscustomobject]@{
+            Fetched = (Get-Date).ToString('o'); Found = $false; NotFound = ($_.Exception.Message -like '*was not found on*'); Name = $Id; Error = $_.Exception.Message
+        }
     }
 }
 '@
+
+function Test-MetaMissing([string]$Id) {
+    $entry = $script:Shared.Meta[$Id.ToLower()]
+    return (-not $entry -or (-not $entry.Found -and -not $entry.NotFound))
+}
+
+function Complete-MetaPrefetch {
+    # All lookups are done: show the result, remember it, and say so when the feed could not be reached
+    Update-CatalogGrid
+    Save-MetaCache
+    $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
+    if ($failed.Count -gt 0) {
+        Write-UiLog "Infos for $($failed.Count) package(s) could not be read from the feed ($($failed[0].Error)). 'Refresh infos' in the catalog tries again." 'Warning'
+    }
+    Start-IconRender
+}
 
 # ---------------------------------------------------------------- icon previews
 # WPF shows PNG, JPEG and ICO directly, but most Chocolatey icons are SVG: they are rendered once with headless Edge
@@ -433,8 +481,8 @@ function Start-IconRender {
 
 function Start-MetaPrefetch {
     param([string[]]$Ids, [switch]$Force)
-    if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'meta' }).Count -gt 0) { return }
-    $missing = @($Ids | Where-Object { $Force -or -not $script:Shared.Meta.ContainsKey($_.ToLower()) })
+    if (Test-TaskRunning 'meta') { return }
+    $missing = @($Ids | Where-Object { $Force -or (Test-MetaMissing $_) })
     if ($missing.Count -eq 0) { return }
     $script:MetaDirty = $true
     # Three parallel lookups: the feed has no batch query, and politeness matters more than speed
@@ -485,10 +533,7 @@ function Update-ConnectionStatus {
         $ui.TxtConnectionStatus.Foreground = ConvertTo-Brush '#FCA5A5'
         $ui.TxtTenant.Text = if ($script:Settings.TenantID) { "Tenant: $($script:Settings.TenantID)" } else { 'Tenant: -' }
     }
-    # Only the button that applies is enabled (as in the MFA tool)
-    $ui.BtnSignIn.IsEnabled = -not (Test-SignedIn)
-    $ui.BtnSignInMenu.IsEnabled = $ui.BtnSignIn.IsEnabled
-    $ui.BtnSignOut.IsEnabled = (Test-SignedIn)
+    Update-SignInButton
     $ui.BtnTenantRefresh.IsEnabled = (Test-SignedIn)
     Update-SelectionView
     Update-Readiness
@@ -631,12 +676,17 @@ $script:Rebuilding = $false
 $script:DetailItem = $null
 $script:MetaRefreshPending = $false
 $script:TenantApps = $null
+$script:TenantPackages = @{}         # package id (lower case) of the apps already in the tenant
 
 function New-PackageRow {
     param([string]$Id, [string]$Name, [string]$Category, $Meta)
     $found = $Meta -and $Meta.Found
     $note = if ($Meta -and $Meta.LicenseNote) { $Meta.LicenseNote } else { Get-ChocoLicenseNote $Id }
-    $statusText = if ($note) { 'License' } elseif ($Meta -and -not $Meta.Found) { 'Not found' } elseif (-not $Meta) { 'Loading' } else { '' }
+    $inTenant = $script:TenantPackages.ContainsKey($Id.ToLower())
+    # One chip per row, the most important note first
+    $statusText = if ($inTenant) { 'In tenant' } elseif ($note) { 'License' } elseif ($Meta -and $Meta.NotFound) { 'Not found' }
+                  elseif ($Meta -and -not $Meta.Found) { 'No infos' } elseif (-not $Meta) { 'Loading' } else { '' }
+    $status = switch ($statusText) { 'In tenant' { 'OK' } 'License' { 'Warning' } 'Not found' { 'Error' } default { '' } }
     [pscustomobject]@{
         Id          = $(if ($found -and $Meta.Name) { $Meta.Name } else { $Id })
         Key         = $Id.ToLower()
@@ -654,8 +704,18 @@ function New-PackageRow {
         LicenseUrl  = $(if ($found) { $Meta.LicenseUrl } else { '' })
         LicenseNote = $note
         Found       = [bool]$found
+        InTenant    = $inTenant
         StatusText  = $statusText
-        Status      = $(if ($note) { 'Warning' } elseif ($statusText -eq 'Not found') { 'Error' } else { '' })
+        Status      = $status
+    }
+}
+
+function Find-VisualChild($Parent, [type]$Type) {
+    for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent); $i++) {
+        $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
+        if ($child -is $Type) { return $child }
+        $found = Find-VisualChild $child $Type
+        if ($found) { return $found }
     }
 }
 
@@ -673,13 +733,27 @@ function Update-CatalogGrid {
 }
 
 function Set-GridRows($Grid, $Rows) {
-    # Rebuilds the rows and restores the selection (the selection lives in $script:Selected, not in the grid)
+    # Rebuilds the rows and restores the selection (it lives in $script:Selected, not in the grid), the sorting
+    # and the scroll position: rows are rebuilt while infos and icons come in, the list must not jump meanwhile
+    $scroll = Find-VisualChild $Grid ([System.Windows.Controls.ScrollViewer])
+    $offset = if ($scroll) { $scroll.VerticalOffset } else { 0 }
+    $sorts = @($Grid.Items.SortDescriptions)
+    $directions = @{}
+    foreach ($column in $Grid.Columns) { if ($null -ne $column.SortDirection) { $directions[$column] = $column.SortDirection } }
     $script:Rebuilding = $true
     try {
         $Grid.ItemsSource = $Rows
+        foreach ($sort in $sorts) { $Grid.Items.SortDescriptions.Add($sort) }
+        foreach ($column in $directions.Keys) { $column.SortDirection = $directions[$column] }
         foreach ($row in $Rows) { if ($script:Selected.Contains($row.Key)) { [void]$Grid.SelectedItems.Add($row); $script:Selected[$row.Key] = $row } }
     }
     finally { $script:Rebuilding = $false }
+    if ($scroll -and $offset -gt 0) { $Grid.UpdateLayout(); $scroll.ScrollToVerticalOffset($offset) }
+    # The details follow the rebuilt row (new infos, icon, "In tenant")
+    if ($script:DetailItem) {
+        $current = @($Rows | Where-Object { $_.Key -eq $script:DetailItem.Key }) | Select-Object -First 1
+        if ($current) { Show-Details $current }
+    }
     Update-SelectionView
 }
 
@@ -810,15 +884,19 @@ Add-Click $ui.BtnDetailChoco { if ($script:DetailItem) { Start-Process "https://
 $ui.CmbCategory.ItemsSource = @('All categories') + @($script:Catalog | ForEach-Object { $_.Category } | Sort-Object -Unique)
 $ui.CmbCategory.SelectedIndex = 0
 $ui.CmbCategory.Add_SelectionChanged({ try { Update-CatalogGrid } catch { Show-Error $_.Exception.Message } })
-$ui.TxtCatalogFilter.Add_TextChanged({ try { Update-CatalogGrid } catch { Show-Error $_.Exception.Message } })
+$ui.TxtCatalogFilter.Add_TextChanged({
+    $ui.HintCatalogFilter.Visibility = if ($ui.TxtCatalogFilter.Text) { 'Collapsed' } else { 'Visible' }
+    try { Update-CatalogGrid } catch { Show-Error $_.Exception.Message }
+})
+$ui.TxtSearch.Add_TextChanged({ $ui.HintSearch.Visibility = if ($ui.TxtSearch.Text) { 'Collapsed' } else { 'Visible' } })
 
 # Search
 function Start-Search {
     $term = $ui.TxtSearch.Text.Trim()
     if ($term.Length -lt 2) { throw 'Enter at least two characters.' }
-    if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'search' }).Count) { return }
+    if (Test-TaskRunning 'search') { return }
     $ui.TxtSearchCount.Text = 'Searching ...'
-    [void](Start-UiTask -Kind 'search' -Title "Searching the feed for '$term'" -Pool $script:MetaPool -Arguments @{ Term = $term } -Work 'param($Term) Search-ChocoPackage -SearchPattern $Term -Top 40' -OnDone {
+    [void](Start-UiTask -Kind 'search' -Title "Searching the feed for '$term'" -Pool $script:UserPool -Arguments @{ Term = $term } -Work 'param($Term) Search-ChocoPackage -SearchPattern $Term -Top 40' -OnDone {
         param($Result, $Job)
         $script:SearchIds = @(foreach ($info in @($Result | Where-Object { $_ -and $_.Name })) {
             $script:Shared.Meta[$info.Name.ToLower()] = ConvertTo-MetaEntry $info
@@ -848,7 +926,10 @@ function Start-Deploy {
     if ($script:Selected.Count -eq 0) { throw 'Select at least one app first.' }
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
     if (-not $script:ModuleState.Ok) { throw "IntuneWin32App $($script:MinimumModuleVersion) or newer is required (Settings > Components)." }
-    $items = @($script:Selected.Values)
+    $present = @($script:Selected.Values | Where-Object InTenant)
+    $items = @($script:Selected.Values | Where-Object { -not $_.InTenant })
+    if ($items.Count -eq 0) { throw "The selected app(s) are already in the tenant ($(($present | ForEach-Object { $_.Title }) -join ', ')). Remove them under 'In tenant' first to deploy them again." }
+    if ($present.Count -gt 0) { Write-UiLog "Already in the tenant, left out: $(($present | ForEach-Object { $_.Title }) -join ', ')." 'Warning' }
     $licensed = @($items | Where-Object LicenseNote)
     if ($licensed.Count -gt 0) {
         $text = ($licensed | ForEach-Object { "- $($_.Title): $($_.LicenseNote)" }) -join "`n"
@@ -856,8 +937,7 @@ function Start-Deploy {
     }
     $intent = Get-Intent
     if ($intent -eq 'Required' -and -not (Confirm-Action "Required installs the $($items.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment')) { return }
-    Update-IntuneChocoToken 3>$null
-    $script:Shared.Auth = Get-IntuneChocoAuthState
+    Update-UiToken
     $work = @'
 param($Id, $Assignment, $Architecture, $IconBase64)
 $Params = @{ ChocoName = $Id; Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true }
@@ -883,12 +963,20 @@ New-IntuneWin32ChocoApplication @Params
 Add-Click $ui.BtnDeploy { Start-Deploy }
 
 # ---------------------------------------------------------------- tenant
+function Update-UiToken {
+    # Renews the sign-in on the UI thread before it is handed to a task (silent, at most one short web request)
+    try {
+        Update-IntuneChocoToken 3>&1 6>&1 | ForEach-Object { Write-UiLog ([string]$_) $(if ($_ -is [System.Management.Automation.WarningRecord]) { 'Warning' } else { 'Info' }) }
+        $script:Shared.Auth = Get-IntuneChocoAuthState
+    }
+    catch { Write-UiLog $_.Exception.Message 'Warning' }
+}
+
 function Start-TenantRefresh {
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first.' }
-    if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'tenant' }).Count) { return }
+    if (Test-TaskRunning 'tenant') { return }
     $ui.TxtTenantCount.Text = 'Reading the apps in the tenant ...'
-    Update-IntuneChocoToken 3>$null
-    $script:Shared.Auth = Get-IntuneChocoAuthState
+    Update-UiToken
     $work = @'
 Get-IntuneChocoTenantApps | ForEach-Object {
     [pscustomobject]@{ Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created }
@@ -907,14 +995,38 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         $ui.DgTenant.ItemsSource = $script:TenantApps
         $apps = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count
         $ui.TxtTenantCount.Text = "$apps app(s) created by this tool" + $(if (@($script:TenantApps | Where-Object IsChocolatey).Count) { ', Chocolatey deployed' } else { ', Chocolatey not deployed yet' })
+        # Catalog and search mark what is already there
+        $script:TenantPackages = @{}
+        foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { $script:TenantPackages[$app.Package.ToLower()] = $true } }
+        Update-CatalogGrid
+        if ($script:SearchIds.Count) { Update-SearchRows }
+        Update-TenantButtons
         Update-Readiness
     })
 }
 Add-Click $ui.BtnTenantRefresh { Start-TenantRefresh }
-$ui.DgTenant.Add_SelectionChanged({
+
+function Update-TenantButtons {
     $on = [bool]$ui.DgTenant.SelectedItem
     $ui.BtnTenantOpen.IsEnabled = $on; $ui.BtnTenantCopy.IsEnabled = $on
-})
+    $ui.BtnTenantRemove.IsEnabled = $on -and (Test-SignedIn) -and -not (Test-TaskRunning 'remove')
+}
+$ui.DgTenant.Add_SelectionChanged({ Update-TenantButtons })
+Add-Click $ui.BtnTenantRemove {
+    $app = $ui.DgTenant.SelectedItem
+    if (-not $app) { return }
+    $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }).Count
+    if ($app.IsChocolatey -and $others -gt 0) { throw "Chocolatey is the dependency of the $others app(s) created by this tool. Remove those first." }
+    if (-not (Confirm-Action "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." 'Remove from Intune')) { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id } -Work 'param($Id) Remove-IntuneChocoApplication -Id $Id' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Package)] removed from Intune." 'Success' }
+        $script:TenantApps = $null
+        Start-TenantRefresh
+    })
+    Update-TenantButtons
+}
 Add-Click $ui.BtnTenantOpen {
     $app = $ui.DgTenant.SelectedItem
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
@@ -967,7 +1079,7 @@ Add-Click $ui.BtnOpenWorkFolder { New-Item -Path $script:WorkRoot -ItemType Dire
 
 function Start-ModuleInstall {
     if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'components' }).Count) { return }
-    [void](Start-UiTask -Kind 'components' -Title "Installing the IntuneWin32App module ($($script:MinimumModuleVersion) or newer) from the PowerShell Gallery" -Work 'Install-IntunechocoComponents' -Pool $script:MetaPool -OnDone {
+    [void](Start-UiTask -Kind 'components' -Title "Installing the IntuneWin32App module ($($script:MinimumModuleVersion) or newer) from the PowerShell Gallery" -Work 'Install-IntunechocoComponents' -Pool $script:UserPool -OnDone {
         param($Result, $Job)
         Update-ModuleState
         Update-ConnectionStatus
@@ -1000,25 +1112,37 @@ function Connect-Intune {
         try {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
             $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -OnWait $pump
-            Set-IntuneChocoToken -TokenResponse $token -TenantID $tenant
+            Set-IntuneChocoToken -TokenResponse $token -TenantID $tenant -ClientID $clientId
             $script:Shared.Auth = Get-IntuneChocoAuthState
             Complete-SignIn 'via Keevault'
         }
         finally { $window.IsEnabled = $true; $window.Cursor = $null; [void]$window.Activate() }
         return
     }
-    if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'connect' }).Count) { return }
-    # The module's own sign-in: PKCE in the browser, callback on http://localhost; it waits in the background runspace
-    $work = 'param($TenantID, $ClientID) Connect-IntuneChoco -TenantID $TenantID -ClientID $ClientID | Out-Null; Get-IntuneChocoAuthState'
-    [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Pool $script:MetaPool -Work $work -Arguments @{ TenantID = $tenant; ClientID = $clientId } -OnDone {
+    if (Test-TaskRunning 'connect') { return }
+    # Sign-in in the browser (PKCE, answer on a loopback port). It waits in a background runspace, at most five
+    # minutes, and "Cancel sign-in" ends it: closing the browser window must not block the next sign-in.
+    $script:Shared.CancelSignIn = $false
+    $work = @'
+param($TenantID, $ClientID, $Authority, $UrlHandler)
+$Params = @{ TenantID = $TenantID; ClientID = $ClientID; ShouldCancel = { $Shared.CancelSignIn } }
+if ($Authority) { $Params.Authority = $Authority }
+if ($UrlHandler) { $Params.UrlHandler = [scriptblock]::Create($UrlHandler) }
+Connect-IntuneChoco @Params | Out-Null
+Get-IntuneChocoAuthState
+'@
+    $arguments = @{ TenantID = $tenant; ClientID = $clientId; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler }
+    [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
         $state = @($Result | Where-Object { $_ -is [hashtable] -and $_.AccessToken })
-        if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Write-UiLog 'Sign-in did not complete.' 'Error'; return }
+        if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Update-ConnectionStatus; return }   # the reason is in the activity panel
         $script:Shared.Auth = $state[0]
         Set-IntuneChocoAuthState $script:Shared.Auth
         Complete-SignIn 'in the browser'
     })
 }
+# Tests only: another authority and URL handler for the browser sign-in (set by Tests\GuiSmokeDriver.ps1)
+$script:SignInTest = @{}
 
 function Complete-SignIn([string]$How) {
     $script:TenantApps = $null
@@ -1032,8 +1156,12 @@ function Disconnect-Intune {
     $script:Shared.Auth = $null
     Set-IntuneChocoAuthState @{}
     $script:TenantApps = $null
+    $script:TenantPackages = @{}
     $ui.DgTenant.ItemsSource = $null
     $ui.TxtTenantCount.Text = 'Sign in to see the apps this tool created in the tenant.'
+    Update-TenantButtons
+    Update-CatalogGrid
+    if ($script:SearchIds.Count) { Update-SearchRows }
     Update-ConnectionStatus
     Write-UiLog 'Signed out. The sign-in in your browser stays, close it there if needed.'
 }
@@ -1044,7 +1172,7 @@ function Show-SignInMenu($Target) {
     $kv = Find-KeevaultMcp
     $menu = New-Object System.Windows.Controls.ContextMenu
     $items = @(
-        @{ Glyph = [char]0xE774; Header = 'Sign in with Microsoft account'; Text = 'Opens the Microsoft sign-in in your browser (IntuneWin32App module), as before.'; Method = 'Browser'; Enabled = $true }
+        @{ Glyph = [char]0xE774; Header = 'Sign in with Microsoft account'; Text = 'Opens the Microsoft sign-in in your browser, as before.'; Method = 'Browser'; Enabled = $true }
         @{ Glyph = [char]0xE72E; Header = 'Sign in with Keevault'; Method = 'Keevault'; Enabled = ($kv.Installed -and $kv.McpEnabled)
            Text = $(if (-not $kv.Installed) { 'Keevault is not installed.' }
                     elseif (-not $kv.McpEnabled) { 'Switch on AI agents (MCP) in Keevault first.' }
@@ -1069,12 +1197,19 @@ function Show-SignInMenu($Target) {
     $menu.Add_Opened({ param($m) $m.HorizontalOffset = $m.PlacementTarget.ActualWidth - $m.ActualWidth + 8 })
     $menu.IsOpen = $true
 }
-Add-Click $ui.BtnSignIn { Connect-Intune }
+Add-Click $ui.BtnSignIn {
+    if (Test-TaskRunning 'connect') {
+        $script:Shared.CancelSignIn = $true
+        Write-UiLog 'Cancelling the sign-in ...'
+    }
+    else { Connect-Intune }
+}
 Add-Click $ui.BtnSignInMenu { Show-SignInMenu $ui.BtnSignInMenu }
 Add-Click $ui.BtnSignOut { Disconnect-Intune }
 
 # ---------------------------------------------------------------- activity panel
 Add-Click $ui.BtnLogClear { $ui.LogList.Items.Clear() }
+Add-Click $ui.BtnLogFolder { New-Item -Path $script:LogFolder -ItemType Directory -Force | Out-Null; Start-Process explorer.exe $script:LogFolder }
 Add-Click $ui.BtnLogToggle {
     $hidden = $ui.LogList.Visibility -eq 'Visible'
     $ui.LogList.Visibility = if ($hidden) { 'Collapsed' } else { 'Visible' }
@@ -1093,8 +1228,9 @@ $window.Add_Closing({
 $window.Add_Closed({
     $timer.Stop()
     Save-MetaCache
-    foreach ($task in @($script:Tasks)) { try { $task.PS.Stop(); $task.PS.Dispose() } catch { } }
-    try { $script:WorkPool.Close(); $script:MetaPool.Close() } catch { }
+    # Not waited for: a task may sit in a web request, and the process ends right after this anyway
+    $script:Shared.CancelSignIn = $true
+    foreach ($task in @($script:Tasks)) { try { [void]$task.PS.BeginStop($null, $null) } catch { } }
     [System.Windows.Application]::Current.Shutdown()
 })
 

@@ -26,6 +26,10 @@ $script:CatalogPath = Join-Path $PSScriptRoot "catalog.json"
 $script:MinimumModuleVersion = [version]"1.5.0"
 $script:ChocoAppMarker = "FiredWithPowershell"
 $script:AppMarker = "PoweredByChocolatey"
+$script:DefaultAuthority = "https://login.microsoftonline.com"
+# Delegated Graph permissions the IntuneWin32App module works with
+$script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManagementConfiguration.ReadWrite.All", "DeviceManagementRBAC.Read.All", "Group.Read.All" |
+        ForEach-Object { "https://graph.microsoft.com/$_" }) + "offline_access", "openid", "profile") -join " "
 
 $script:DefaultSettings = [ordered]@{
     TenantID              = ""
@@ -124,18 +128,115 @@ function Assert-IntuneChocoPrerequisites {
     }
 }#Makes sure a working IntuneWin32App version is loaded
 
+function ConvertTo-Base64Url {
+    param([byte[]]$Bytes)
+    return [Convert]::ToBase64String($Bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
+
+function Invoke-IntuneChocoTokenRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$TenantID,
+        [Parameter(Mandatory = $true)][string]$ClientID,
+        [Parameter(Mandatory = $true)][hashtable]$Body,
+        [string]$Authority = $script:DefaultAuthority
+    )
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $Body.client_id = $ClientID
+    if (-not $Body.scope) { $Body.scope = $script:GraphScopeString }
+    try {
+        return Invoke-RestMethod -Method Post -Uri "$($Authority.TrimEnd('/'))/$TenantID/oauth2/v2.0/token" -Body $Body -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30 -ErrorAction Stop
+    }
+    catch {
+        $Detail = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error_description } catch { $null }
+        throw "Token request failed: $(if ($Detail) { ($Detail -split "`r?`n")[0] } else { $_.Exception.Message })"
+    }
+}#Redeems an authorization code or a refresh token at the tenant's token endpoint
+
 function Connect-IntuneChoco {
     param(
         [Parameter(Mandatory = $true)][string]$TenantID,
-        [Parameter(Mandatory = $true)][string]$ClientID
+        [Parameter(Mandatory = $true)][string]$ClientID,
+        # How long to wait for the sign-in in the browser
+        [int]$TimeoutSeconds = 300,
+        # Other clouds, e.g. https://login.microsoftonline.us
+        [string]$Authority = $script:DefaultAuthority,
+        # Gets the sign-in URL instead of the default browser
+        [scriptblock]$UrlHandler,
+        # Asked while waiting; returning $true cancels the sign-in (used by the GUI)
+        [scriptblock]$ShouldCancel
     )
     Assert-IntuneChocoPrerequisites
-    Connect-MSIntuneGraph -TenantID $TenantID -ClientID $ClientID -Interactive | Out-Null
-    Assert-IntuneChocoConnection
+
+    # Authorization code flow with PKCE in the browser, answer on a loopback port. Done here and not with
+    # Connect-MSIntuneGraph -Interactive, which waits forever when the browser window is closed.
+    $Random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $Bytes = New-Object byte[] 32
+    $Random.GetBytes($Bytes); $Verifier = ConvertTo-Base64Url $Bytes
+    $Random.GetBytes($Bytes); $State = ConvertTo-Base64Url $Bytes
+    $Challenge = ConvertTo-Base64Url ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes($Verifier)))
+
+    $Probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $Probe.Start(); $Port = $Probe.LocalEndpoint.Port; $Probe.Stop()
+    $RedirectUri = "http://localhost:$Port"
+    $Listener = New-Object System.Net.HttpListener
+    $Listener.Prefixes.Add("$RedirectUri/")
+    $Listener.Start()
+    try {
+        $Query = [ordered]@{
+            client_id             = $ClientID
+            response_type         = "code"
+            redirect_uri          = $RedirectUri
+            response_mode         = "query"
+            scope                 = $script:GraphScopeString
+            state                 = $State
+            code_challenge        = $Challenge
+            code_challenge_method = "S256"
+            prompt                = "select_account"
+        }
+        $Url = "$($Authority.TrimEnd('/'))/$TenantID/oauth2/v2.0/authorize?" + (($Query.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, [uri]::EscapeDataString($_.Value) }) -join "&")
+        Write-Host "Waiting for the Microsoft sign-in in your browser (up to $TimeoutSeconds seconds)"
+        if ($UrlHandler) { & $UrlHandler $Url } else { Start-Process $Url }
+
+        $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        $Answer = $null
+        while ($null -eq $Answer) {
+            $Pending = $Listener.GetContextAsync()
+            while (-not $Pending.Wait(250)) {
+                if ($ShouldCancel -and (& $ShouldCancel)) { throw "Sign-in cancelled." }
+                if ((Get-Date) -gt $Deadline) { throw "No sign-in within $TimeoutSeconds seconds. Sign in again and complete the sign-in in the browser." }
+            }
+            $Context = $Pending.Result
+            $Request = $Context.Request.QueryString
+            $Done = [bool]($Request["code"] -or $Request["error"])
+            $Page = if (-not $Done) { "" } elseif ($Request["error"]) { "<h2>Sign-in failed</h2><p>Details are shown in Intune Chocolatey Deployment. You can close this window.</p>" }
+                    else { "<h2>Sign-in complete</h2><p>You can close this window and return to Intune Chocolatey Deployment.</p>" }
+            $Html = [Text.Encoding]::UTF8.GetBytes("<html><body style='font-family:Segoe UI,sans-serif;margin:48px;color:#0F172A'>$Page</body></html>")
+            $Context.Response.StatusCode = if ($Done) { 200 } else { 404 }
+            $Context.Response.ContentType = "text/html; charset=utf-8"
+            $Context.Response.OutputStream.Write($Html, 0, $Html.Length)
+            $Context.Response.Close()
+            if ($Done) { $Answer = $Request }   # anything else (e.g. the browser asking for a favicon) is ignored
+        }
+    }
+    finally {
+        $Listener.Stop()
+        $Listener.Close()
+    }
+
+    if ($Answer["error"]) { throw "Sign-in failed: $(($Answer['error_description'] -split "`r?`n")[0])" }
+    if ($Answer["state"] -ne $State) { throw "Sign-in failed: the answer does not belong to this sign-in." }
+    $Token = Invoke-IntuneChocoTokenRequest -TenantID $TenantID -ClientID $ClientID -Authority $Authority -Body @{
+        grant_type    = "authorization_code"
+        code          = $Answer["code"]
+        redirect_uri  = $RedirectUri
+        code_verifier = $Verifier
+    }
+    Set-IntuneChocoToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
     $script:Settings.TenantID = $TenantID
     $script:Settings.ClientID = $ClientID
-    Write-Host "Connected to Intune tenant $TenantID"
-}#Connects to the Intune Graph API with an Entra ID app registration
+    $Identity = Get-IntuneChocoIdentity
+    Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
+}#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
 function Assert-IntuneChocoConnection {
     # The module functions call "break" when no token exists, which would silently stop the whole script
@@ -146,12 +247,27 @@ function Assert-IntuneChocoConnection {
 
 function Update-IntuneChocoToken {
     Assert-IntuneChocoConnection
-    $ExpiresOn = $Global:AccessToken.ExpiresOn
-    if ($ExpiresOn -and ([datetime]$ExpiresOn).ToUniversalTime() -lt (Get-Date).ToUniversalTime().AddMinutes(10) -and $script:Settings.ClientID) {
-        if (-not $Global:AccessToken.RefreshToken) { Write-Warning "The access token expires soon and cannot be renewed silently, sign in again if the next step fails"; return }
-        Write-Host "Refreshing the Intune access token"
-        Connect-MSIntuneGraph -TenantID $Global:AccessTokenTenantID -ClientID $script:Settings.ClientID -Refresh | Out-Null
+    $Current = $Global:AccessToken
+    if (-not $Current.ExpiresOn -or ([datetime]$Current.ExpiresOn).ToUniversalTime() -ge (Get-Date).ToUniversalTime().AddMinutes(10)) { return }
+
+    # Renewed here with the refresh token. Connect-MSIntuneGraph -Refresh would open an interactive sign-in when
+    # the renewal fails, which must not happen in the middle of a background deployment.
+    $ClientID = if ($Current.ClientID) { $Current.ClientID } else { $script:Settings.ClientID }
+    if (-not $Current.RefreshToken -or -not $ClientID) {
+        Write-Warning "The Intune sign-in expires soon and cannot be renewed silently. Sign in again if the next step fails."
+        return
     }
+    try {
+        $Authority = if ($Current.Authority) { $Current.Authority } else { $script:DefaultAuthority }
+        $Token = Invoke-IntuneChocoTokenRequest -TenantID $Global:AccessTokenTenantID -ClientID $ClientID -Authority $Authority -Body @{
+            grant_type    = "refresh_token"
+            refresh_token = $Current.RefreshToken
+        }
+        if (-not $Token.refresh_token) { $Token | Add-Member -MemberType NoteProperty -Name "refresh_token" -Value $Current.RefreshToken -Force }
+        Set-IntuneChocoToken -TokenResponse $Token -TenantID $Global:AccessTokenTenantID -ClientID $ClientID -Authority $Authority
+        Write-Host "Intune sign-in renewed"
+    }
+    catch { Write-Warning "The Intune sign-in could not be renewed ($($_.Exception.Message)). Sign in again if the next step fails." }
 }#Silently renews the token before it runs out (long bulk deployments)
 
 function Get-IntuneChocoAuthState {
@@ -172,10 +288,15 @@ function Set-IntuneChocoAuthState {
 function Set-IntuneChocoToken {
     param(
         [Parameter(Mandatory = $true)]$TokenResponse,
-        [Parameter(Mandatory = $true)][string]$TenantID
+        [Parameter(Mandatory = $true)][string]$TenantID,
+        # Remembered on the token for the silent renewal (Update-IntuneChocoToken), also in other runspaces
+        [string]$ClientID,
+        [string]$Authority = $script:DefaultAuthority
     )
-    # Same shape as the module's own New-DelegatedAccessToken, so Connect-MSIntuneGraph -Refresh keeps working
+    # Same shape as the module's own New-DelegatedAccessToken, which the module functions expect
     if (-not $TokenResponse.access_token) { throw "The token response contains no access token" }
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "ClientID" -Value $ClientID -Force
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "Authority" -Value $Authority -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "ExpiresOn" -Value ((Get-Date).AddSeconds([int]$TokenResponse.expires_in).ToUniversalTime()) -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "Scopes" -Value @([string]$TokenResponse.scope -split " " | Where-Object { $_ }) -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "AccessToken" -Value $TokenResponse.access_token -Force
@@ -828,6 +949,23 @@ function Get-IntuneChocoTenantApps {
     }
 
 }#Lists the Win32 apps in the tenant that were created by this tool
+
+function Remove-IntuneChocoApplication {
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    # Only apps this tool created (recognized by their notes) are removed, never anything else in the tenant
+    $Apps = @(Get-IntuneChocoTenantApps)
+    $App = $Apps | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if (-not $App) { throw "App $Id was not created by this tool or does not exist anymore, nothing was removed" }
+    $Others = @($Apps | Where-Object { -not $_.IsChocolatey })
+    if ($App.IsChocolatey -and $Others.Count -gt 0) {
+        throw "Chocolatey is the dependency of $($Others.Count) app(s) created by this tool. Remove those first."
+    }
+    Write-Host "Removing $($App.DisplayName) from Intune"
+    Remove-IntuneWin32App -ID $Id | Out-Null
+    if (@(Get-IntuneWin32App | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
+    Write-Host "$($App.DisplayName) was removed from Intune. Devices keep the installed software and its update task."
+}#Removes an app this tool created from the tenant
 
 function Get-IntuneChocoCatalog {
 

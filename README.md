@@ -43,7 +43,8 @@ The tool is a WPF window for Windows PowerShell 5.1, without a console window ne
 
 - **Start**: guided steps and a readiness list (module, app registration, sign-in, package source, Chocolatey app in the tenant),
   each item with the button that fixes it.
-- **Sign in**: opens the Microsoft sign-in in your browser (IntuneWin32App module). The arrow next to it offers
+- **Sign in**: opens the Microsoft sign-in in your browser and waits up to five minutes for it; the button turns into
+  *Cancel sign-in* meanwhile. The sign-in is renewed silently during long runs. The arrow next to it offers
   **Sign in with Keevault**: you pick the Microsoft account in [Keevault](https://keevault.de), and user name, password and
   one-time code are filled into an embedded sign-in window (WebView2). Needs Keevault with *AI agents (MCP)* switched on;
   the token stays in this process.
@@ -52,8 +53,11 @@ The tool is a WPF window for Windows PowerShell 5.1, without a console window ne
   and deploy them in one go.
 - **Search**: the whole Chocolatey community repository (or your metadata feed).
 - **Details**: description, links, license note, and a custom icon for any package (PNG, JPEG, SVG, ICO).
-- **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center.
-- **Activity**: deployments run one after another in the background, the window stays usable; every step is logged.
+- **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center and
+  *Remove from Intune* (only apps this tool created; Chocolatey stays while other apps depend on it). Catalog and
+  search mark apps that are already in the tenant and do not deploy them twice.
+- **Activity**: deployments run one after another in the background, the window stays usable; every step is logged,
+  also to a log file per day (`%LOCALAPPDATA%\IntuneChocoDeployment\logs`, button *Log files*).
 - **Settings**: tenant and client ID, deployment defaults, update delay, package sources and the module installation.
   Saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and also used by the command line functions.
 
@@ -140,9 +144,9 @@ pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPr
   style). Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
 ## Tests
 `Tests\Invoke-GuiSmoke.ps1` starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`) and its own
-`%LOCALAPPDATA%`, drives every page (sign-in, catalog, search, custom icon, deployments, tenant, settings, sign-out) and
-checks the results. Nothing shows up on the desktop and nothing is sent to a tenant; package infos come from the real
-Chocolatey feed. Screenshots of every page land in `%TEMP%\IntuneChocoSmoke`.
+`%LOCALAPPDATA%`, drives every page (sign-in with cancel and token renewal against a local stand-in for the Microsoft
+sign-in, catalog, search, custom icon, deployments, tenant with removal, settings, sign-out) and checks the results.
+Nothing shows up on the desktop and nothing is sent to a tenant; package infos come from the real Chocolatey feed. Screenshots of every page land in `%TEMP%\IntuneChocoSmoke`.
 
 ### Results:
 New created Windows applications

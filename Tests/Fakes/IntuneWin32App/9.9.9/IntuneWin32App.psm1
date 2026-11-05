@@ -18,6 +18,9 @@ function Get-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     if ($DisplayName) { $Apps = $Apps | Where-Object { $_.displayName -like "*$DisplayName*" } }
     $Apps
 }
+function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
+    Write-Store @(Read-Store | Where-Object { $_.id -ne $ID })
+}
 function New-IntuneWin32AppPackage { param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
     $Path = Join-Path $OutputFolder "install.intunewin"; Set-Content $Path "fake"; [pscustomobject]@{ Path = $Path }
 }
