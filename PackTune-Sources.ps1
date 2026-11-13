@@ -1,6 +1,6 @@
 <#
-    One app list for both sources (Chocolatey and winget), (the runtime dependency app is in ChocoIntuneDeployment-Runtime.ps1).
-    Loaded by ChocoIntuneDeployment-Main.ps1, uses its helpers (catalog, feeds, Invoke-IntuneModule, packaging).
+    One app list for both sources (Chocolatey and winget), (the runtime dependency app is in PackTune-Runtime.ps1).
+    Loaded by PackTune-Main.ps1, uses its helpers (catalog, feeds, Invoke-IntuneModule, packaging).
 
     A "row" is one app as a person sees it: the same software, with the id it has in each source, the current
     version from each feed, the sources it is available from and the recommended source (the higher version).
@@ -54,7 +54,7 @@ function Get-RecommendedSource {
     return [pscustomobject]@{ Source = $null; Marked = $false }
 }#Which source to recommend for an app
 
-function Get-IntuneChocoDefaultSource {
+function Get-PackTuneDefaultSource {
     # What a deployment uses when nobody chose: the recommended source, else the preferred source of the settings
     # (when the app has it), else the one source the app has
     param([Parameter(Mandatory = $true)]$Row, [string]$Preferred = $script:Settings.Source)
@@ -73,7 +73,7 @@ function Get-SourceCacheKey([string]$Source, [string]$Id) {
     return $Id.ToLower()
 }
 
-function Resolve-IntuneChocoSourceInfo {
+function Resolve-PackTuneSourceInfo {
     <#
         Version of one package in one source: from the cache, otherwise from the feed (and into the cache).
         Available = $false only when the source says it has no such package; an unreachable feed leaves the package
@@ -110,7 +110,7 @@ function Resolve-IntuneChocoSourceInfo {
     }
 }#Version of a package from the cache or the feed
 
-function New-IntuneChocoSourceRow {
+function New-PackTuneSourceRow {
     # Builds the row of one app from what is known; only the ids that exist count as sources
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -140,27 +140,27 @@ function New-IntuneChocoSourceRow {
         Source            = $null
     }
     # Source = what a deployment of this row uses (the person can change it per app)
-    $Row.Source = Get-IntuneChocoDefaultSource -Row $Row
+    $Row.Source = Get-PackTuneDefaultSource -Row $Row
     return $Row
 }#One app with the ids, versions and recommendation of both sources
 
-function Get-IntuneChocoSourceApps {
+function Get-PackTuneSourceApps {
     <#
         The curated catalog as one list: per app the sources it is available from, the current version of each
         (cache, then feed) and the recommended source. -NoFetch uses only what is in the cache.
     #>
     param([hashtable]$Cache, [switch]$NoFetch, [ValidateSet("All", "Winget", "Chocolatey", "Both")][string]$Filter = "All")
-    $Rows = foreach ($Entry in @(Get-IntuneChocoCatalog)) {
-        $Choco = if ($Entry.Id) { Resolve-IntuneChocoSourceInfo -Source Chocolatey -Id $Entry.Id -Cache $Cache -NoFetch:$NoFetch }
-        $Winget = if ($Entry.WingetId) { Resolve-IntuneChocoSourceInfo -Source Winget -Id $Entry.WingetId -Cache $Cache -NoFetch:$NoFetch }
-        New-IntuneChocoSourceRow -Name $Entry.Name -Category $Entry.Category -CatalogId $Entry.Id -ChocoId $Entry.Id -WingetId $Entry.WingetId `
+    $Rows = foreach ($Entry in @(Get-PackTuneCatalog)) {
+        $Choco = if ($Entry.Id) { Resolve-PackTuneSourceInfo -Source Chocolatey -Id $Entry.Id -Cache $Cache -NoFetch:$NoFetch }
+        $Winget = if ($Entry.WingetId) { Resolve-PackTuneSourceInfo -Source Winget -Id $Entry.WingetId -Cache $Cache -NoFetch:$NoFetch }
+        New-PackTuneSourceRow -Name $Entry.Name -Category $Entry.Category -CatalogId $Entry.Id -ChocoId $Entry.Id -WingetId $Entry.WingetId `
             -ChocoVersion $(if ($Choco) { $Choco.Version }) -WingetVersion $(if ($Winget) { $Winget.Version }) `
             -ChocoAvailable $(if ($Choco) { $Choco.Available } else { $false }) -WingetAvailable $(if ($Winget) { $Winget.Available } else { $false })
     }
-    return @(Select-IntuneChocoSourceApps -Apps @($Rows) -Filter $Filter)
+    return @(Select-PackTuneSourceApps -Apps @($Rows) -Filter $Filter)
 }#The catalog with both sources per app
 
-function Select-IntuneChocoSourceApps {
+function Select-PackTuneSourceApps {
     <#
         Filter of the app list: All, Winget (apps only winget has), Chocolatey (apps only Chocolatey has),
         Both (apps available from both sources).
@@ -179,7 +179,7 @@ function Select-IntuneChocoSourceApps {
 
 #region search across both sources
 
-function Search-IntuneChocoApps {
+function Search-PackTuneApps {
     <#
         Searches Chocolatey and winget and merges the hits per app: hits that belong to the same catalog entry (its
         Chocolatey id and its winget id) become one row, everything else stays a row of its own. The other source of a
@@ -193,7 +193,7 @@ function Search-IntuneChocoApps {
         [switch]$NoFetch,
         [ValidateSet("All", "Winget", "Chocolatey", "Both")][string]$Filter = "All"
     )
-    $Catalog = @(Get-IntuneChocoCatalog)
+    $Catalog = @(Get-PackTuneCatalog)
     $ByChoco = @{}; $ByWinget = @{}
     foreach ($Entry in $Catalog) {
         if ($Entry.Id) { $ByChoco[$Entry.Id.ToLower()] = $Entry }
@@ -227,30 +227,30 @@ function Search-IntuneChocoApps {
         # The other source of a catalog app: its version from cache or feed
         $ChocoAvailable = $true; $WingetAvailable = $true
         if ($Slot.ChocoId -and -not $Slot.ChocoVersion) {
-            $Info = Resolve-IntuneChocoSourceInfo -Source Chocolatey -Id $Slot.ChocoId -Cache $Cache -NoFetch:$NoFetch
+            $Info = Resolve-PackTuneSourceInfo -Source Chocolatey -Id $Slot.ChocoId -Cache $Cache -NoFetch:$NoFetch
             $Slot.ChocoVersion = $Info.Version; $ChocoAvailable = $Info.Available
         }
         if ($Slot.WingetId -and -not $Slot.WingetVersion) {
-            $Info = Resolve-IntuneChocoSourceInfo -Source Winget -Id $Slot.WingetId -Cache $Cache -NoFetch:$NoFetch
+            $Info = Resolve-PackTuneSourceInfo -Source Winget -Id $Slot.WingetId -Cache $Cache -NoFetch:$NoFetch
             $Slot.WingetVersion = $Info.Version; $WingetAvailable = $Info.Available
         }
         $Name = if ($Slot.Entry) { $Slot.Entry.Name } elseif ($Slot.Title) { $Slot.Title } elseif ($Slot.ChocoId) { $Slot.ChocoId } else { $Slot.WingetId }
-        New-IntuneChocoSourceRow -Name $Name -Category $(if ($Slot.Entry) { $Slot.Entry.Category }) -CatalogId $(if ($Slot.Entry) { $Slot.Entry.Id }) `
+        New-PackTuneSourceRow -Name $Name -Category $(if ($Slot.Entry) { $Slot.Entry.Category }) -CatalogId $(if ($Slot.Entry) { $Slot.Entry.Id }) `
             -ChocoId $Slot.ChocoId -WingetId $Slot.WingetId -ChocoVersion $Slot.ChocoVersion -WingetVersion $Slot.WingetVersion `
             -ChocoAvailable $ChocoAvailable -WingetAvailable $WingetAvailable
     }
-    return @(Select-IntuneChocoSourceApps -Apps @($Rows) -Filter $Filter)
+    return @(Select-PackTuneSourceApps -Apps @($Rows) -Filter $Filter)
 }#Search in both repositories, one row per app
 
 #endregion
 
 #region deploy per source
 
-function New-IntuneChocoSourceApplication {
+function New-PackTuneSourceApplication {
     <#
         Deploys apps of the merged list, each from its own source: -Source (all apps), else the Source of the row
         (default = recommended source, else the preferred source of the settings). -Parameters are handed on to
-        New-IntuneWin32ChocoApplication / New-IntuneWin32WingetApplication (Assignment, UpdateMode, Version, ...).
+        New-PackTuneChocolateyApp / New-PackTuneWingetApp (Assignment, UpdateMode, Version, ...).
         Returns the Intune app ids.
     #>
     param(
@@ -260,14 +260,14 @@ function New-IntuneChocoSourceApplication {
     )
     process {
         foreach ($Row in @($App)) {
-            $Use = if ($Source) { $Source } elseif ($Row.Source) { $Row.Source } else { Get-IntuneChocoDefaultSource -Row $Row }
+            $Use = if ($Source) { $Source } elseif ($Row.Source) { $Row.Source } else { Get-PackTuneDefaultSource -Row $Row }
             if ($Use -eq "Winget") {
                 if (-not $Row.WingetId) { Write-Error "$($Row.Name) is not available from winget"; continue }
-                New-IntuneWin32WingetApplication -WingetId $Row.WingetId @Parameters
+                New-PackTuneWingetApp -WingetId $Row.WingetId @Parameters
             }
             elseif ($Use -eq "Chocolatey") {
                 if (-not $Row.ChocoId) { Write-Error "$($Row.Name) is not available from Chocolatey"; continue }
-                New-IntuneWin32ChocoApplication -ChocoName $Row.ChocoId @Parameters
+                New-PackTuneChocolateyApp -ChocoName $Row.ChocoId @Parameters
             }
             else { Write-Error "$($Row.Name) has no source to deploy from" }
         }

@@ -29,7 +29,7 @@ A new page "Custom Applications" for software that is in no catalog:
 ## 2. What MSIX Sandbox Studio already does (map: requirement to module)
 
 Module: `C:\git\WindowsSandboxMSIXInstaller\MsixSandboxStudio` (v2.4.0, found by `Find-SandboxStudio`, loaded like
-`Test-IntuneChocoPackage` does today). Rule: PackTune calls the module and does not copy its code. Gaps are small
+`Test-PackTunePackage` does today). Rule: PackTune calls the module and does not copy its code. Gaps are small
 changes to the module (same owner) or thin PackTune wrappers.
 
 | Requirement | Existing function | Gap |
@@ -80,7 +80,7 @@ Other module facts: one sandbox at a time (jobs are serial); PackTune's sign-in 
 3. MSIX: sandbox restores the previous content (`-BasePackage`), runs the new installer, builds; new certificate,
    same subject, sign, wrap, test.
 4. New Win32 app version: assigned like the old one; the old app is superseded (type update) when it is Available
-   only, or updated in place when Required: the existing `Publish-IntuneChocoRelease` decides (needs the notes marker
+   only, or updated in place when Required: the existing `Publish-PackTuneRelease` decides (needs the notes marker
    of the custom app, see 6). The old app is removed by the existing cleanup when no device has it any more.
 5. SharePoint folder for the new version.
 6. MSI: same, with the new MSI.
@@ -176,9 +176,9 @@ Existing markers stay. New:
 - MSIX wrapper app: `PoweredByPackTune;kind=msix;app=<appid>;ver=<version>;identity=<name>;thumb=<thumb>;manifest=<sha256 prefix>`
 - MSI app: `PoweredByPackTune;kind=msi;app=<appid>;ver=<version>;product=<guid>;manifest=<sha256 prefix>`
 
-Notes are limited to 1000 characters (see Check-Schedule); all fields are short. `ConvertFrom-ChocoAppNotes` belongs to
-another feature area: add `ConvertFrom-PackTuneAppNotes`; `Get-IntuneChocoTenantApps` returns `Source = Custom` rows;
-`Get-IntuneChocoReleasePath` and the supersedence release path accept them (they read package and version from the
+Notes are limited to 1000 characters (see Check-Schedule); all fields are short. `ConvertFrom-PackTuneAppNotes` belongs to
+another feature area: add `ConvertFrom-PackTuneAppNotes`; `Get-PackTuneTenantApps` returns `Source = Custom` rows;
+`Get-PackTuneReleasePath` and the supersedence release path accept them (they read package and version from the
 notes and rebuild with the custom builder instead of the choco/winget script builder). In tenant shows them with the same
 status columns (update policy columns replaced by version and "packaged from folder"). Intune is the trust anchor for
 the manifest hash (7.3).
@@ -287,7 +287,7 @@ Group.Read.All. New: `Sites.Selected` (daily), `Sites.FullControl.All` (one-time
   `finally`; a check enforces that no PackTune key stays in the key store after any failure path.
 - Version rules: not higher than the latest stored version = refused (Windows would refuse the update).
 
-## 11. Backend contract (new file `ChocoIntuneDeployment-Custom.ps1`)
+## 11. Backend contract (new file `PackTune-Custom.ps1`)
 
 `Get-CustomAppStoreState`, `Initialize-CustomAppStore`, `New-CustomMsiApp`, `New-CustomOtherApp`, `Update-CustomApp`,
 `Get-CustomApps`, `Export-CustomApp`, `Remove-CustomApp`, `Test-CustomApp`; helpers for SharePoint

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Smoke test of the graphical interface: starts Start-IntuneChocoTool.ps1 off-screen with a fake IntuneWin32App
+    Smoke test of the graphical interface: starts Start-PackTune.ps1 off-screen with a fake IntuneWin32App
     module and a stand-in for the Microsoft sign-in, drives every page (sign-in with cancel and token renewal,
     catalog, search, custom icon, deployments, tenant with removal, settings, sign-out) and checks the results.
     No window, browser or dialog shows up on the desktop, nothing is sent to a tenant.
@@ -13,7 +13,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutDir = (Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoSmoke'),
+    [string]$OutDir = (Join-Path ([IO.Path]::GetTempPath()) 'PackTuneSmoke'),
     # Another script that drives the window with the same fakes (Tests\Record-Demo.ps1 uses DemoDriver.ps1)
     [string]$Driver
 )
@@ -26,10 +26,11 @@ $appData = Join-Path $OutDir 'appdata'
 New-Item -ItemType Directory -Path (Join-Path $appData 'IntuneChocoDeployment') -Force | Out-Null
 @{ TenantID = 'contoso.onmicrosoft.com'; ClientID = '11111111-2222-3333-4444-555555555555' } | ConvertTo-Json |
     Set-Content (Join-Path $appData 'IntuneChocoDeployment\settings.json')
-$cache = Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\feedcache.json'
+$realRoot = @('PackTune', 'IntuneChocoDeployment' | ForEach-Object { Join-Path $env:LOCALAPPDATA $_ } | Where-Object { Test-Path $_ }) | Select-Object -First 1
+$cache = Join-Path $realRoot 'feedcache.json'
 if (Test-Path $cache) { Copy-Item $cache (Join-Path $appData 'IntuneChocoDeployment\feedcache.json') }
 # Same for the icon cache, so the app list shows real icons instead of letter tiles
-$icons = Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\iconcache'
+$icons = Join-Path $realRoot 'iconcache'
 if (Test-Path $icons) { Copy-Item $icons (Join-Path $appData 'IntuneChocoDeployment\iconcache') -Recurse }
 
 # Stand-in for the Microsoft sign-in: /authorize redirects straight back with a code, /token hands out tokens
@@ -81,7 +82,7 @@ $authority = [powershell]::Create()
                 'GET /v1.0/applications/decoy-obj/owners' { @{ value = @(@{ id = 'someone-else' }, @{ id = 'admin-oid' }) } }
                 'PATCH /v1.0/applications/*' { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: a registration of someone else was reused' } } }
                 'POST /v1.0/applications' {
-                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -eq $false -and @($sent.tags) -contains 'IntuneChocoDeployment' -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 5
+                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -eq $false -and @($sent.tags) -contains 'PackTune' -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 5
                     if ($okApp) { $State.App = $true; @{ id = 'app-obj'; appId = '11111111-2222-3333-4444-555555555555' } } else { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: unexpected app registration' } } } }
                 'POST /v1.0/servicePrincipals' { $State.Sp = $true; @{ id = 'sp-1' } }
                 'GET /v1.0/oauth2PermissionGrants' { @{ value = @() } }
@@ -103,7 +104,7 @@ $authority = [powershell]::Create()
 $results = Join-Path $OutDir 'results.txt'
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$psi.Arguments = '-NoProfile -STA -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $repo 'Start-IntuneChocoTool.ps1')
+$psi.Arguments = '-NoProfile -STA -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $repo 'Start-PackTune.ps1')
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $psi.RedirectStandardOutput = $true

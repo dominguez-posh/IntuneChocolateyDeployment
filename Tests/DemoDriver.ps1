@@ -1,4 +1,4 @@
-# Dot-sourced by Start-IntuneChocoTool.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Record-Demo.ps1).
+# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Record-Demo.ps1).
 # Plays a short tour of the tool off-screen with the fakes of the smoke test (nothing reaches a tenant) and writes
 # one PNG per frame plus frames.json (file and duration) to INTUNECHOCO_SMOKE_OUT. A pointer and step captions
 # are drawn into the window, so the frames show what is clicked.
@@ -124,7 +124,7 @@ function Select-ByName([string]$Name) { Set-AppSelected (@($script:SourceRows | 
 $script:Tour = [System.Collections.ArrayList]@(
     @{ Do = {
         $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
-        $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
+        $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
         $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DemoClient = New-Object System.Net.WebClient; [void]$global:DemoClient.DownloadStringTaskAsync([uri]$Url)' }

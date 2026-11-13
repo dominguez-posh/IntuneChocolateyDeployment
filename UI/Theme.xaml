@@ -1,5 +1,5 @@
 <!-- Windows 11 look of the tool (design reference: Main/Start/Tenant/... mockups). Loaded once into the application resources
-     by Start-IntuneChocoTool.ps1. Colors are tokens; styles use them. No gradients, no dark header. -->
+     by Start-PackTune.ps1. Colors are tokens; styles use them. No gradients, no dark header. -->
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 

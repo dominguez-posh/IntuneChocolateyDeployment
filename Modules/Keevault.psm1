@@ -3,14 +3,14 @@
 # the current one-time code (tool request_microsoft_login). An embedded browser (WebView2) runs the normal Microsoft
 # sign-in and fills these in step by step; the user can type or choose another method at any time.
 # The authorization code is redeemed here (public client with PKCE, the tool's own app registration).
-# Same technique as in MSIX Sandbox Studio; the token goes to the IntuneWin32App module with Set-IntuneChocoToken.
+# Same technique as in MSIX Sandbox Studio; the token goes to the IntuneWin32App module with Set-PackTuneToken.
 
 $script:SignInRedirect = 'http://localhost'
 $script:SignInHosts = @('login.microsoftonline.com', 'login.microsoft.com', 'login.live.com')
 $script:DefaultScopes = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementRBAC.Read.All', 'Group.Read.All')
 $script:Log = { param($Text, $Level) Write-Host $Text }
 
-function Set-IntuneChocoSignInLog {
+function Set-PackTuneSignInLog {
     <# Where the sign-in writes its progress: a script block taking (text, level). #>
     param([Parameter(Mandatory)][scriptblock]$Sink)
     $script:Log = $Sink
@@ -130,7 +130,7 @@ function Close-KeevaultMcp {
 }
 
 # ---------------------------------------------------------------- embedded browser (WebView2)
-function Get-IntuneChocoWebView2 {
+function Get-PackTuneWebView2 {
     <#
     Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window. Downloaded once from NuGet into
     $CacheFolder; the DLLs must carry a valid Microsoft signature. Needs the WebView2 runtime (part of Windows 11,
@@ -189,7 +189,7 @@ function Get-SignInScopeString([string[]]$Scopes) {
     (@($Scopes | ForEach-Object { if ($_ -match '^https?://') { $_ } else { "https://graph.microsoft.com/$_" } }) + 'offline_access', 'openid', 'profile') -join ' '
 }
 
-function Request-IntuneChocoToken {
+function Request-PackTuneToken {
     <# Redeems an authorization code or a refresh token at the tenant's token endpoint. #>
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [Parameter(Mandatory)][hashtable]$Body, [string[]]$Scopes)
     $Body.client_id = $ClientID
@@ -294,7 +294,7 @@ $script:PasskeyShimScript = @'
 })();
 '@
 
-function Invoke-IntuneChocoBrowserSignIn {
+function Invoke-PackTuneBrowserSignIn {
     <#
     Runs the Microsoft sign-in (authorization code + PKCE) in an embedded browser window and returns the token
     response (access_token, refresh_token, expires_in, scope). $Fill gets the step ('username', 'password', 'otp')
@@ -321,7 +321,7 @@ function Invoke-IntuneChocoBrowserSignIn {
         # Tests: gets ($win, $wv) before the window opens (e.g. to render it off-screen)
         [scriptblock]$Configure
     )
-    [void](Get-IntuneChocoWebView2 -CacheFolder $CacheFolder)
+    [void](Get-PackTuneWebView2 -CacheFolder $CacheFolder)
     Add-Type -AssemblyName System.Web
 
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -377,7 +377,7 @@ function Invoke-IntuneChocoBrowserSignIn {
     [void]$grid.Children.Add($foot)
 
     $persistent = [bool]$UserDataFolder   # a shared profile keeps the Microsoft session between sign-ins of the same run (no second password)
-    $userData = if ($persistent) { $UserDataFolder } else { Join-Path ([IO.Path]::GetTempPath()) ('IntuneChocoSignIn-' + [guid]::NewGuid().ToString('N')) }
+    $userData = if ($persistent) { $UserDataFolder } else { Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')) }
     $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
     $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
     $props.UserDataFolder = $userData
@@ -477,7 +477,7 @@ function Invoke-IntuneChocoBrowserSignIn {
     $result = [System.Web.HttpUtility]::ParseQueryString(([Uri]$ctx.Redirect).Query)
     if ($result['error']) { throw "Sign-in failed: $($result['error_description'])" }
     if ($result['state'] -ne $state) { throw 'Sign-in failed: the answer does not belong to this sign-in.' }
-    Request-IntuneChocoToken -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Body @{
+    Request-PackTuneToken -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Body @{
         grant_type    = 'authorization_code'
         code          = $result['code']
         redirect_uri  = $script:SignInRedirect
@@ -486,12 +486,12 @@ function Invoke-IntuneChocoBrowserSignIn {
 }
 
 # ---------------------------------------------------------------- Keevault sign-in
-function Connect-IntuneChocoWithKeevault {
+function Connect-PackTuneWithKeevault {
     <#
     Signs in to Microsoft Graph with an account from Keevault and returns the token response. Keevault asks the
     user to approve and pick the account (only accounts released for AI agents); the embedded sign-in fills in
     user name, password and one-time code. A fresh one-time code is requested from Keevault when the first one
-    has expired. The caller hands the token to the IntuneWin32App module (Set-IntuneChocoToken).
+    has expired. The caller hands the token to the IntuneWin32App module (Set-PackTuneToken).
     #>
     [CmdletBinding()]
     param(
@@ -557,7 +557,7 @@ function Connect-IntuneChocoWithKeevault {
         }
         $hint = if ($passkey) { "Keevault signs in $($login.username) with the passkey; confirm it in Keevault. You can type yourself or choose another sign-in method at any time." }
         else { "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time." }
-        $token = Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt default -Scopes $Scopes -LoginHint $login.username `
+        $token = Invoke-PackTuneBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt default -Scopes $Scopes -LoginHint $login.username `
             -Fill $fill -HasOtp:([bool]$login.totp) -Passkey $passkey -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
     }
     finally {
@@ -570,5 +570,5 @@ function Connect-IntuneChocoWithKeevault {
     $token
 }
 
-Export-ModuleMember -Function Set-IntuneChocoSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
-    Get-IntuneChocoWebView2, Request-IntuneChocoToken, Invoke-IntuneChocoBrowserSignIn, Connect-IntuneChocoWithKeevault
+Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
+    Get-PackTuneWebView2, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault

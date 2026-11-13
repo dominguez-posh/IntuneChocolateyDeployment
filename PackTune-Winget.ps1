@@ -1,17 +1,17 @@
 <#
-    winget packages as Win32 apps in Intune. Loaded by ChocoIntuneDeployment-Main.ps1, uses its helpers
+    winget packages as Win32 apps in Intune. Loaded by PackTune-Main.ps1, uses its helpers
     (work folder, packaging, icons, Invoke-IntuneModule, assignment).
 
     On the admin machine: package infos and search come from the Microsoft.WinGet.Client module (the winget
     community source) and from the package manifests in github.com/microsoft/winget-pkgs.
     On the devices: install.ps1 runs winget as SYSTEM (winget.exe is not in SYSTEM's path, it is looked up in
     WindowsApps) and applies the update mode of the app (Off, Startup, Custom), like the Chocolatey apps. The
-    PackTune Runtime app (ChocoIntuneDeployment-Runtime.ps1) makes sure App Installer is there and registered:
+    PackTune Runtime app (PackTune-Runtime.ps1) makes sure App Installer is there and registered:
     every winget app has it as AutoInstall dependency.
 
-        . .\ChocoIntuneDeployment-Main.ps1
-        Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<app id>"
-        New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC"
+        . .\PackTune-Main.ps1
+        Connect-PackTune -TenantID "contoso.onmicrosoft.com" -ClientID "<app id>"
+        New-PackTuneWingetApp -WingetId "7zip.7zip", "VideoLAN.VLC"
 #>
 
 $script:WingetManifestRoot = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests"
@@ -21,7 +21,7 @@ function Assert-WingetClient {
     # Microsoft.WinGet.Client: Microsoft's PowerShell module for winget, for Windows PowerShell 5.1 and PowerShell 7
     if (-not (Get-Module Microsoft.WinGet.Client)) {
         if (-not (Get-Module -ListAvailable Microsoft.WinGet.Client)) {
-            throw "The Microsoft.WinGet.Client module is required for winget packages. Run Install-IntunechocoComponents first."
+            throw "The Microsoft.WinGet.Client module is required for winget packages. Run Install-PackTuneComponents first."
         }
         Import-Module Microsoft.WinGet.Client -ErrorAction Stop
     }
@@ -193,7 +193,7 @@ $Sched = $ScheduleJson | ConvertFrom-Json
 
 __COMMON__
 
-# The helpers of this app: %ProgramFiles%\IntuneChocoDeployment\Winget\<id> (see $ToolRoot). The tasks of older
+# The helpers of this app: %ProgramFiles%\PackTune\Winget\<id> (see $ToolRoot). The tasks of older
 # versions (same names, helpers under %ProgramData%\IntuneWingetDeployment) are replaced below; that old folder is not
 # touched.
 $Root = Join-Path $ToolRoot "Winget"
@@ -233,11 +233,15 @@ function Invoke-Winget([string]$Verb, [string[]]$Extra) {
     return $Code
 }
 
-$TaskPath = "\Intune-Winget-Updates\"
+$TaskPath = "\PackTune\Winget\"
+$OldTaskPath = "\Intune-Winget-Updates\"   # before the rename: its tasks are removed
 $TaskNames = @("Update $SafeId on startup", "Update $SafeId now", "Check $SafeId for updates", "Notify $SafeId update",
     "Update $SafeId in time window", "Update $SafeId when idle", "Update $SafeId at sign-in", "Retry $SafeId update", "Probe $SafeId screen state")
 function Remove-UpdateTasks {
-    foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+    foreach ($Name in $TaskNames) {
+        Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    }
 }
 
 if ($Uninstall) {
@@ -252,6 +256,7 @@ if ($Uninstall) {
     if ($ExitCode -notin 0, $NotInstalled, 1605, 1614 -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit $ExitCode }
     Remove-UpdateTasks
     try { Remove-ItemSafely $AppRoot } catch { Write-Output "$AppRoot could not be removed: $($_.Exception.Message)" }
+    Remove-OldToolFolder "Winget\$SafeId"
     Stop-Transcript | Out-Null
     if ($ExitCode -in $Reboot) { exit 3010 }
     exit 0
@@ -306,6 +311,7 @@ __TASKREG__
 Remove-UpdateTasks
 try {
     Register-UpdateTasks
+    Remove-OldToolFolder "Winget\$SafeId"
     Write-Output "Update mode $Mode applied for $Id"
     Write-DeviceLog "update mode $Mode applied"
 }
@@ -409,7 +415,7 @@ $Policy = '__POLICY__'
 # Installed with the update policy that is set in Intune (otherwise Intune runs install.ps1 again to apply it)
 $SafeId = $Id -replace '[^A-Za-z0-9._-]', '_'
 $ProgramFilesDir = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
-$Marker = Join-Path $ProgramFilesDir "IntuneChocoDeployment\Winget\$SafeId\policy.txt"
+$Marker = Join-Path $ProgramFilesDir "PackTune\Winget\$SafeId\policy.txt"
 if (-not (Test-Path $Marker) -or (Get-Content -Path $Marker -Raw).Trim() -ne $Policy) { exit 1 }
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 $Folders = @(Get-ChildItem -Path (Join-Path $ProgramFilesDir "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
@@ -446,7 +452,7 @@ exit 1
 
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
-    Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value (Get-UpdateNotifyScript -TaskPath "\Intune-Winget-Updates\") -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value (Get-UpdateNotifyScript -TaskPath "\PackTune\Winget\") -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "probe.ps1") -Value (Get-ScreenProbeScript) -Encoding ASCII
     $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
@@ -457,13 +463,13 @@ exit 1
 function Get-WingetAppName {
     param([Parameter(Mandatory = $true)]$Info)
     # The curated name from catalog.json, otherwise the package name from the manifest
-    $Entry = @(Get-IntuneChocoCatalog | Where-Object { $_.WingetId -eq $Info.Name }) | Select-Object -First 1
+    $Entry = @(Get-PackTuneCatalog | Where-Object { $_.WingetId -eq $Info.Name }) | Select-Object -First 1
     if ($Entry -and $Entry.Name) { return $Entry.Name }
     if ([string]::IsNullOrWhiteSpace($Info.Title)) { return $Info.Name }
     return ([string]$Info.Title).Trim()
 }#Display name of the app in Intune and the Company Portal
 
-function New-IntuneWin32WingetApplication {
+function New-PackTuneWingetApp {
     param(
         [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [String[]]$WingetId,
@@ -489,8 +495,8 @@ function New-IntuneWin32WingetApplication {
     )
 
     begin {
-        Assert-IntuneChocoPrerequisites
-        Assert-IntuneChocoConnection
+        Assert-PackTunePrerequisites
+        Assert-PackTuneConnection
         Assert-WingetClient
         $RuntimeId = $null
     }
@@ -498,7 +504,7 @@ function New-IntuneWin32WingetApplication {
     process {
         foreach ($Id in $WingetId) {
             try {
-                Update-IntuneChocoToken
+                Update-PackTuneToken
 
                 Write-Host "Getting infos from winget for $Id"
                 $Infos = Get-WingetInfo -WingetId $Id
@@ -506,7 +512,7 @@ function New-IntuneWin32WingetApplication {
                 $AppName = Get-WingetAppName -Info $Infos
 
                 # Already there: same name, or created by this tool for the same package (also when renamed)
-                $Existing = @(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.displayName -eq $AppName -or ([string]$_.notes -like "$($script:WingetMarker)*" -and (ConvertFrom-ChocoAppNotes ([string]$_.notes)).Package -eq $Id) })
+                $Existing = @(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.displayName -eq $AppName -or ((Get-PackTuneNotesSource ([string]$_.notes)) -eq "Winget" -and (ConvertFrom-PackTuneAppNotes ([string]$_.notes)).Package -eq $Id) })
                 if ($Existing.Count -gt 0) {
                     Write-Warning "$AppName is already deployed ($($Existing[0].displayName)), please update or remove first"
                     continue
@@ -517,7 +523,7 @@ function New-IntuneWin32WingetApplication {
                 Write-Host "Getting Icon"
                 $Icon = $IconBase64
                 if (-not $Icon) {
-                    $ChocoId = @(Get-IntuneChocoCatalog | Where-Object { $_.WingetId -eq $Id }) | Select-Object -First 1 -ExpandProperty Id
+                    $ChocoId = @(Get-PackTuneCatalog | Where-Object { $_.WingetId -eq $Id }) | Select-Object -First 1 -ExpandProperty Id
                     $IconUrl = $null
                     if ($ChocoId -and -not $IconFile) { try { $IconUrl = (Get-ChocoInfo -ChocoName $ChocoId).IconUrl } catch { Write-Verbose $_ } }
                     $Icon = Get-ChocoIconBase64 -ChocoName ("winget-" + ($Id -replace '[^A-Za-z0-9._-]', '_')) -IconUrl $IconUrl -IconFile $IconFile -NoIconPrompt:$NoIconPrompt -NoFeedLookup
@@ -533,14 +539,14 @@ function New-IntuneWin32WingetApplication {
                         $Version
                     }
                 }
-                $Policy = New-ChocoAppPolicy -Package $Id -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
+                $Policy = New-PackTuneAppPolicy -Package $Id -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
                     -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule
-                Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
+                Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
                 Write-Host "Creating the install and detection script"
-                $WorkPath = New-IntuneChocoWorkFolder -Name ("winget-" + ($Id -replace '[^A-Za-z0-9._-]', '_'))
+                $WorkPath = New-PackTuneWorkFolder -Name ("winget-" + ($Id -replace '[^A-Za-z0-9._-]', '_'))
                 $DetectionFile = New-WingetPackageScripts -WingetId $Id -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName
-                $IntuneWinFile = New-IntuneChocoPackage -WorkPath $WorkPath
+                $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
                 $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
                 # winget needs Windows 10 1809 or newer
@@ -556,7 +562,7 @@ function New-IntuneWin32WingetApplication {
                     Description          = $Description
                     Publisher            = $(if ($Infos.Authors) { $Infos.Authors } else { "-" })
                     AppVersion           = $(if ($PinnedVersion) { $PinnedVersion } else { "latest" })
-                    Notes                = ConvertTo-ChocoAppNotes -Policy $Policy -Marker $script:WingetMarker
+                    Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $script:WingetMarker
                     InstallExperience    = "system"
                     RestartBehavior      = "suppress"
                     DetectionRule        = $DetectionRule
@@ -576,7 +582,7 @@ function New-IntuneWin32WingetApplication {
                     Add-IntuneWin32AppDependency -ID $IntuneApp.id -Dependency $Dependency
                 } | Out-Null
 
-                Set-IntuneChocoAssignment -Id $IntuneApp.id -Assignment $Assignment
+                Set-PackTuneAssignment -Id $IntuneApp.id -Assignment $Assignment
                 Write-Host "Deployment of $AppName was successful"
                 $IntuneApp.id
             }

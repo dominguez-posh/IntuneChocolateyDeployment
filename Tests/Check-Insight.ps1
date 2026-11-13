@@ -10,7 +10,7 @@ function Test-Check([string]$Name, [bool]$Ok, $Detail) {
     if ($Ok) { "PASS $Name" } else { $script:Failed++; "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" }) }
 }
 
-. (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1')   # loads the module and its hooks
+. (Join-Path $repo 'PackTune-Main.ps1')   # loads the module and its hooks
 
 # ---- fake tenant: old and new notes formats, command lines, duplicates
 $apps = @(
@@ -45,9 +45,9 @@ Test-Check 'Store app kept, Win32 twin skipped' ((Get-C c1).ProposedAction -eq '
 $sent = New-Object System.Collections.ArrayList
 $fake = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b) [void]$sent.Add([pscustomobject]@{ M = $m; P = $p; B = $b }); @{ value = @() } }.GetNewClosure()
 $r = @(Set-InsightAppTakeOver -Context $fake -Apps @((Get-C b1), (Get-C b5)))
-Test-Check 'take over: one PATCH with tool notes' ($sent.Count -eq 1 -and $sent[0].M -eq 'PATCH' -and $sent[0].P -eq '/beta/deviceAppManagement/mobileApps/b1' -and $sent[0].B.notes -like 'PoweredByChocolatey;package=firefox;version=120.0;update=Off*' -and $sent[0].B.Keys.Count -eq 2)
+Test-Check 'take over: one PATCH with tool notes' ($sent.Count -eq 1 -and $sent[0].M -eq 'PATCH' -and $sent[0].P -eq '/beta/deviceAppManagement/mobileApps/b1' -and $sent[0].B.notes -like 'PoweredByPackTune;from=Chocolatey;package=firefox;version=120.0;update=Off*' -and $sent[0].B.Keys.Count -eq 2)
 Test-Check 'take over: not importable reported' ($r[1].Done -eq $false)
-$back = ConvertFrom-ChocoAppNotes $sent[0].B.notes
+$back = ConvertFrom-PackTuneAppNotes $sent[0].B.notes
 Test-Check 'written notes read back by the tool' ($back.Package -eq 'firefox' -and $back.Version -eq '120.0')
 
 # ---- export / import round trip, no tenant ids, no secrets
@@ -66,7 +66,7 @@ Test-Check 'import: foreign file rejected' ($(try { Read-InsightExportFile -Path
 # ---- recreate through the deploy functions (replaced by fakes)
 $deployed = New-Object System.Collections.ArrayList
 $feeds = @{}
-Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker } -ConvertFromNotes ${function:ConvertFrom-ChocoAppNotes} -ConvertToNotes ${function:ConvertTo-ChocoAppNotes} -NewPolicy ${function:New-ChocoAppPolicy} `
+Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker } -ConvertFromNotes ${function:ConvertFrom-PackTuneAppNotes} -ConvertToNotes ${function:ConvertTo-PackTuneAppNotes} -NewPolicy ${function:New-PackTuneAppPolicy} `
     -NewChocoApp { param($ChocoName, $Assignment, $UpdateMode, $GraceHours, $Version, $PackageSource, $NoIconPrompt) [void]$deployed.Add("choco:$ChocoName`:$Version`:$UpdateMode"); $feeds[$ChocoName] = $PSBoundParameters.ContainsKey('PackageSource') }.GetNewClosure() `
     -NewWingetApp { param($WingetId, $Assignment, $UpdateMode, $GraceHours, $Version, $NoIconPrompt) [void]$deployed.Add("winget:$WingetId`:$Version`:$UpdateMode") }.GetNewClosure()
 $rc = @(New-InsightRecreatedApps -Candidates $cand -ExistingApps @((Get-C a1)))
@@ -183,7 +183,7 @@ Test-Check 'no licence: degrades without throwing' (-not $degraded.Created -and 
 
 # ---- diagnostics: admin center pointer and zip extraction
 $info = Get-InsightDiagnosticsInfo -ManagedDeviceId 'm1' -Package 'git'
-Test-Check 'diagnostics: device page url and hint' ($info.Url -like 'https://intune.microsoft.com/*m1' -and $info.Hint -like '*IntuneChocoDeployment-git.log*' -and $info.Hint -like '*Collect diagnostics*')
+Test-Check 'diagnostics: device page url and hint' ($info.Url -like 'https://intune.microsoft.com/*m1' -and $info.Hint -like '*PackTune-git.log*' -and $info.Hint -like '*Collect diagnostics*')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipSrc = Join-Path $temp 'zipsrc'; New-Item -ItemType Directory -Path "$zipSrc\IME" -Force | Out-Null
 'a' | Set-Content "$zipSrc\IME\IntuneChocoDeployment-git.log"; 'b' | Set-Content "$zipSrc\IME\IntuneManagementExtension.log"
@@ -196,7 +196,7 @@ $ready = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrit
 Test-Check 'readiness: apps and scripts ready, device views missing' (($ready | Where-Object Function -eq 'Get-InsightAppInstallStatus').Ready -and -not ($ready | Where-Object Function -eq 'Get-InsightDeviceRunStates').Ready -and (($ready | Where-Object Function -eq 'Get-InsightDeviceRunStates').Missing -contains 'DeviceManagementManagedDevices.Read.All'))
 $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"scp":"DeviceManagementApps.Read.All Group.Read.All"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 Test-Check 'token scopes read from the scp claim' ((Get-InsightTokenScopes "x.$claims.y") -contains 'Group.Read.All')
-Test-Check 'registration requests the insight scope' ((Get-Content (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1') -Raw) -match 'GraphInsightScopes' -and $script:GraphInsightScopes -contains 'DeviceManagementManagedDevices.Read.All')
+Test-Check 'registration requests the insight scope' ((Get-Content (Join-Path $repo 'PackTune-Main.ps1') -Raw) -match 'GraphInsightScopes' -and $script:GraphInsightScopes -contains 'DeviceManagementManagedDevices.Read.All')
 
 Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { throw "$script:Failed check(s) failed." }

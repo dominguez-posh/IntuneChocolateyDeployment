@@ -15,7 +15,7 @@
 ## Requirements
 
 - Admin machine: Windows 10 or Windows 11. The graphical interface runs in Windows PowerShell 5.1; the command line works in Windows PowerShell 5.1 and PowerShell 7.
-- The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer, and `Microsoft.WinGet.Client` for winget. `Install-IntunechocoComponents` installs both for the current user.
+- The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer, and `Microsoft.WinGet.Client` for winget. `Install-PackTuneComponents` installs both for the current user.
 - Chocolatey and Inkscape are **not** needed on the admin machine: package infos and icons come from the chocolatey.org feed, SVG icons are converted with Microsoft Edge.
 - An Entra ID app registration with these delegated Microsoft Graph permissions and admin consent:
   - `DeviceManagementApps.ReadWrite.All`
@@ -29,8 +29,8 @@
 1. Download the repository and keep it together, for example in `C:\admin`.
 2. Install the modules once (no admin rights needed):
    ```powershell
-   . C:\admin\ChocoIntuneDeployment-Main.ps1
-   Install-IntunechocoComponents
+   . C:\admin\PackTune-Main.ps1
+   Install-PackTuneComponents
    ```
 3. Start the graphical interface with **Start.cmd** and follow the *Start* page (see below). It creates the app registration for you. By hand, the registration is:
    - Entra admin center > App registrations > New registration, any name (the tool uses "PackTune"; an earlier "Intune Chocolatey Deployment" registration is reused)
@@ -42,7 +42,7 @@ Sign-in opens Microsoft's own sign-in in a window of the tool (Edge WebView2, wh
 
 ## Using the tool
 
-Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`). Apps from **winget** and **Chocolatey** are in one list; you choose the source per app when you deploy. The **Help** entry in the navigation explains each page.
+Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-PackTune.ps1`). Apps from **winget** and **Chocolatey** are in one list; you choose the source per app when you deploy. The **Help** entry in the navigation explains each page.
 
 ### Start
 
@@ -155,7 +155,7 @@ Each app is one Win32 app in Intune with:
 - **Detection**: a script that checks the installed package and the policy fingerprint (below).
 - **Dependency**: every app, Chocolatey and winget alike, depends on one app, **PackTune Runtime**. It is deployed once per tenant and set to install automatically. Its install script installs Chocolatey (with retries for the download limit and the download URL setting) and makes App Installer usable for SYSTEM (winget is not in the SYSTEM path, so the newest App Installer in `WindowsApps` is used; downloads must carry Microsoft's signature and chain to the Microsoft root), and registers one daily SYSTEM task (`Update PackTune Runtime`, in `Intune-Winget-Updates`) that updates both, inside the device lock. Detection checks that `choco.exe` and winget run and that the marker of the script revision is there; it has no time limit. Uninstalling it removes only the task and the marker, never Chocolatey or App Installer. Folder: `%ProgramFiles%IntuneChocoDeploymentRuntime`.
 - **Trade-off**: one dependency app means devices that only get winget apps now also get Chocolatey. The footprint is small (about 100 MB, no packages installed), and it keeps the dependency chain to one app.
-- **Existing tenants**: older versions created two dependency apps (Chocolatey and winget runtime). `Switch-IntuneChocoAppsToRuntime` moves the apps over (adds the new dependency, removes the old one per app). `Get-IntuneChocoUnusedDependencyApps` lists old dependency apps nothing depends on any more, `Remove-IntuneChocoUnusedDependencyApps` removes them on request; nothing is deleted automatically. `Get-IntuneChocoRuntimeState` reports Missing, Migrate or Ready.
+- **Existing tenants**: older versions created two dependency apps (Chocolatey and winget runtime). `Switch-PackTuneAppsToRuntime` moves the apps over (adds the new dependency, removes the old one per app). `Get-PackTuneUnusedDependencyApps` lists old dependency apps nothing depends on any more, `Remove-PackTuneUnusedDependencyApps` removes them on request; nothing is deleted automatically. `Get-PackTuneRuntimeState` reports Missing, Migrate or Ready.
 
 ### Chocolatey apps
 
@@ -210,45 +210,45 @@ All choco and winget operations of a device (install, update, uninstall, both so
 The interface uses the same functions. Run the script directly for a guided start, or dot-source it and call the functions:
 
 ```powershell
-C:\admin\ChocoIntuneDeployment-Main.ps1 -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
+C:\admin\PackTune-Main.ps1 -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
 
-. C:\admin\ChocoIntuneDeployment-Main.ps1
-Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
+. C:\admin\PackTune-Main.ps1
+Connect-PackTune -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
 ```
 
 Without parameters you are asked for tenant and client ID. A browser window opens for the sign-in.
 
 | Function | Use |
 |----------|-----|
-| `Install-IntunechocoComponents` | Installs IntuneWin32App and Microsoft.WinGet.Client (once) |
-| `New-IntuneChocoAppRegistration` | Creates or updates the app registration and grants the admin consent |
-| `Connect-IntuneChoco` | Signs in and sets tenant and client ID |
+| `Install-PackTuneComponents` | Installs IntuneWin32App and Microsoft.WinGet.Client (once) |
+| `New-PackTuneAppRegistration` | Creates or updates the app registration and grants the admin consent |
+| `Connect-PackTune` | Signs in and sets tenant and client ID |
 | `Install-PackTuneRuntime` | Deploys the PackTune Runtime dependency app (normally done automatically; `install-chocolatey` is the old name) |
-| `New-IntuneWin32ChocoApplication` | Deploys Chocolatey packages |
-| `New-IntuneWin32WingetApplication` | Deploys winget packages |
-| `Update-IntuneChocoApp` | Changes an app in place: version, update mode, schedule |
-| `Publish-IntuneChocoRelease` | Releases a version the right way for the assignment (supersedence for Available apps, in place for Required) |
-| `Remove-IntuneChocoSupersededApps` | Removes superseded apps that no device reports as installed |
-| `Test-IntuneChocoPackage` | Tests a package in Windows Sandbox |
+| `New-PackTuneChocolateyApp` | Deploys Chocolatey packages |
+| `New-PackTuneWingetApp` | Deploys winget packages |
+| `Update-PackTuneApp` | Changes an app in place: version, update mode, schedule |
+| `Publish-PackTuneRelease` | Releases a version the right way for the assignment (supersedence for Available apps, in place for Required) |
+| `Remove-PackTuneSupersededApps` | Removes superseded apps that no device reports as installed |
+| `Test-PackTunePackage` | Tests a package in Windows Sandbox |
 
 Examples:
 
 ```powershell
-New-IntuneWin32ChocoApplication "googlechrome"                    # Available (default), always the newest version
-New-IntuneWin32ChocoApplication "vlc" -Required                   # installed on all devices
-New-IntuneWin32ChocoApplication "vlc" -Assignment None            # Available, Required or None
-New-IntuneWin32ChocoApplication "vlc", "7zip.install" -NoIconPrompt
-New-IntuneWin32ChocoApplication "vlc" -IconFile C:\icons\vlc.png  # icon from a file when the package has none
-New-IntuneWin32ChocoApplication "vlc" -UpdateMode Custom -GraceHours 48
-New-IntuneWin32ChocoApplication "7zip.install" -Version current -UpdateMode Off   # pin today's version
+New-PackTuneChocolateyApp "googlechrome"                    # Available (default), always the newest version
+New-PackTuneChocolateyApp "vlc" -Required                   # installed on all devices
+New-PackTuneChocolateyApp "vlc" -Assignment None            # Available, Required or None
+New-PackTuneChocolateyApp "vlc", "7zip.install" -NoIconPrompt
+New-PackTuneChocolateyApp "vlc" -IconFile C:\icons\vlc.png  # icon from a file when the package has none
+New-PackTuneChocolateyApp "vlc" -UpdateMode Custom -GraceHours 48
+New-PackTuneChocolateyApp "7zip.install" -Version current -UpdateMode Off   # pin today's version
 
-New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignment Available
+New-PackTuneWingetApp -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignment Available
 
-Update-IntuneChocoApp -AppId <intune app id> -Schedule @{ OnlyOnMains = $true; WindowFrom = "12:00" }
-Update-IntuneChocoApp -AppId <intune app id> -UpdateMode Startup  # change only the settings
-Publish-IntuneChocoRelease -AppId <intune app id> -Version 3.0.21 # new version, way by assignment
+Update-PackTuneApp -AppId <intune app id> -Schedule @{ OnlyOnMains = $true; WindowFrom = "12:00" }
+Update-PackTuneApp -AppId <intune app id> -UpdateMode Startup  # change only the settings
+Publish-PackTuneRelease -AppId <intune app id> -Version 3.0.21 # new version, way by assignment
 
-Test-IntuneChocoPackage -ChocoName vlc
+Test-PackTunePackage -ChocoName vlc
 ```
 
 Catalog entries live in [catalog.json](catalog.json): `{ "id": "<choco id>", "winget": "<winget id, optional>", "name": "<description>", "category": "<category>" }`.

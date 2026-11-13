@@ -8,9 +8,9 @@
     App Installer.
 
     Older tenants have two dependency apps instead: "Chocolatey" (marker FiredWithPowershell) and "winget runtime"
-    (marker WingetRuntimeApp). They are recognized as old dependencies; Switch-IntuneChocoAppsToRuntime moves the
-    apps of the tool over, Get-IntuneChocoUnusedDependencyApps lists the old ones nothing depends on any more (nothing
-    is deleted automatically). Loaded by ChocoIntuneDeployment-Main.ps1.
+    (marker WingetRuntimeApp). They are recognized as old dependencies; Switch-PackTuneAppsToRuntime moves the
+    apps of the tool over, Get-PackTuneUnusedDependencyApps lists the old ones nothing depends on any more (nothing
+    is deleted automatically). Loaded by PackTune-Main.ps1.
 #>
 
 $script:RuntimeName = "PackTune Runtime"
@@ -18,7 +18,7 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 1
+$script:RuntimeRevision = 2
 
 #region scripts
 
@@ -59,9 +59,10 @@ $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 
 __COMMON__
 
-# %ProgramFiles%\IntuneChocoDeployment\Runtime (see $ToolRoot)
+# %ProgramFiles%\PackTune\Runtime (see $ToolRoot); the folder of the earlier name is removed below
 $RuntimeRoot = Join-Path $ToolRoot "Runtime"
-$TaskPath = "\Intune-Winget-Updates\"
+$TaskPath = "\PackTune\Runtime\"
+$OldTaskPath = "\Intune-Winget-Updates\"   # before the rename
 $TaskName = "Update PackTune Runtime"
 # The task of the earlier "winget runtime" app does the same job: replaced by this one
 $OldTaskName = "Update winget runtime"
@@ -80,6 +81,8 @@ __GETWINGET__
 if ($Uninstall) {
     # Chocolatey and App Installer belong to the device: only the task and the marker of this tool go (detection fails again)
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-OldToolFolder "Runtime"
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "ready.txt") -Force -ErrorAction SilentlyContinue
     Write-DeviceLog "uninstalled: task and marker removed, Chocolatey and App Installer stay"
     Write-Output "Chocolatey and winget stay installed"
@@ -181,7 +184,7 @@ finally { Exit-DeploymentLock }
 try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
-    Unregister-ScheduledTask -TaskName $OldTaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    foreach ($Name in $OldTaskName, $TaskName) { Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
     $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'update.ps1')`""
     $Triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))))
@@ -195,6 +198,9 @@ catch {
     Stop-Transcript | Out-Null
     exit 1
 }
+# The folder of the earlier name (%ProgramFiles%\IntuneChocoDeployment\Runtime) is not needed any more
+Remove-OldToolFolder "Runtime"
+Remove-OldToolFolder "WingetRuntime"
 # The marker of this script version for the detection rule
 Write-ProtectedFile (Join-Path $RuntimeRoot "ready.txt") $Revision
 Write-DeviceLog "PackTune Runtime ready: choco $Choco, winget $Winget"
@@ -205,7 +211,7 @@ exit 0
     $Detection = @'
 # choco.exe and winget work as SYSTEM and this script version has been installed (updates are a scheduled task)
 $Revision = '__REVISION__'
-$Marker = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "IntuneChocoDeployment\Runtime\ready.txt"
+$Marker = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "PackTune\Runtime\ready.txt"
 __GETWINGET__
 if (-not (Test-Path -LiteralPath $Marker) -or (Get-Content -LiteralPath $Marker -Raw).Trim() -ne $Revision) { exit 1 }
 $Choco = Join-Path $env:ProgramData "chocolatey\bin\choco.exe"
@@ -222,7 +228,7 @@ exit 0
 
     $UpdateScript = @'
 # Daily update of Chocolatey and App Installer (scheduled task, SYSTEM), at most every 20 hours, inside the device
-# wide lock. Log: Intune Management Extension log folder (IntuneChocoDeployment-_packtune-runtime.log).
+# wide lock. Log: Intune Management Extension log folder (PackTune-_packtune-runtime.log).
 $RuntimeRoot = $PSScriptRoot
 $LogId = "_packtune-runtime"
 $LogTag = "update"
@@ -285,11 +291,11 @@ exit 0
 
 function Install-PackTuneRuntime {
     # Creates the "PackTune Runtime" Win32 app in the tenant (once; see Get-PackTuneRuntimeWin32ID)
-    Assert-IntuneChocoPrerequisites
-    Assert-IntuneChocoConnection
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
     Write-Host "Starting to deploy the $($script:RuntimeName) as win32 app to Intune"
 
-    $WorkPath = New-IntuneChocoWorkFolder -Name "_packtune-runtime"
+    $WorkPath = New-PackTuneWorkFolder -Name "_packtune-runtime"
     $SourcePath = Join-Path $WorkPath "source"
     $Scripts = Get-PackTuneRuntimeScripts
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
@@ -297,7 +303,7 @@ function Install-PackTuneRuntime {
     $DetectionFile = Join-Path $WorkPath "detection.ps1"
     Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
 
-    $Package = New-IntuneChocoPackage -WorkPath $WorkPath
+    $Package = New-PackTunePackage -WorkPath $WorkPath
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
     $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture "AllWithARM64" -MinimumSupportedWindowsRelease W10_1809 }
 
@@ -329,7 +335,7 @@ function get-ChocoWin32ID { Get-PackTuneRuntimeWin32ID }
 function install-chocolatey { Install-PackTuneRuntime }
 function Get-WingetRuntimeWin32ID { param([switch]$NoCreate) Get-PackTuneRuntimeWin32ID -NoCreate:$NoCreate }
 
-function Set-IntuneChocoRuntimeDependency {
+function Set-PackTuneRuntimeDependency {
     # Gives one app the runtime as its AutoInstall dependency. The module replaces the whole dependency list on
     # every add, so the list is rebuilt: what the app has, without the old dependency apps, plus the runtime.
     param([Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$RuntimeId, [string[]]$OldIds = @())
@@ -348,11 +354,11 @@ function Set-IntuneChocoRuntimeDependency {
 
 #region old dependency apps, migration, state
 
-function Get-IntuneChocoOldDependencyApps {
+function Get-PackTuneOldDependencyApps {
     # The two dependency apps of earlier versions: the Chocolatey app and the winget runtime app
-    Assert-IntuneChocoPrerequisites
-    Assert-IntuneChocoConnection
-    Update-IntuneChocoToken
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Update-PackTuneToken
     foreach ($App in @(Invoke-IntuneModule { Get-IntuneWin32App })) {
         $Notes = [string]$App.notes
         if ($Notes -like "*$($script:ChocoAppMarker)*" -and $App.displayName -eq "Chocolatey") { [pscustomobject]@{ Id = $App.id; DisplayName = $App.displayName; Kind = "Chocolatey" } }
@@ -360,10 +366,10 @@ function Get-IntuneChocoOldDependencyApps {
     }
 }#Old Chocolatey app and old winget runtime app
 
-function Get-IntuneChocoAppsWithRuntimeState {
+function Get-PackTuneAppsWithRuntimeState {
     # Per app of the tool: does it depend on the runtime, and on which old dependency apps
     param([string]$RuntimeId, [string[]]$OldIds = @())
-    foreach ($App in @(Get-IntuneChocoTenantApps | Where-Object { -not $_.IsChocolatey })) {
+    foreach ($App in @(Get-PackTuneTenantApps | Where-Object { -not $_.IsChocolatey })) {
         $Targets = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $App.Id } | Where-Object { $_ } | ForEach-Object { [string]$_.targetId })
         [pscustomobject]@{
             Id = $App.Id; DisplayName = $App.DisplayName; Source = $App.Source
@@ -373,18 +379,18 @@ function Get-IntuneChocoAppsWithRuntimeState {
     }
 }
 
-function Get-IntuneChocoRuntimeState {
+function Get-PackTuneRuntimeState {
     <#
         What the interface shows under readiness: State is "Missing" (no PackTune Runtime in the tenant), "Migrate"
         (runtime there, but apps still depend on the old dependency apps or have no runtime dependency), "Ready".
-        UnusedOld = old dependency apps nothing depends on (can be removed, see Remove-IntuneChocoUnusedDependencyApps).
+        UnusedOld = old dependency apps nothing depends on (can be removed, see Remove-PackTuneUnusedDependencyApps).
     #>
     $RuntimeId = Get-PackTuneRuntimeWin32ID -NoCreate
-    $Old = @(Get-IntuneChocoOldDependencyApps)
-    $Apps = @(Get-IntuneChocoAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds @($Old.Id))
+    $Old = @(Get-PackTuneOldDependencyApps)
+    $Apps = @(Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds @($Old.Id))
     $OnOld = @($Apps | Where-Object { $_.OldDependencies.Count -gt 0 })
     $Without = @($Apps | Where-Object { -not $_.HasRuntime })
-    $Unused = @(Get-IntuneChocoUnusedDependencyApps -OldApps $Old)
+    $Unused = @(Get-PackTuneUnusedDependencyApps -OldApps $Old)
     $State = if (-not $RuntimeId) { "Missing" } elseif ($OnOld.Count -gt 0 -or $Without.Count -gt 0) { "Migrate" } else { "Ready" }
     [pscustomobject]@{
         State = $State; RuntimePresent = [bool]$RuntimeId; RuntimeId = $RuntimeId
@@ -392,31 +398,31 @@ function Get-IntuneChocoRuntimeState {
     }
 }#Runtime present / old dependencies in use, for the readiness list
 
-function Switch-IntuneChocoAppsToRuntime {
+function Switch-PackTuneAppsToRuntime {
     <#
         Moves the apps of the tool (both sources) to the PackTune Runtime: it becomes their dependency, the old
         dependency apps (Chocolatey, winget runtime) are taken away. Creates the runtime when it is missing. Without
-        -AppId all apps of the tool; one row per app that changed. The old apps stay (Get-IntuneChocoUnusedDependencyApps).
+        -AppId all apps of the tool; one row per app that changed. The old apps stay (Get-PackTuneUnusedDependencyApps).
     #>
     param([string[]]$AppId)
-    Assert-IntuneChocoPrerequisites
-    Assert-IntuneChocoConnection
-    Update-IntuneChocoToken
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Update-PackTuneToken
     $RuntimeId = Get-PackTuneRuntimeWin32ID
-    $OldIds = @(Get-IntuneChocoOldDependencyApps | ForEach-Object { $_.Id })
-    $Apps = @(Get-IntuneChocoAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds)
+    $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
+    $Apps = @(Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds)
     if ($AppId) { $Apps = @($Apps | Where-Object { $_.Id -in $AppId }) }
     foreach ($App in $Apps) {
         if ($App.HasRuntime -and $App.OldDependencies.Count -eq 0) { continue }
-        Set-IntuneChocoRuntimeDependency -AppId $App.Id -RuntimeId $RuntimeId -OldIds $OldIds
+        Set-PackTuneRuntimeDependency -AppId $App.Id -RuntimeId $RuntimeId -OldIds $OldIds
         [pscustomobject]@{ Id = $App.Id; DisplayName = $App.DisplayName; Source = $App.Source; Added = (-not $App.HasRuntime); OldRemoved = $App.OldDependencies.Count }
     }
 }#Switches the apps of the tool to the one runtime dependency
 
-function Get-IntuneChocoUnusedDependencyApps {
+function Get-PackTuneUnusedDependencyApps {
     # Old dependency apps that no app in the tenant depends on any more (so they can be removed). Nothing is deleted.
     param($OldApps)
-    if ($null -eq $OldApps) { $OldApps = @(Get-IntuneChocoOldDependencyApps) }
+    if ($null -eq $OldApps) { $OldApps = @(Get-PackTuneOldDependencyApps) }
     $OldApps = @($OldApps | Where-Object { $_ })
     if ($OldApps.Count -eq 0) { return @() }
     $Used = @{}
@@ -426,10 +432,10 @@ function Get-IntuneChocoUnusedDependencyApps {
     @($OldApps | Where-Object { -not $Used.ContainsKey([string]$_.Id) })
 }#Old dependency apps nothing depends on
 
-function Remove-IntuneChocoUnusedDependencyApps {
+function Remove-PackTuneUnusedDependencyApps {
     # Removes the old dependency apps nothing depends on (on request, never automatic). -WhatIf only lists them.
     param([switch]$WhatIf)
-    foreach ($Old in @(Get-IntuneChocoUnusedDependencyApps)) {
+    foreach ($Old in @(Get-PackTuneUnusedDependencyApps)) {
         if (-not $WhatIf) { Invoke-IntuneModule { Remove-IntuneWin32App -ID $Old.Id } | Out-Null }
         [pscustomobject]@{ Id = $Old.Id; DisplayName = $Old.DisplayName; Kind = $Old.Kind; Removed = (-not $WhatIf) }
     }
@@ -437,11 +443,11 @@ function Remove-IntuneChocoUnusedDependencyApps {
 
 # What the interface already calls: apps without the runtime dependency / adding it. Now for both sources; the old
 # dependency apps are switched over at the same time.
-function Get-IntuneWingetAppsWithoutRuntime {
+function Get-PackTuneAppsWithoutRuntime {
     $RuntimeId = Get-PackTuneRuntimeWin32ID -NoCreate
-    $OldIds = @(Get-IntuneChocoOldDependencyApps | ForEach-Object { $_.Id })
-    Get-IntuneChocoAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds | Where-Object { -not $_.HasRuntime -or $_.OldDependencies.Count -gt 0 }
+    $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
+    Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds | Where-Object { -not $_.HasRuntime -or $_.OldDependencies.Count -gt 0 }
 }
-function Add-IntuneWingetRuntimeDependency { param([string[]]$AppId) Switch-IntuneChocoAppsToRuntime -AppId $AppId | ForEach-Object { $_ | Add-Member -NotePropertyName AlreadyThere -NotePropertyValue (-not $_.Added) -PassThru } }
+function Add-PackTuneRuntimeDependency { param([string[]]$AppId) Switch-PackTuneAppsToRuntime -AppId $AppId | ForEach-Object { $_ | Add-Member -NotePropertyName AlreadyThere -NotePropertyValue (-not $_.Added) -PassThru } }
 
 #endregion

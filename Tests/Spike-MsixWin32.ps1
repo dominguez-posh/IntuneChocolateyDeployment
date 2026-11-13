@@ -43,7 +43,7 @@ Write-Host "Work folder: $work"
 # The shared device script text (lock, protected folders, device log) comes from the real tool
 $env:LOCALAPPDATA = Join-Path $work 'localappdata'
 New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
-. (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1')
+. (Join-Path $repo 'PackTune-Main.ps1')
 
 $Subject = 'CN=PackTune Spike Test'
 $Identity = 'PackTune.SpikeTest'

@@ -8,8 +8,8 @@
     (winget install Shssoichiro.Oxipng) for smaller PNGs. demo.mp4 is only written when imageio-ffmpeg (bundled ffmpeg,
     pip install --user imageio-ffmpeg) is available.
 .EXAMPLE
-    .\Tests\Render-Showcase.ps1 -Mode Shots -Source $env:TEMP\IntuneChocoDocs
-    .\Tests\Render-Showcase.ps1 -Mode Video -Source $env:TEMP\IntuneChocoDemo
+    .\Tests\Render-Showcase.ps1 -Mode Shots -Source $env:TEMP\PackTuneDocs
+    .\Tests\Render-Showcase.ps1 -Mode Video -Source $env:TEMP\PackTuneDemo
 #>
 [CmdletBinding()]
 param(

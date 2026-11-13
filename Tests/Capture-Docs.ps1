@@ -11,7 +11,7 @@ param([string]$OutDir)
 $ErrorActionPreference = 'Stop'
 # $PSScriptRoot is empty in parameter defaults on Windows PowerShell 5.1
 if (-not $OutDir) { $OutDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'docs/screenshots' }
-$work = Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoDocs'
+$work = Join-Path ([IO.Path]::GetTempPath()) 'PackTuneDocs'
 & (Join-Path $PSScriptRoot 'Invoke-GuiSmoke.ps1') -OutDir $work -Driver (Join-Path $PSScriptRoot 'DocsDriver.ps1')
 $log = Join-Path $work 'results.txt'
 if (-not (Test-Path $log)) { throw 'The screenshot run wrote no results.' }

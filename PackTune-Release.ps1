@@ -5,28 +5,28 @@
     would see the new content only when someone reinstalls it. Instead the release creates a new Win32 app for the new
     version (same name, settings, icon, dependencies and assignments), lets it supersede the old app with the type
     "update" and switches on "auto-update superseded apps" in its Available assignments: devices with the old
-    version get the new one. When no device reports the old app as installed any more, Remove-IntuneChocoSupersededApps
-    removes it. Apps with a Required assignment keep the in-place update of Update-IntuneChocoApp.
-    Loaded by ChocoIntuneDeployment-Main.ps1.
+    version get the new one. When no device reports the old app as installed any more, Remove-PackTuneSupersededApps
+    removes it. Apps with a Required assignment keep the in-place update of Update-PackTuneApp.
+    Loaded by PackTune-Main.ps1.
 #>
 
-function Get-IntuneChocoAppIntents {
+function Get-PackTuneAppIntents {
     param([Parameter(Mandatory = $true)][string]$AppId)
     @(@(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId }) | Where-Object { $_ } | ForEach-Object { [string]$_.Intent })
 }#Intents (required, available, uninstall) of the assignments of an app
 
-function Get-IntuneChocoReleasePath {
+function Get-PackTuneReleasePath {
     <#
         Which way a release of this app takes: "Supersedence" for an app that is Available and not Required,
         "InPlace" otherwise (Required, or no assignment at all).
     #>
     param([Parameter(Mandatory = $true)][string]$AppId)
-    $Intents = @(Get-IntuneChocoAppIntents -AppId $AppId)
+    $Intents = @(Get-PackTuneAppIntents -AppId $AppId)
     if ($Intents -contains "available" -and $Intents -notcontains "required") { return "Supersedence" }
     return "InPlace"
 }#Supersedence for Available apps, in-place update for Required ones
 
-function ConvertTo-IntuneChocoArchitecture {
+function ConvertTo-PackTuneArchitecture {
     # The architecture of an existing app as the New-IntuneWin32AppRequirementRule value; $null when it cannot be told
     param($App)
     $Text = (@($App.allowedArchitectures, $App.applicableArchitectures) | Where-Object { $_ }) -join ","
@@ -42,7 +42,7 @@ function ConvertTo-IntuneChocoArchitecture {
     return $null
 }
 
-function Get-IntuneChocoMinimumWindows {
+function Get-PackTuneMinimumWindows {
     # The minimum Windows release of an existing app as W10_<release>; $null when unknown
     param($App)
     $Release = [string]$App.minimumSupportedWindowsRelease
@@ -51,7 +51,7 @@ function Get-IntuneChocoMinimumWindows {
     return $null
 }
 
-function Publish-IntuneChocoSupersedingApp {
+function Publish-PackTuneSupersedingApp {
     <#
         The supersedence path of a release: creates the app of the new version next to the old one and lets it
         supersede the old app (type update, auto-update). Returns the id of the new app. The assignment comes last:
@@ -66,8 +66,8 @@ function Publish-IntuneChocoSupersedingApp {
     )
     $Old = Invoke-IntuneModule { Get-IntuneWin32App -ID $AppId }
     if ($null -eq $Old) { throw "App $AppId was not found in Intune" }
-    $IsWinget = [string]$Old.notes -like "$($script:WingetMarker)*"
-    $Current = ConvertFrom-ChocoAppNotes $Old.notes
+    $IsWinget = (Get-PackTuneNotesSource ([string]$Old.notes)) -eq "Winget"
+    $Current = ConvertFrom-PackTuneAppNotes $Old.notes
     if (-not $Current.Package) { throw "$($Old.displayName) has no package id in its notes (created by an older version of this tool). Remove it and deploy it again." }
     $Package = $Current.Package
 
@@ -82,20 +82,20 @@ function Publish-IntuneChocoSupersedingApp {
     $DelayMin = if ($null -ne $Current.UpdateDelayMinMinutes) { $Current.UpdateDelayMinMinutes } else { $script:Settings.UpdateDelayMinMinutes }
     $DelayMax = if ($null -ne $Current.UpdateDelayMaxMinutes) { $Current.UpdateDelayMaxMinutes } else { $script:Settings.UpdateDelayMaxMinutes }
 
-    $Policy = New-ChocoAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
+    $Policy = New-PackTuneAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
         -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax
-    Write-Host ("{0}: new app for version {1}, updates {2}" -f $Old.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
+    Write-Host ("{0}: new app for version {1}, updates {2}" -f $Old.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
     Write-Host "Building the package"
-    $WorkPath = New-IntuneChocoWorkFolder -Name $(if ($IsWinget) { "winget-" + ($Package -replace '[^A-Za-z0-9._-]', '_') } else { $Package })
+    $WorkPath = New-PackTuneWorkFolder -Name $(if ($IsWinget) { "winget-" + ($Package -replace '[^A-Za-z0-9._-]', '_') } else { $Package })
     $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName }
     else { New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName }
-    $IntuneWinFile = New-IntuneChocoPackage -WorkPath $WorkPath
+    $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
-    $Architecture = ConvertTo-IntuneChocoArchitecture $Old
+    $Architecture = ConvertTo-PackTuneArchitecture $Old
     if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
-    $Windows = Get-IntuneChocoMinimumWindows $Old
+    $Windows = Get-PackTuneMinimumWindows $Old
     if (-not $Windows) { $Windows = if ($IsWinget) { "W10_1809" } else { "W10_1607" } }
     $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease $Windows }
 
@@ -105,7 +105,7 @@ function Publish-IntuneChocoSupersedingApp {
         Description          = $(if ($Old.description) { $Old.description } else { $Old.displayName })
         Publisher            = $(if ($Old.publisher) { $Old.publisher } else { "-" })
         AppVersion           = $(if ($NewVersion) { $NewVersion } else { "latest" })
-        Notes                = ConvertTo-ChocoAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker })
+        Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker })
         InstallExperience    = "system"
         RestartBehavior      = "suppress"
         DetectionRule        = $DetectionRule
@@ -124,7 +124,7 @@ function Publish-IntuneChocoSupersedingApp {
         # Dependencies first, then supersedence: the module keeps both when it adds the other. An app that still
         # depends on the old Chocolatey or winget runtime app gets the PackTune Runtime instead.
         $Dependencies = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $AppId } | Where-Object { $_ })
-        $OldIds = @(Get-IntuneChocoOldDependencyApps | ForEach-Object { $_.Id })
+        $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
         if (@($Dependencies | Where-Object { [string]$_.targetId -in $OldIds }).Count -gt 0) {
             $RuntimeId = Get-PackTuneRuntimeWin32ID
             $Dependencies = @(@($Dependencies | Where-Object { [string]$_.targetId -notin $OldIds -and [string]$_.targetId -ne $RuntimeId }) + [pscustomobject]@{ targetId = $RuntimeId; dependencyType = "autoInstall" })
@@ -172,11 +172,11 @@ function Publish-IntuneChocoSupersedingApp {
     return $New.id
 }#Creates the new version of an Available app and supersedes the old one
 
-function Publish-IntuneChocoRelease {
+function Publish-PackTuneRelease {
     <#
         Releases a version (or a changed update policy) the right way for the app: Available and not Required =
-        new app with supersedence (the old app stays until Remove-IntuneChocoSupersededApps finds no device using
-        it); otherwise the in-place update of Update-IntuneChocoApp. -Path forces one of the ways.
+        new app with supersedence (the old app stays until Remove-PackTuneSupersededApps finds no device using
+        it); otherwise the in-place update of Update-PackTuneApp. -Path forces one of the ways.
         Returns what happened: Path, AppId (the app to look at afterwards), OldAppId.
     #>
     param(
@@ -186,37 +186,37 @@ function Publish-IntuneChocoRelease {
         [ValidateRange(1, 2160)][int]$GraceHours,
         [ValidateSet("Auto", "InPlace", "Supersedence")][string]$Path = "Auto"
     )
-    Assert-IntuneChocoPrerequisites
-    Assert-IntuneChocoConnection
-    Update-IntuneChocoToken
-    $Way = if ($Path -eq "Auto") { Get-IntuneChocoReleasePath -AppId $AppId } else { $Path }
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Update-PackTuneToken
+    $Way = if ($Path -eq "Auto") { Get-PackTuneReleasePath -AppId $AppId } else { $Path }
     $Arguments = @{ AppId = $AppId }
     foreach ($Name in "Version", "UpdateMode", "GraceHours") { if ($PSBoundParameters.ContainsKey($Name)) { $Arguments[$Name] = $PSBoundParameters[$Name] } }
     if ($Way -eq "Supersedence") {
-        $NewId = Publish-IntuneChocoSupersedingApp @Arguments
+        $NewId = Publish-PackTuneSupersedingApp @Arguments
         return [pscustomobject]@{ Path = "Supersedence"; AppId = $NewId; OldAppId = $AppId }
     }
-    $Done = Update-IntuneChocoApp @Arguments
+    $Done = Update-PackTuneApp @Arguments
     return [pscustomobject]@{ Path = "InPlace"; AppId = @($Done)[-1]; OldAppId = $null }
 }#Release: supersedence for Available apps, in-place update for Required apps
 
-function Get-IntuneChocoAppInstalledCount {
+function Get-PackTuneAppInstalledCount {
     # Devices (and users) that report the app as installed, from the install summary of the app in Graph
     param([Parameter(Mandatory = $true)][string]$AppId)
-    Assert-IntuneChocoConnection
-    Update-IntuneChocoToken
+    Assert-PackTuneConnection
+    Update-PackTuneToken
     $Headers = @{ Authorization = "Bearer $($Global:AccessToken.access_token)" }
     $Summary = Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -Headers $Headers -TimeoutSec 60 -ErrorAction Stop
     if ($null -eq $Summary -or $null -eq $Summary.installedDeviceCount) { throw "Intune returned no install summary for app $AppId" }
     return [int][Math]::Max([int]$Summary.installedDeviceCount, [int]$Summary.installedUserCount)
 }#Number of devices that report the app as installed
 
-function Get-IntuneChocoSupersededApps {
+function Get-PackTuneSupersededApps {
     # Apps this tool created that a newer app of this tool supersedes
-    Assert-IntuneChocoPrerequisites
-    Assert-IntuneChocoConnection
-    Update-IntuneChocoToken
-    $Apps = @(Get-IntuneChocoTenantApps | Where-Object { -not $_.IsChocolatey })
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Update-PackTuneToken
+    $Apps = @(Get-PackTuneTenantApps | Where-Object { -not $_.IsChocolatey })
     $ById = @{}; foreach ($App in $Apps) { $ById[$App.Id] = $App }
     foreach ($New in $Apps) {
         foreach ($Relation in @(Invoke-IntuneModule { Get-IntuneWin32AppSupersedence -ID $New.Id } | Where-Object { $_ })) {
@@ -230,18 +230,18 @@ function Get-IntuneChocoSupersededApps {
     }
 }#Old apps that are superseded by a newer app of this tool
 
-function Remove-IntuneChocoSupersededApps {
+function Remove-PackTuneSupersededApps {
     <#
         Removes superseded apps when no device reports them installed any more. -InstallCount (script block, gets the
         app id, returns the number of devices) replaces the Graph query, e.g. for tests. -AppId limits it to
         one old app, -WhatIf only reports. When the number cannot be read the app stays.
     #>
     param([string[]]$AppId, [scriptblock]$InstallCount, [switch]$WhatIf)
-    $Rows = @(Get-IntuneChocoSupersededApps)
+    $Rows = @(Get-PackTuneSupersededApps)
     if ($AppId) { $Rows = @($Rows | Where-Object { $_.OldId -in $AppId }) }
     foreach ($Row in $Rows) {
         $Count = $null; $Removed = $false; $Reason = $null
-        try { $Count = if ($InstallCount) { [int](& $InstallCount $Row.OldId) } else { Get-IntuneChocoAppInstalledCount -AppId $Row.OldId } }
+        try { $Count = if ($InstallCount) { [int](& $InstallCount $Row.OldId) } else { Get-PackTuneAppInstalledCount -AppId $Row.OldId } }
         catch { $Reason = "install status not readable: $($_.Exception.Message)" }
         if ($null -ne $Count -and $Count -gt 0) { $Reason = "$Count device(s) still report it installed" }
         elseif ($null -ne $Count -and $WhatIf) { $Reason = "no device reports it installed, would be removed" }
@@ -257,7 +257,7 @@ function Remove-IntuneChocoSupersededApps {
                         Add-IntuneWin32AppSupersedence -ID $Row.NewId -Supersedence $Again
                     } | Out-Null
                 }
-                Remove-IntuneChocoApplication -Id $Row.OldId
+                Remove-PackTuneApp -Id $Row.OldId
                 $Removed = $true; $Reason = "removed"
             }
             catch { $Reason = "not removed: $($_.Exception.Message)" }

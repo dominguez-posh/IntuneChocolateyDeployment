@@ -5,4 +5,4 @@ rem -WindowStyle Hidden + -HideConsole: no console window next to the tool.
 rem conhost.exe: classic console host, so that Windows Terminal does not take the window over.
 rem PSModulePath is cleared so that Windows PowerShell uses its own module paths, also when started from PowerShell 7.
 set "PSModulePath="
-start "" conhost.exe powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Start-IntuneChocoTool.ps1" -HideConsole
+start "" conhost.exe powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Start-PackTune.ps1" -HideConsole

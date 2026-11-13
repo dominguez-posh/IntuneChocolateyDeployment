@@ -15,10 +15,16 @@
 # character outside A-Za-z0-9._- replaced by _. Fields: lastAttempt, action, status, exitCode, cause, installedVersion,
 # targetVersion (Tests\Check-Insight.ps1 checks that the status script reads what Save-LastResult writes).
 $script:LastResultFile = @{
+    Chocolatey = 'PackTune\Chocolatey\{0}\last-result.json'
+    Winget     = 'PackTune\Winget\{0}\last-result.json'
+}
+# Before the rename the devices wrote below %ProgramFiles%\IntuneChocoDeployment: the status script reads both places
+$script:LegacyLastResultFile = @{
     Chocolatey = 'IntuneChocoDeployment\Chocolatey\{0}\last-result.json'
     Winget     = 'IntuneChocoDeployment\Winget\{0}\last-result.json'
 }
-$script:StatusScriptName = 'IntuneChocoDeployment status'
+$script:StatusScriptName = 'PackTune status'
+$script:LegacyStatusScriptName = 'IntuneChocoDeployment status'
 $script:Hooks = @{}
 
 # Delegated scopes per function (all Graph, least privileged; the tool's registration holds the ReadWrite variants)
@@ -180,8 +186,10 @@ function ConvertTo-InsightApp {
         Duplicate = $false; DuplicateOf = $null; ProposedAction = 'CannotManage'; Reason = ''
     }
     $IsInfra = $Notes -like "*$($Markers.ChocolateyApp)*" -and $Raw.displayName -eq 'Chocolatey'
-    $IsWinget = $Notes -like "$($Markers.Winget)*"
-    $IsChoco = $Notes -like "$($Markers.Tool)*"
+    # Current marker: PoweredByPackTune;from=Chocolatey|Winget. The two earlier markers are still read.
+    $IsNew = $Markers.PackTune -and $Notes -like "$($Markers.PackTune)*"
+    $IsWinget = $Notes -like "$($Markers.Winget)*" -or ($IsNew -and $Notes -match '(?:^|;)from=winget(?:;|$)')
+    $IsChoco = $Notes -like "$($Markers.Tool)*" -or ($IsNew -and -not $IsWinget)
     if ($IsInfra -or $IsWinget -or $IsChoco) {
         $Policy = & $script:Hooks.FromNotes $Notes
         $Result.Kind = if ($Raw.AppType -eq 'Store') { 'StoreApp' } else { 'ToolCreated' }
@@ -283,7 +291,7 @@ function Export-InsightManagedApps {
             [ordered]@{ displayName = $_.DisplayName; source = $_.Source; package = $_.Package; version = $_.Version
                 updateMode = $_.UpdateMode; graceHours = $_.GraceHours; packageSource = (Remove-InsightUserInfo $_.PackageSource) }
         })
-    $Document = [ordered]@{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'); apps = $Items }
+    $Document = [ordered]@{ format = 'PackTune.Export'; version = 1; exported = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'); apps = $Items }
     $Json = $Document | ConvertTo-Json -Depth 6
     [IO.File]::WriteAllText($Path, $Json, (New-Object Text.UTF8Encoding($false)))
     return $Items.Count
@@ -296,7 +304,7 @@ function Read-InsightExportFile {
     #>
     param([Parameter(Mandatory)][string]$Path)
     $Document = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
-    if ($Document.format -ne 'IntuneChocoDeployment.Export' -or [int]$Document.version -gt 1) { throw 'This is not an export file of this tool (or from a newer version).' }
+    if ($Document.format -notin 'PackTune.Export', 'IntuneChocoDeployment.Export' -or [int]$Document.version -gt 1) { throw 'This is not an export file of this tool (or from a newer version).' }
     foreach ($Item in @($Document.apps)) {
         if ($Item.source -notin 'Chocolatey', 'Winget' -or $Item.package -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') { throw "Invalid entry in the export file: $($Item.package)" }
         [pscustomobject]@{ Id = $null; DisplayName = [string]$Item.displayName; Kind = 'Export'; Source = [string]$Item.source; Package = [string]$Item.package
@@ -445,22 +453,30 @@ function Get-InsightStatusScriptText {
     #>
     $Choco = $script:LastResultFile.Chocolatey -replace '\\\{0\}\\last-result\.json$', ''
     $Winget = $script:LastResultFile.Winget -replace '\\\{0\}\\last-result\.json$', ''
+    $OldChoco = $script:LegacyLastResultFile.Chocolatey -replace '\\\{0\}\\last-result\.json$', ''
+    $OldWinget = $script:LegacyLastResultFile.Winget -replace '\\\{0\}\\last-result\.json$', ''
     $Text = @'
-# IntuneChocoDeployment status: detection only, reports the last result of every managed app (runs as SYSTEM).
+# PackTune status: detection only, reports the last result of every managed app (runs as SYSTEM).
 param(
     [string]$ChocoRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__CHOCO__'),
     [string]$WingetRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__WINGET__'),
+    [string]$OldChocoRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__OLDCHOCO__'),
+    [string]$OldWingetRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__OLDWINGET__'),
     [int]$Limit = 1900
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $Failed = New-Object System.Collections.ArrayList
 $Good = New-Object System.Collections.ArrayList
 $Count = 0
-foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot))) {
+$Seen = @{}
+foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot), @('c', $OldChocoRoot), @('w', $OldWingetRoot))) {
     if (-not (Test-Path $Entry[1])) { continue }
     foreach ($Dir in @(Get-ChildItem -LiteralPath $Entry[1] -Directory | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
         $File = Join-Path $Dir.FullName 'last-result.json'
         if (-not (Test-Path $File)) { continue }
+        # The folder of the earlier name only counts when the app has not been moved to the new one yet
+        if ($Seen.ContainsKey($Entry[0] + '|' + $Dir.Name)) { continue }
+        $Seen[$Entry[0] + '|' + $Dir.Name] = $true
         $Count++
         $R = $null
         try { $R = Get-Content $File -Raw | ConvertFrom-Json } catch { }
@@ -490,7 +506,7 @@ $Final = ConvertTo-Json -Compress -Depth 4 ([ordered]@{ v = 1; n = $Count; f = @
 Write-Output $Final
 exit 0
 '@
-    return $Text.Replace('__CHOCO__', $Choco).Replace('__WINGET__', $Winget)
+    return $Text.Replace('__CHOCO__', $Choco).Replace('__WINGET__', $Winget).Replace('__OLDCHOCO__', $OldChoco).Replace('__OLDWINGET__', $OldWinget)
 }
 
 function Test-InsightRemediationsAvailable {
@@ -515,12 +531,13 @@ function Get-InsightStatusScriptState {
     # The existing status script package of this tool, or $null
     param([Parameter(Mandatory)]$Context)
     $All = Invoke-InsightGraph $Context GET '/beta/deviceManagement/deviceHealthScripts?$select=id,displayName,version,lastModifiedDateTime' -All
-    @($All | Where-Object { $_.displayName -eq $script:StatusScriptName }) | Select-Object -First 1
+    # The script of the earlier name is taken over (renamed by the next update of the script)
+    @(@($All | Where-Object { $_.displayName -eq $script:StatusScriptName }) + @($All | Where-Object { $_.displayName -eq $script:LegacyStatusScriptName })) | Select-Object -First 1
 }
 
 function Set-InsightStatusScript {
     <#
-        Creates or updates the "IntuneChocoDeployment status" script package (detection only, system context,
+        Creates or updates the "PackTune status" script package (detection only, system context,
         64 bit) and assigns it to all devices hourly (deviceHealthScriptHourlySchedule, interval 1).
         Scopes: DeviceManagementConfiguration.ReadWrite.All. Degrades to Created = $false when not available.
     #>
@@ -529,8 +546,8 @@ function Set-InsightStatusScript {
     if (-not $Availability.Available) { return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason } }
     $Bytes = (New-Object Text.UTF8Encoding($false)).GetBytes((Get-InsightStatusScriptText))
     $Body = @{
-        displayName = $script:StatusScriptName; description = 'Reports the last install and update result of the apps managed by IntuneChocoDeployment (detection only).'
-        publisher = 'IntuneChocoDeployment'; runAs32Bit = $false; runAsAccount = 'system'; enforceSignatureCheck = $false
+        displayName = $script:StatusScriptName; description = 'Reports the last install and update result of the apps managed by PackTune (detection only).'
+        publisher = 'PackTune'; runAs32Bit = $false; runAsAccount = 'system'; enforceSignatureCheck = $false
         detectionScriptContent = [Convert]::ToBase64String($Bytes)
     }
     $Existing = Get-InsightStatusScriptState $Context
@@ -602,7 +619,7 @@ function Get-InsightDiagnosticsInfo {
         %ProgramData%\Microsoft\IntuneManagementExtension\Logs\*.* (same page). Expand-InsightLogs reads the zip.
     #>
     param([Parameter(Mandatory)][string]$ManagedDeviceId, [string]$Package)
-    $Log = if ($Package) { "IntuneChocoDeployment-$($Package -replace '[^A-Za-z0-9._-]', '_').log" } else { 'IntuneChocoDeployment-<package>.log' }
+    $Log = if ($Package) { "PackTune-$($Package -replace '[^A-Za-z0-9._-]', '_').log" } else { 'PackTune-<package>.log' }
     [pscustomobject]@{
         Url  = "https://intune.microsoft.com/#view/Microsoft_Intune_Devices/DeviceSettingsMenuBlade/~/overview/mdmDeviceId/$ManagedDeviceId"
         Hint = "Open the device, choose Collect diagnostics, then Monitor > Device diagnostics > Download. Our log is $Log in the folder IntuneManagementExtension\Logs of the package."
@@ -610,7 +627,7 @@ function Get-InsightDiagnosticsInfo {
 }
 
 function Expand-InsightLogs {
-    <# For a downloaded diagnostics zip: extracts IntuneChocoDeployment-*.log (any folder level, flat by file name) and returns the paths. #>
+    <# For a downloaded diagnostics zip: extracts PackTune-*.log (and the IntuneChocoDeployment-*.log of devices not migrated yet) (any folder level, flat by file name) and returns the paths. #>
     param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$OutDir)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $null = New-Item -ItemType Directory -Path $OutDir -Force
@@ -618,7 +635,7 @@ function Expand-InsightLogs {
     try {
         foreach ($Entry in $Archive.Entries) {
             $Name = [IO.Path]::GetFileName($Entry.FullName)
-            if ($Name -notlike 'IntuneChocoDeployment-*.log' -or $Name -notmatch '^[A-Za-z0-9._-]+$') { continue }
+            if (($Name -notlike 'PackTune-*.log' -and $Name -notlike 'IntuneChocoDeployment-*.log') -or $Name -notmatch '^[A-Za-z0-9._-]+$') { continue }
             $Target = Join-Path $OutDir $Name
             [IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
             $Target

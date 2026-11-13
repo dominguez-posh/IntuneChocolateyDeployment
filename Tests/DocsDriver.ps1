@@ -1,4 +1,4 @@
-# Dot-sourced by Start-IntuneChocoTool.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Capture-Docs.ps1).
+# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Capture-Docs.ps1).
 # Fills the fake tenant with a few apps (demo data only) and renders the README screenshots of every page and
 # dialog into INTUNECHOCO_SMOKE_OUT: start, apps, deploy, tenant, schedule, status, import, activity, settings.
 
@@ -36,7 +36,7 @@ $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = {
         param($s)
         $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
-        $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
+        $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DocsClient = New-Object System.Net.WebClient; [void]$global:DocsClient.DownloadStringTaskAsync([uri]$Url)' }
         Show-Page 'Start'; Start-CatalogPrefetch

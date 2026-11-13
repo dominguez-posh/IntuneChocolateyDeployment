@@ -5,7 +5,7 @@
         WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBackground}" Foreground="{StaticResource Text}"
         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14" UseLayoutRounding="True">
     <!-- Layout after the design mockups (Start, Apps, Tenant, Activity, Deploy, Schedule, Import, Status). Styles: UI\Theme.xaml.
-         Rows are IntuneChoco.Row objects (see Start-IntuneChocoTool.ps1): bindings use the indexer, e.g. {Binding [Title]}. -->
+         Rows are PackTune.Row objects (see Start-PackTune.ps1): bindings use the indexer, e.g. {Binding [Title]}. -->
     <shell:WindowChrome.WindowChrome><shell:WindowChrome CaptionHeight="52" GlassFrameThickness="0" ResizeBorderThickness="6" CornerRadius="0" UseAeroCaptionButtons="False"/></shell:WindowChrome.WindowChrome>
     <Window.Resources>
         <DataTemplate x:Key="TagTemplate">

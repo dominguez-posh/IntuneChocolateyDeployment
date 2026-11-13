@@ -12,7 +12,7 @@ Non-goals (first version): managing a fleet of masters from one console, replaci
 
 ## 2. Key decisions (summary)
 
-1. Separate process, elevated on entry. The normal tool stays non-elevated. The button starts a second instance (`Start-IntuneChocoTool.ps1 -GoldenMaster`) with `Start-Process -Verb RunAs` (UAC prompt) and the main window offers "Zurueck" by closing it. No elevation switching inside one process (impossible), no Intune sign-in in the GM process.
+1. Separate process, elevated on entry. The normal tool stays non-elevated. The button starts a second instance (`Start-PackTune.ps1 -GoldenMaster`) with `Start-Process -Verb RunAs` (UAC prompt) and the main window offers "Zurueck" by closing it. No elevation switching inside one process (impossible), no Intune sign-in in the GM process.
 2. Engine first, UI second. A new module `Modules/GoldenMaster.psm1` holds all steps as small units with one contract (below). UI and CLI (`Invoke-GoldenMaster -Plan x.json -WhatIf`) call the same engine. This makes dry-run and tests possible.
 3. Every step is `Test` / `Apply` / (optional) `Undo`, idempotent, optional, explained, with a risk level and a preset membership. Nothing is on by default except read-only detection.
 4. State in a JSON file on the master (source of truth), documentation rendered from it. History is append-only, one file per run plus a `current.json`.
@@ -38,7 +38,7 @@ Rule: a step catalog entry carries `Source` (URL), `License`, `Upstream` (commit
 ## 4. Architecture
 
 ```
-Start-IntuneChocoTool.ps1 -GoldenMaster      (own WPF window, elevated)
+Start-PackTune.ps1 -GoldenMaster      (own WPF window, elevated)
   UI/GoldenMaster.xaml                        (sections, see 8)
   Modules/GoldenMaster.psm1                   (engine, no UI)
   GoldenMaster/steps/*.json                   (step catalog as data: id, title, why, risk, source, params)
@@ -47,7 +47,7 @@ Start-IntuneChocoTool.ps1 -GoldenMaster      (own WPF window, elevated)
   GoldenMaster/templates/*.html|md            (export templates)
 ```
 
-Reuse from the existing tool: catalog loading and winget/Chocolatey helpers (`ChocoIntuneDeployment-Winget.ps1`: `Get-Winget`, `Invoke-Winget`, `Get-PendingUpdate`, `Invoke-Upgrade`; Sources/Runtime scripts), the `Global\IntuneChocoDeployment` mutex around every choco/winget call, Theme.xaml. Shared code that is device-script-like stays plain ASCII, PS 5.1.
+Reuse from the existing tool: catalog loading and winget/Chocolatey helpers (`PackTune-Winget.ps1`: `Get-Winget`, `Invoke-Winget`, `Get-PendingUpdate`, `Invoke-Upgrade`; Sources/Runtime scripts), the `Global\IntuneChocoDeployment` mutex around every choco/winget call, Theme.xaml. Shared code that is device-script-like stays plain ASCII, PS 5.1.
 
 Step contract (all steps):
 

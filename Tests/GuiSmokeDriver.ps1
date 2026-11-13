@@ -1,4 +1,4 @@
-# Dot-sourced by Start-IntuneChocoTool.ps1 when INTUNECHOCO_SMOKE is set (see Tests\Invoke-GuiSmoke.ps1).
+# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE is set (see Tests\Invoke-GuiSmoke.ps1).
 # Puts the window off-screen and walks through the steps below on the UI thread; each step returns $true when it is
 # done (or $false to be asked again on the next tick), so background tasks can finish in between.
 # Screenshots of every page and dialog land in the output folder (shot-NN-*.png).
@@ -55,7 +55,7 @@ function Test-GeneratedScripts([string]$Folder, [string]$What) {
     }
     $install = Get-Content (Join-Path $Folder 'source\install.ps1') -Raw
     $update = Get-Content (Join-Path $Folder 'source\update.ps1') -Raw
-    Test-Smoke "$What scripts share the device lock" ($install -match 'Global.IntuneChocoDeployment"' -and $install -match 'Enter-DeploymentLock' -and $update -match 'Enter-DeploymentLock')
+    Test-Smoke "$What scripts share the device lock" ($install -match 'Global.PackTune"' -and $install -match 'Global.IntuneChocoDeployment"' -and $install -match 'Enter-DeploymentLock' -and $update -match 'Enter-DeploymentLock')
     Test-Smoke "$What helper folder is protected by SID" ($install -match 'Protect-Folder' -and $install -match 'S-1-5-18' -and $install -match 'S-1-5-32-544')
 }
 
@@ -67,6 +67,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:EmbeddedAvailableOverride = $false   # simulates a missing WebView2 runtime: the sign-in uses the browser, as the fake authority needs
         $script:SandboxOverride = @{ Present = $true; Studio = $true }
         Update-SandboxState
+        Test-Smoke 'settings were copied from the folder of the earlier name' ((Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\settings.json')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\migrated-from-intunechoco.txt')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\settings.json'))) ''
         Test-Smoke 'fake module counts as installed' $script:ModuleState.Ok $script:ModuleState.Version
         Test-Smoke 'readiness shows 6 items' ($ui.ReadinessPanel.Children.Count -eq 6) $ui.ReadinessPanel.Children.Count
         Test-Smoke 'signed out: split button shown, account pill hidden' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
@@ -128,7 +129,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not $s.Started) {
             $s.Started = $true
             # No app registration yet: the item is red, says why and offers Create; green items have no button
-            $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
+            $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
             Show-Page 'Start'
             $cards = @(Get-ReadinessItems)
             $appreg = $cards | Where-Object Key -eq 'appreg'
@@ -150,7 +151,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'set up finished' ((-not $script:SetupRunning) -and $log -match 'Everything is set up') (($log -split "`n" | Select-Object -Last 3) -join ' | ')
         Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'PackTune' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
         Test-Smoke 'a registration of the same name owned by someone else is not reused' ($log -match 'not reused: you are not its only owner')
-        Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com')
+        Test-Smoke 'tenant and client id saved' ((Get-PackTuneSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-PackTuneSettings).TenantID -eq 'contoso.onmicrosoft.com')
         $names = @(Get-StoreApps | ForEach-Object { $_.displayName })
         Test-Smoke 'PackTune Runtime deployed by the set up, no separate Chocolatey app' ($script:RuntimeId -and ($names -contains 'PackTune Runtime') -and ($names -notcontains 'Chocolatey') -and ($names -notcontains 'winget runtime')) ($names -join ', ')
         Test-Smoke 'all required items green, set up button gone' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' -and -not $_.Optional }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
@@ -161,7 +162,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'token carries refresh token and client id' ($Global:AccessToken.RefreshToken -eq 'refresh-Test Admin' -and $Global:AccessToken.ClientID -eq '11111111-2222-3333-4444-555555555555')
         $Global:AccessToken.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(2)
         Update-UiToken
-        $identity = Get-IntuneChocoIdentity
+        $identity = Get-PackTuneIdentity
         Test-Smoke 'expiring token renewed silently' ($identity.Name -eq 'Test Admin renewed' -and ([datetime]$identity.ExpiresOn) -gt (Get-Date).ToUniversalTime().AddMinutes(30)) $identity.Name
         Test-Smoke 'renewed token handed to the tasks' ($script:Shared.Auth.AccessToken.RefreshToken -eq 'refresh-Test Admin renewed')
         $cultureBefore = [Threading.Thread]::CurrentThread.CurrentCulture.Name
@@ -253,7 +254,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # source filter keeps the exclusive semantics of the backend
         foreach ($f in 'Winget', 'Chocolatey', 'Both') {
             $ui["Flt$(if ($f -eq 'Chocolatey') { 'Choco' } else { $f })"].IsChecked = $true
-            $expected = @(Select-IntuneChocoSourceApps -Apps $script:SourceRows -Filter $f).Count
+            $expected = @(Select-PackTuneSourceApps -Apps $script:SourceRows -Filter $f).Count
             Test-Smoke "source filter $f shows $expected apps" ($script:CardCollection.Count -eq $expected) $script:CardCollection.Count
         }
         $ui.FltAll.IsChecked = $true
@@ -331,7 +332,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
         Test-Smoke 'Scratch has the custom icon' ($scratch.hasIcon -and $scratch.iconValid)
         Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -in '7-Zip', 'Scratch' -and $_.assignment -eq 'available' }).Count -eq 2)
-        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByChocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$') $zip.notes
+        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByPackTune;from=Chocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$') $zip.notes
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'finished jobs are marked Done' (@($script:JobRows | Where-Object { $_['Status'] -eq 'Done' }).Count -ge 2) (@($script:JobRows | ForEach-Object { $_['Status'] }) -join ',')
@@ -513,7 +514,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         }
         if (-not (Test-Idle)) { return $false }
         $apps = Get-StoreApps
-        $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
+        $vlc = $apps | Where-Object { $_.notes -like 'PoweredByPackTune;from=Winget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
         $vlcLog = (@($script:JobRows | Where-Object { $_['Title'] -eq 'VLC media player' } | ForEach-Object { $_.Data.Log } | ForEach-Object { $_.Text } | Where-Object { $_ -match 'ependenc' }) -join ' | ')
         Test-Smoke 'winget app has the PackTune Runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the PackTune Runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
@@ -522,7 +523,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-GeneratedScripts (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC') 'winget'
         # An older winget app without the dependency: banner offers to add it
         $store = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
-        $all = Get-StoreApps; ($all | Where-Object { $_.notes -like 'PoweredByWinget*' }).dependencies = @()
+        $all = Get-StoreApps; ($all | Where-Object { $_.notes -like 'PoweredByPackTune;from=Winget*' }).dependencies = @()
         ConvertTo-Json -InputObject @($all) -Depth 6 | Set-Content $store
         Start-RuntimeCheck
         return $true
@@ -541,7 +542,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if (-not (Test-Idle)) { return $false }
-        $vlc = Get-StoreApps | Where-Object { $_.notes -like 'PoweredByWinget*' }
+        $vlc = Get-StoreApps | Where-Object { $_.notes -like 'PoweredByPackTune;from=Winget*' }
         Test-Smoke 'dependency added, banner gone' (@($vlc.dependencies).Count -eq 1 -and $ui.BannerRuntime.Visibility -eq 'Collapsed') "$(@($vlc.dependencies).Count) / $($ui.BannerRuntime.Visibility)"
         $true } }
     @{ Name = 'PackTune Runtime states: Ready, Migrate, Missing'; Phase = 0; Do = {
@@ -654,7 +655,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
                 Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
-                $cfg = ConvertFrom-ChocoAppNotes $app.notes
+                $cfg = ConvertFrom-PackTuneAppNotes $app.notes
                 Test-Smoke 'schedule reached the notes' ($cfg.Schedule.WindowFrom -eq '12:00' -and $cfg.Schedule.OnlyOnMains -and -not $cfg.Schedule.TriggerStart -and $cfg.Schedule.WindowDays -eq '12345') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
                 Test-Smoke 'install script has the update routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 72')
@@ -673,7 +674,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'panel shows the three explained choices, Ask the user selected' ($ui.RbTenantCustom.IsChecked -and $ui.TxtTenantGrace.Text -eq '3' -and $ui.CmbTenantGraceUnit.SelectedIndex -eq 1 -and $ui.PanelTenantGrace.Visibility -eq 'Visible')
                 Test-Smoke 'panel pins the version' ($ui.CmbTenantVersion.SelectedIndex -ge 1 -and $ui.CmbTenantVersion.SelectedItem -eq $row.Data.Version) "$($ui.CmbTenantVersion.SelectedItem)"
                 Test-Smoke 'panel summarises the schedule of the app' ($ui.TxtTenantWhen.Text -like '*') $ui.TxtTenantWhen.Text
-                # Schedule dialog from the panel: change and apply (in place, the app is Available but the schedule path uses Update-IntuneChocoApp)
+                # Schedule dialog from the panel: change and apply (in place, the app is Available but the schedule path uses Update-PackTuneApp)
                 $ui.RbTenantStartup.IsChecked = $true
                 & $script:ClickActions[$ui.BtnTenantSchedule]
                 Test-Smoke 'schedule dialog opens for the app with its values' ($ui.DlgSchedule.Visibility -eq 'Visible' -and $ui.SegSchedule.Visibility -eq 'Visible' -and $ui.SchFrom.Text -eq '12:00' -and [bool]$ui.SchMains.IsChecked -and $ui.TxtScheduleTitle.Text -like '*PuTTY*') $ui.TxtScheduleTitle.Text
@@ -691,8 +692,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             3 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'schedule applied in place through Update-IntuneChocoApp' ($app.notes -match 'version=latest;update=Startup' -and $app.uploads -eq ($s.Uploads + 1) -and $app.detection -ne $s.Detection) "$($app.notes) / $($app.uploads)"
-                $cfg = ConvertFrom-ChocoAppNotes $app.notes
+                Test-Smoke 'schedule applied in place through Update-PackTuneApp' ($app.notes -match 'version=latest;update=Startup' -and $app.uploads -eq ($s.Uploads + 1) -and $app.detection -ne $s.Detection) "$($app.notes) / $($app.uploads)"
+                $cfg = ConvertFrom-PackTuneAppNotes $app.notes
                 Test-Smoke 'new schedule reached the app' ($cfg.Schedule.IdleMinutes -eq 15 -and $cfg.Schedule.RetryMode -eq 'Every' -and $cfg.Schedule.RetryCount -eq 2 -and $cfg.Schedule.WindowFrom -eq '12:00') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
                 Test-Smoke 'new install script has the new routine' ($install -match "\`$Mode = 'Startup'")
@@ -708,7 +709,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'default schedule saved in the settings' ($saved.UpdateSchedule -match 'NoPresentation' -and (Get-ChocoScheduleDefaults).NoPresentation -and -not (Get-ChocoScheduleDefaults).OnlyOnMains) $saved.UpdateSchedule
                 Show-Page 'Settings'
                 Test-Smoke 'settings summarise the default schedule' ($ui.TxtDefaultSchedule.Text -like '*presentations*') $ui.TxtDefaultSchedule.Text
-                # Release through Publish-IntuneChocoRelease: an Available app is superseded by a new app
+                # Release through Publish-PackTuneRelease: an Available app is superseded by a new app
                 Show-Page 'Tenant'
                 $zip = @($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' })[0]
                 $ui.LstTenant.SelectedItem = $zip
@@ -837,7 +838,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:ImportApps = @(Get-InsightTenantApps -Context (New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))) -DefaultUpdateMode 'Startup' -DefaultGraceHours 48 | ForEach-Object { $_ })
                 Export-ManagedApps $file
                 $doc = Get-Content $file -Raw | ConvertFrom-Json
-                Test-Smoke 'export writes the managed apps without ids' ($doc.format -eq 'IntuneChocoDeployment.Export' -and @($doc.apps).Count -eq 1 -and (Get-Content $file -Raw) -notmatch 'i4') (Get-Content $file -Raw)
+                Test-Smoke 'export writes the managed apps without ids' ($doc.format -eq 'PackTune.Export' -and @($doc.apps).Count -eq 1 -and (Get-Content $file -Raw) -notmatch 'i4') (Get-Content $file -Raw)
                 Show-Page 'Tenant'; Show-ImportDialog
                 $ui.RbImpFile.IsChecked = $true
                 Test-Smoke 'export file source shows the file chooser' ($ui.PanelImpFile.Visibility -eq 'Visible')
@@ -1019,8 +1020,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $b = $script:BrowserCall
                 Test-Smoke 'hint taken from the current token before an embedded sign-in (grant new permissions)' ($b.LoginHint -like '*@contoso.onmicrosoft.com') $b.LoginHint
                 Test-Smoke 'known account: no account picker, no forced prompt; shared session folder' ($b.Prompt -eq 'default' -and $b.UserDataFolder -eq $script:SignInSession) "$($b.Prompt) $($b.UserDataFolder)"
-                $script:BrowserSignIn = 'Invoke-IntuneChocoBrowserSignIn'
-                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-IntuneChocoWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) '..\Start-IntuneChocoTool.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
+                $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'
+                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-PackTuneWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) '..\Start-PackTune.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
                 Disconnect-Intune
                 Disconnect-Intune
                 # The system browser as an explicit choice

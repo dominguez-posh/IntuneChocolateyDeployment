@@ -18,7 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 # $PSScriptRoot is empty in parameter defaults on Windows PowerShell 5.1
 if (-not $Output) { $Output = Join-Path (Split-Path $PSScriptRoot -Parent) 'docs\screenshots\demo.webp' }
-$frames = Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoShowcaseFrames'
+$frames = Join-Path ([IO.Path]::GetTempPath()) 'PackTuneShowcaseFrames'
 if (Test-Path $frames) { Remove-Item $frames -Recurse -Force }
 # Raw mode: pointer, click ring and captions are not drawn into the frames, the compositor adds them
 $env:INTUNECHOCO_DEMO_RAW = '1'
