@@ -1,0 +1,20 @@
+{
+  "PROJECT": "IntuneChocoDeployment",
+  "PREFIX": "intunechocodeployment",
+  "REPO": "dominguez-posh/IntuneChocolateyDeployment",
+  "CLONE": "C:\\git\\IntuneChocolateyDeployment",
+  "WT": "C:\\git\\IntuneChocolateyDeployment",
+  "REPORT_LANGUAGE": "German",
+  "NAME_BUG_FEATURE_MANAGER": "Anna Bauer",
+  "NAME_BUGFIX_DEVELOPER": "Ben Keller",
+  "NAME_FEATURE_DEVELOPER": "Carla Vogt",
+  "NAME_WEBSITE_MANAGER": "David Lenz",
+  "NAME_DESIGN_MANAGER": "Eva Roth",
+  "NAME_SECURITY_REVIEWER": "Finn Maier",
+  "NAME_QUALITY_MANAGER": "Gina Hartmann",
+  "NAME_SMOKE_TESTER": "Hans Brandt",
+  "NAME_RELEASE_MANAGER": "Ida Sommer",
+  "NAME_DOCS_SUPPORT": "Jan Winter",
+  "NAME_GITHUB_KEEPER": "Kira Lang",
+  "CTO": "IntuneChocoDeployment CTO"
+}
