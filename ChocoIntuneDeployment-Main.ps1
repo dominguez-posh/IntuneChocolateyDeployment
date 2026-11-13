@@ -34,8 +34,6 @@ $script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManag
 # Added to the app registration and its consent for the install status and device views (Modules\TenantInsight.psm1).
 # Sign-ins request them with Get-InsightScopeSet once the consent exists (Test-InsightReadiness shows what is missing).
 $script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All")
-# Only with -IncludeDiagnostics: "Collect diagnostics" through Graph (can change devices, so not part of the default)
-$script:GraphDiagnosticsScopes = @("DeviceManagementManagedDevices.ReadWrite.All")
 
 $script:DefaultSettings = [ordered]@{
     TenantID              = ""
@@ -404,9 +402,7 @@ function New-IntuneChocoAppRegistration {
         [scriptblock]$UrlHandler,
         [scriptblock]$ShouldCancel,
         # Graph endpoint (tests point it to a stand-in)
-        [string]$GraphUrl = "https://graph.microsoft.com",
-        # Also request the permission to collect device diagnostics
-        [switch]$IncludeDiagnostics
+        [string]$GraphUrl = "https://graph.microsoft.com"
     )
     # Signs in once with Microsoft's own "Microsoft Graph Command Line Tools" app (the one Connect-MgGraph uses) to
     # create the app registration this tool signs in with, and grants the admin consent for it. Needs an account that
@@ -445,7 +441,6 @@ function New-IntuneChocoAppRegistration {
     if (-not $GraphSp) { throw "Microsoft Graph was not found in the tenant." }
     $ScopeNames = @($script:GraphScopeString -split " " | Where-Object { $_ -like "https://graph.microsoft.com/*" } | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' })
     $ScopeNames += $script:GraphInsightScopes
-    if ($IncludeDiagnostics) { $ScopeNames += $script:GraphDiagnosticsScopes }
     $Access = foreach ($Name in $ScopeNames) {
         $Scope = $GraphSp.oauth2PermissionScopes | Where-Object value -eq $Name | Select-Object -First 1
         if (-not $Scope) { throw "The Graph permission $Name was not found." }

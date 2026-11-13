@@ -8,7 +8,6 @@
 #   beta  PATCH /deviceAppManagement/mobileApps/{id}                        write notes (take over)
 #   beta  GET   /deviceAppManagement/mobileApps/{id}/deviceStatuses         per device install status (not in v1.0)
 #   beta  GET/POST/PATCH /deviceManagement/deviceHealthScripts (+ /assign, /deviceRunStates)   Remediations
-#   beta  POST  /deviceManagement/managedDevices/{id}/createDeviceLogCollectionRequest        diagnostics
 #   v1.0  GET   /oauth2PermissionGrants                                      consent check (admin sign-in)
 
 # Where the device scripts write the last result of one app (feature/schedule). One place to align later.
@@ -28,7 +27,6 @@ $script:FunctionScopes = [ordered]@{
     'Get-InsightStatusScriptState'   = @('DeviceManagementConfiguration.Read.All')
     'Set-InsightStatusScript'        = @('DeviceManagementConfiguration.ReadWrite.All')
     'Get-InsightDeviceRunStates'     = @('DeviceManagementConfiguration.Read.All', 'DeviceManagementManagedDevices.Read.All')
-    'Request-InsightDeviceLogs'      = @('DeviceManagementManagedDevices.ReadWrite.All')
 }
 
 function Set-TenantInsightHooks {
@@ -100,11 +98,8 @@ function Get-InsightRequiredScopes {
 }
 
 function Get-InsightScopeSet {
-    <# The scopes the tool's app registration should hold for insight: Read = reading, Diagnostics = log collection. #>
-    param([switch]$IncludeDiagnostics)
-    $Set = @('DeviceManagementManagedDevices.Read.All')
-    if ($IncludeDiagnostics) { $Set += 'DeviceManagementManagedDevices.ReadWrite.All' }
-    return $Set
+    <# The scopes the tool's app registration should hold for insight (reading only). #>
+    return @('DeviceManagementManagedDevices.Read.All')
 }
 
 function Get-InsightTokenScopes([string]$AccessToken) {
@@ -576,40 +571,23 @@ function Merge-InsightStatus {
 
 # ---------------------------------------------------------------- WP4: diagnostics
 
-function Request-InsightDeviceLogs {
+function Get-InsightDiagnosticsInfo {
     <#
-        Collect diagnostics for one device and extract our IntuneChocoDeployment-*.log files from the zip.
-        Beta: POST /deviceManagement/managedDevices/{id}/createDeviceLogCollectionRequest (scope
-        DeviceManagementManagedDevices.ReadWrite.All), status via logCollectionRequests/{id}, download via
-        createDownloadUrl. LIMIT: Microsoft Learn ("Device Action: Collect Diagnostics") states "Diagnostics can't be
-        collected or downloaded by calling Microsoft Graph directly. Use the Intune admin center", so this is best
-        effort: a refusal returns Supported = $false with the reason, and the UI should point to the admin center
-        (Devices > device > Collect diagnostics > Monitor > Device diagnostics > Download). The collected set does
-        include %ProgramData%\Microsoft\IntuneManagementExtension\Logs\*.*, so the files are in the zip.
+        Collect diagnostics cannot be done through Microsoft Graph (Microsoft Learn, "Device Action: Collect
+        Diagnostics": "Diagnostics can't be collected or downloaded by calling Microsoft Graph directly. Use the
+        Intune admin center"). So the tool only points the user to the device page; the collected set includes
+        %ProgramData%\Microsoft\IntuneManagementExtension\Logs\*.* (same page). Expand-InsightLogs reads the zip.
     #>
-    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$ManagedDeviceId, [Parameter(Mandatory)][string]$OutDir,
-        [int]$TimeoutMinutes = 30, [int]$PollSeconds = 30)
-    $Base = "/beta/deviceManagement/managedDevices/$ManagedDeviceId"
-    try {
-        $Request = Invoke-InsightGraph $Context POST "$Base/createDeviceLogCollectionRequest" @{ templateType = @{ '@odata.type' = 'microsoft.graph.deviceLogCollectionRequest'; templateType = 'predefined' } }
-        $RequestId = if ($Request.value.id) { $Request.value.id } else { $Request.id }
-        $Deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-        do {
-            $Status = Invoke-InsightGraph $Context GET "$Base/logCollectionRequests/$RequestId"
-            if ($Status.status -notin 'completed', 'failed') { Start-Sleep -Seconds $PollSeconds }
-        } while ($Status.status -notin 'completed', 'failed' -and (Get-Date) -lt $Deadline)
-        if ($Status.status -ne 'completed') { return [pscustomobject]@{ Supported = $true; Files = @(); Message = "collection ended with status '$($Status.status)'" } }
-        $Url = (Invoke-InsightGraph $Context POST "$Base/logCollectionRequests/$RequestId/createDownloadUrl").value
+    param([Parameter(Mandatory)][string]$ManagedDeviceId, [string]$Package)
+    $Log = if ($Package) { "IntuneChocoDeployment-$($Package -replace '[^A-Za-z0-9._-]', '_').log" } else { 'IntuneChocoDeployment-<package>.log' }
+    [pscustomobject]@{
+        Url  = "https://intune.microsoft.com/#view/Microsoft_Intune_Devices/DeviceSettingsMenuBlade/~/overview/mdmDeviceId/$ManagedDeviceId"
+        Hint = "Open the device, choose Collect diagnostics, then Monitor > Device diagnostics > Download. Our log is $Log in the folder IntuneManagementExtension\Logs of the package."
     }
-    catch { return [pscustomobject]@{ Supported = $false; Files = @(); Message = "Graph refused the log collection: $($_.Exception.Message). Collect it in the Intune admin center." } }
-    $null = New-Item -ItemType Directory -Path $OutDir -Force
-    $Zip = Join-Path $OutDir 'diagnostics.zip'
-    & $Context.Download ([string]$Url) $Zip
-    [pscustomobject]@{ Supported = $true; Files = @(Expand-InsightLogs -ZipPath $Zip -OutDir $OutDir); Message = 'done' }
 }
 
 function Expand-InsightLogs {
-    <# Extracts only IntuneChocoDeployment-*.log from a diagnostics zip (any folder level, written flat by file name). #>
+    <# For a downloaded diagnostics zip: extracts IntuneChocoDeployment-*.log (any folder level, flat by file name) and returns the paths. #>
     param([Parameter(Mandatory)][string]$ZipPath, [Parameter(Mandatory)][string]$OutDir)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $null = New-Item -ItemType Directory -Path $OutDir -Force
@@ -630,4 +608,4 @@ Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, I
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
 Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
 Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
-Set-InsightStatusScript, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Request-InsightDeviceLogs, Expand-InsightLogs
+Set-InsightStatusScript, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs

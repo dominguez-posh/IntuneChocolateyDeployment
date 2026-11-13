@@ -136,20 +136,15 @@ $deny = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b) throw 'Gr
 $degraded = Set-InsightStatusScript -Context $deny
 Test-Check 'no licence: degrades without throwing' (-not $degraded.Created -and $degraded.Message -like '*not available*')
 
-# ---- log collection: unsupported refusal and zip extraction
-$refuse = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b) throw 'Graph POST failed (400): not supported' }
-$logs = Request-InsightDeviceLogs -Context $refuse -ManagedDeviceId 'm1' -OutDir (Join-Path $temp 'logs')
-Test-Check 'diagnostics refused: reported, not thrown' (-not $logs.Supported -and $logs.Message -like '*admin center*')
+# ---- diagnostics: admin center pointer and zip extraction
+$info = Get-InsightDiagnosticsInfo -ManagedDeviceId 'm1' -Package 'git'
+Test-Check 'diagnostics: device page url and hint' ($info.Url -like 'https://intune.microsoft.com/*m1' -and $info.Hint -like '*IntuneChocoDeployment-git.log*' -and $info.Hint -like '*Collect diagnostics*')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipSrc = Join-Path $temp 'zipsrc'; New-Item -ItemType Directory -Path "$zipSrc\IME" -Force | Out-Null
 'a' | Set-Content "$zipSrc\IME\IntuneChocoDeployment-git.log"; 'b' | Set-Content "$zipSrc\IME\IntuneManagementExtension.log"
 $zip = Join-Path $temp 'diag.zip'; [IO.Compression.ZipFile]::CreateFromDirectory($zipSrc, $zip)
 $files = @(Expand-InsightLogs -ZipPath $zip -OutDir (Join-Path $temp 'ex'))
 Test-Check 'zip: only our logs extracted' ($files.Count -eq 1 -and $files[0] -like '*IntuneChocoDeployment-git.log')
-$flow = New-InsightGraphContext -Name fake -Download { param($u, $o) Copy-Item $zip $o } -Invoke { param($m, $p, $b)
-    if ($p -like '*createDeviceLogCollectionRequest') { @{ value = @{ id = 'r1' } } } elseif ($p -like '*createDownloadUrl') { @{ value = 'https://download.example/x.zip' } } else { @{ id = 'r1'; status = 'completed' } } }
-$done = Request-InsightDeviceLogs -Context $flow -ManagedDeviceId 'm1' -OutDir (Join-Path $temp 'logs2') -PollSeconds 0
-Test-Check 'diagnostics flow: request, poll, download, extract' ($done.Supported -and @($done.Files).Count -eq 1)
 
 # ---- permissions
 $ready = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All'))
