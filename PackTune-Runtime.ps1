@@ -200,7 +200,7 @@ catch {
 }
 # The folder of the earlier name (%ProgramFiles%\IntuneChocoDeployment\Runtime) is not needed any more
 Remove-OldToolFolder "Runtime"
-Remove-OldToolFolder "WingetRuntime"
+Remove-OldToolFolder "Winget\Runtime"
 # The marker of this script version for the detection rule
 Write-ProtectedFile (Join-Path $RuntimeRoot "ready.txt") $Revision
 Write-DeviceLog "PackTune Runtime ready: choco $Choco, winget $Winget"

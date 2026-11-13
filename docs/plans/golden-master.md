@@ -47,7 +47,7 @@ Start-PackTune.ps1 -GoldenMaster      (own WPF window, elevated)
   GoldenMaster/templates/*.html|md            (export templates)
 ```
 
-Reuse from the existing tool: catalog loading and winget/Chocolatey helpers (`PackTune-Winget.ps1`: `Get-Winget`, `Invoke-Winget`, `Get-PendingUpdate`, `Invoke-Upgrade`; Sources/Runtime scripts), the `Global\IntuneChocoDeployment` mutex around every choco/winget call, Theme.xaml. Shared code that is device-script-like stays plain ASCII, PS 5.1.
+Reuse from the existing tool: catalog loading and winget/Chocolatey helpers (`PackTune-Winget.ps1`: `Get-Winget`, `Invoke-Winget`, `Get-PendingUpdate`, `Invoke-Upgrade`; Sources/Runtime scripts), the `Global\PackTune` mutex around every choco/winget call, Theme.xaml. Shared code that is device-script-like stays plain ASCII, PS 5.1.
 
 Step contract (all steps):
 
@@ -146,7 +146,7 @@ UX rules: every destructive or hard-to-reverse step has an explanation and a con
 - Snapshot advice: the tool detects a hypervisor (WMI `Win32_ComputerSystem.Model`/`Manufacturer`, Hyper-V integration services) and shows "Create a checkpoint/snapshot now" with the exact steps for Hyper-V, VMware, Azure (managed disk snapshot, Azure Compute Gallery image versions as the proper versioning). A checkbox "I created a snapshot" is recorded in the state (not enforced). If Hyper-V Integration Services is present it may offer `Checkpoint-VM` only when running remote (phase 5).
 - Undo for steps that have it, based on recorded before values. Not-reversible steps (ResetBase, sysprep, AppX removal for all users) are flagged.
 - Safe-by-default: dry-run first, presets show what they contain, no step runs without a visible selection, "Run all" requires typing the image name.
-- Guard rails: refuse on a domain controller, refuse when not a VM unless "Allow physical machine" is ticked, refuse sysprep when the machine is domain joined and the user did not confirm, warn when running on the machine that hosts the Intune mode data (`%LOCALAPPDATA%\IntuneChocoDeployment` of an interactive admin).
+- Guard rails: refuse on a domain controller, refuse when not a VM unless "Allow physical machine" is ticked, refuse sysprep when the machine is domain joined and the user did not confirm, warn when running on the machine that hosts the Intune mode data (`%LOCALAPPDATA%\PackTune` of an interactive admin).
 - Logging: transcript plus structured per-step log in the run record, rotated, no secrets, ASCII.
 
 ## 10. Checks and tests (without touching this machine)

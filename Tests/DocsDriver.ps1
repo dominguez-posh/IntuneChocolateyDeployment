@@ -1,8 +1,8 @@
-# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Capture-Docs.ps1).
+# Dot-sourced by Start-PackTune.ps1 when PACKTUNE_SMOKE points here (see Tests\Capture-Docs.ps1).
 # Fills the fake tenant with a few apps (demo data only) and renders the README screenshots of every page and
-# dialog into INTUNECHOCO_SMOKE_OUT: start, apps, deploy, tenant, schedule, status, import, activity, settings.
+# dialog into PACKTUNE_SMOKE_OUT: start, apps, deploy, tenant, schedule, status, import, activity, settings.
 
-$script:DocsOut = $env:INTUNECHOCO_SMOKE_OUT
+$script:DocsOut = $env:PACKTUNE_SMOKE_OUT
 $window.WindowStartupLocation = 'Manual'
 $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
@@ -11,7 +11,7 @@ $window.ShowInTaskbar = $false
 # The demo environment has no WebView2 runtime: keep its "sign-in window not available" warning out of the pictures
 $script:RealShowToast = ${function:Show-Toast}
 function Show-Toast([string]$Text, [string]$Kind = 'info') { if ($Kind -eq 'warn' -and $Text -like 'The sign-in window*') { return }; & $script:RealShowToast $Text $Kind }
-$script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
+$script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'InsightFake.txt') -Raw
 $script:DocsLog = New-Object System.Collections.ArrayList
 
 function Save-DocShot([string]$Name) {
@@ -37,7 +37,7 @@ $script:DocSteps = [System.Collections.ArrayList]@(
         param($s)
         $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
         $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
-        $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
+        $script:SignInTest = @{ Authority = $env:PACKTUNE_SMOKE_AUTHORITY; GraphUrl = $env:PACKTUNE_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DocsClient = New-Object System.Net.WebClient; [void]$global:DocsClient.DownloadStringTaskAsync([uri]$Url)' }
         Show-Page 'Start'; Start-CatalogPrefetch
         & $script:ClickActions[$ui.BtnSetupAll]

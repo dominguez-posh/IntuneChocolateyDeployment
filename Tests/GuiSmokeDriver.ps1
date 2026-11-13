@@ -1,9 +1,9 @@
-# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE is set (see Tests\Invoke-GuiSmoke.ps1).
+# Dot-sourced by Start-PackTune.ps1 when PACKTUNE_SMOKE is set (see Tests\Invoke-GuiSmoke.ps1).
 # Puts the window off-screen and walks through the steps below on the UI thread; each step returns $true when it is
 # done (or $false to be asked again on the next tick), so background tasks can finish in between.
 # Screenshots of every page and dialog land in the output folder (shot-NN-*.png).
 
-$script:SmokeOut = $env:INTUNECHOCO_SMOKE_OUT
+$script:SmokeOut = $env:PACKTUNE_SMOKE_OUT
 $script:SmokeResults = New-Object System.Collections.ArrayList
 $window.WindowStartupLocation = 'Manual'
 $window.Left = -20000; $window.Top = -20000
@@ -60,7 +60,7 @@ function Test-GeneratedScripts([string]$Folder, [string]$What) {
 }
 
 # Fake Graph for the insight functions (counts, status, status script, import): script text, run inside the task runspaces
-$script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
+$script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'InsightFake.txt') -Raw
 
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {
@@ -112,7 +112,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'sign-in can be cancelled'; Phase = 0; Do = {
         param($s)
         # A browser that never answers (the user closed the window): the sign-in must end on Cancel
-        if ($s.Phase -eq 0) { $s.Phase = 1; $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; UrlHandler = 'param($Url)' }; Connect-Intune; Test-Smoke 'WebView2 runtime missing: sign-in falls back to the browser and a toast says so' ($script:LastSignInPath -eq 'browser' -and @($script:Toasts | Where-Object { $_.Text -like '*not available*web browser*' }).Count -ge 1) $script:LastSignInPath; return $false }
+        if ($s.Phase -eq 0) { $s.Phase = 1; $script:SignInTest = @{ Authority = $env:PACKTUNE_SMOKE_AUTHORITY; UrlHandler = 'param($Url)' }; Connect-Intune; Test-Smoke 'WebView2 runtime missing: sign-in falls back to the browser and a toast says so' ($script:LastSignInPath -eq 'browser' -and @($script:Toasts | Where-Object { $_.Text -like '*not available*web browser*' }).Count -ge 1) $script:LastSignInPath; return $false }
         if ($s.Phase -eq 1) {
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'connect' -and $_.Job.Status -eq 'running' }).Count) { return $false }
             $s.Phase = 2
@@ -141,7 +141,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Save-SmokeShot '01-start'
             # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
             $script:SignInTest.UrlHandler = 'param($Url) $Shared.UrlHit = $true; $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
-            $script:SignInTest.GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
+            $script:SignInTest.GraphUrl = $env:PACKTUNE_SMOKE_AUTHORITY
             & $script:ClickActions[$ui.BtnSetupAll]
             return $false
         }
@@ -899,7 +899,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             0 {
                 Show-Page 'Settings'
                 Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
-                $ui.TxtSandboxStudioPath.Text = Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'Fakes\MsixSandboxStudio'
+                $ui.TxtSandboxStudioPath.Text = Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'Fakes\MsixSandboxStudio'
                 Save-Settings
                 Test-Smoke 'sandbox studio found' ((Find-SandboxStudio) -like '*Fakes*MsixSandboxStudio.psd1') (Find-SandboxStudio)
                 Test-Smoke 'settings show where the studio is' ($ui.TxtSandboxStudioState.Text -like 'Found:*Fakes*') $ui.TxtSandboxStudioState.Text
@@ -1021,7 +1021,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'hint taken from the current token before an embedded sign-in (grant new permissions)' ($b.LoginHint -like '*@contoso.onmicrosoft.com') $b.LoginHint
                 Test-Smoke 'known account: no account picker, no forced prompt; shared session folder' ($b.Prompt -eq 'default' -and $b.UserDataFolder -eq $script:SignInSession) "$($b.Prompt) $($b.UserDataFolder)"
                 $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'
-                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-PackTuneWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) '..\Start-PackTune.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
+                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-PackTuneWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
                 Disconnect-Intune
                 Disconnect-Intune
                 # The system browser as an explicit choice

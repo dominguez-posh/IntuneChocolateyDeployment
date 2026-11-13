@@ -208,12 +208,12 @@ function Update-Toasts {
 function Show-Error([string]$Message) {
     Write-UiLog $Message 'Error'
     Show-Toast $Message 'bad'
-    if ($env:INTUNECHOCO_SMOKE) { return }   # tests: no dialogs on the desktop
+    if ($env:PACKTUNE_SMOKE) { return }   # tests: no dialogs on the desktop
     [void][System.Windows.MessageBox]::Show($window, $Message, 'PackTune', 'OK', 'Error')
 }
 
 function Confirm-Action([string]$Message, [string]$Title = 'PackTune') {
-    if ($env:INTUNECHOCO_SMOKE) { return $true }
+    if ($env:PACKTUNE_SMOKE) { return $true }
     return ([System.Windows.MessageBox]::Show($window, $Message, $Title, 'YesNo', 'Question') -eq 'Yes')
 }
 
@@ -3062,7 +3062,7 @@ Add-Click $ui.BtnInstallModule { Start-ModuleInstall }
 $window.Add_Closing({
     param($s, $e)
     $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -in 'deploy', 'policy' })
-    if ($running.Count -gt 0 -and -not $env:INTUNECHOCO_SMOKE) {
+    if ($running.Count -gt 0 -and -not $env:PACKTUNE_SMOKE) {
         $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'PackTune', 'YesNo', 'Warning')
         if ($answer -ne 'Yes') { $e.Cancel = $true }
     }
@@ -3088,8 +3088,8 @@ Update-TenantRows
 $timer.Start()
 Start-CatalogPrefetch
 if (-not (Test-TaskRunning 'meta')) { Start-IconRender }   # all infos came from the cache
-# Test hook: INTUNECHOCO_SMOKE names a script that drives the window off-screen and renders every page.
-if ($env:INTUNECHOCO_SMOKE) { . $env:INTUNECHOCO_SMOKE }
+# Test hook: PACKTUNE_SMOKE names a script that drives the window off-screen and renders every page.
+if ($env:PACKTUNE_SMOKE) { . $env:PACKTUNE_SMOKE }
 $window.Show()
 [void]$window.Activate()
 [void][System.Windows.Application]::Current.Run()

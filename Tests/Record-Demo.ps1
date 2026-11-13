@@ -21,9 +21,9 @@ if (-not $Output) { $Output = Join-Path (Split-Path $PSScriptRoot -Parent) 'docs
 $frames = Join-Path ([IO.Path]::GetTempPath()) 'PackTuneShowcaseFrames'
 if (Test-Path $frames) { Remove-Item $frames -Recurse -Force }
 # Raw mode: pointer, click ring and captions are not drawn into the frames, the compositor adds them
-$env:INTUNECHOCO_DEMO_RAW = '1'
+$env:PACKTUNE_DEMO_RAW = '1'
 try { & (Join-Path $PSScriptRoot 'Invoke-GuiSmoke.ps1') -OutDir $frames -Driver (Join-Path $PSScriptRoot 'DemoDriver.ps1') }
-finally { Remove-Item Env:\INTUNECHOCO_DEMO_RAW -ErrorAction SilentlyContinue }
+finally { Remove-Item Env:\PACKTUNE_DEMO_RAW -ErrorAction SilentlyContinue }
 if (Test-Path (Join-Path $frames 'error.txt')) { throw (Get-Content (Join-Path $frames 'error.txt') -Raw) }
 $list = Get-Content (Join-Path $frames 'frames.json') -Raw | ConvertFrom-Json
 if (-not $list) { throw 'The tour wrote no frames.' }

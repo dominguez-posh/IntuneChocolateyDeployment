@@ -1,9 +1,9 @@
-# Dot-sourced by Start-PackTune.ps1 when INTUNECHOCO_SMOKE points here (see Tests\Record-Demo.ps1).
+# Dot-sourced by Start-PackTune.ps1 when PACKTUNE_SMOKE points here (see Tests\Record-Demo.ps1).
 # Plays a short tour of the tool off-screen with the fakes of the smoke test (nothing reaches a tenant) and writes
-# one PNG per frame plus frames.json (file and duration) to INTUNECHOCO_SMOKE_OUT. A pointer and step captions
+# one PNG per frame plus frames.json (file and duration) to PACKTUNE_SMOKE_OUT. A pointer and step captions
 # are drawn into the window, so the frames show what is clicked.
 
-$script:DemoOut = $env:INTUNECHOCO_SMOKE_OUT
+$script:DemoOut = $env:PACKTUNE_SMOKE_OUT
 $window.WindowStartupLocation = 'Manual'
 $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
@@ -22,7 +22,7 @@ $demoOverlay.IsHitTestVisible = $false
 [System.Windows.Controls.Panel]::SetZIndex($demoOverlay, 1000)
 [void]$demoRoot.Children.Add($demoOverlay)
 # Raw mode (Tests\Record-Demo.ps1): the compositor draws pointer, click ring and captions from frames.json
-if ($env:INTUNECHOCO_DEMO_RAW) { $demoOverlay.Opacity = 0 }
+if ($env:PACKTUNE_DEMO_RAW) { $demoOverlay.Opacity = 0 }
 $script:Focus = $null; $script:LastBounds = $null; $script:Scene = 0
 
 $demoPointer = New-Object System.Windows.Shapes.Path
@@ -125,8 +125,8 @@ $script:Tour = [System.Collections.ArrayList]@(
     @{ Do = {
         $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
         $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
-        $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
-        $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
+        $script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'InsightFake.txt') -Raw
+        $script:SignInTest = @{ Authority = $env:PACKTUNE_SMOKE_AUTHORITY; GraphUrl = $env:PACKTUNE_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DemoClient = New-Object System.Net.WebClient; [void]$global:DemoClient.DownloadStringTaskAsync([uri]$Url)' }
         Show-Page 'Start'; Start-CatalogPrefetch }; Hold = 500 }
     @{ Caption = @('1', 'Set up once: module, app registration, sign-in, dependency apps'); Hold = 2200 }
