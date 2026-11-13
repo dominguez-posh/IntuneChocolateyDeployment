@@ -149,12 +149,13 @@ Test-IntuneChocoPackage -ChocoName vlc                                          
 ```
 
 ### Updates
-Each app has its own update mode, stored in the app notes in Intune (`update=` and `grace=`):
+Each app has its own update mode, stored in the app notes in Intune (`update=`, `grace=`, and the package source and
+startup delay of the app in `source=` and `delay=`, which a later change keeps):
 
 | Mode | Behaviour on the device |
 |------|-------------------------|
-| **Off** | No automatic updates. The device gets a new version only when you release it in the tool. |
-| **Startup** | The update is installed at the next PC start (after the random delay). |
+| **Off** | No automatic updates. The device gets a new version only when you release it in the tool; a settings change alone never upgrades a **latest** app. |
+| **Startup** | The update is installed at the next PC start (after the random delay) and once a day between 10 and 15 o'clock, because with Fast Startup a shutdown is no real start. |
 | **Custom** | Checked at startup and every 4 hours. When an update is available, signed-in users get a popup and can install it right away or snooze it. After the grace period (hours or days) it is installed automatically, without waiting for a restart. |
 
 The version is either **latest** (the device follows the newest version on the feed) or **pinned** to one version.
@@ -167,17 +168,35 @@ Settings changes take effect without redeploying. The detection script compares 
 
 Apps created by older versions keep working. They count as **latest / Startup** until you change their settings.
 
+> **Available assignments:** Intune does not run the install again for apps assigned as *Available* when detection
+> fails. Changed settings and released versions therefore reach devices on their own only where the app is assigned
+> as **Required**. A mechanism for Available apps is not built yet.
+
+Only one choco or winget operation runs at a time on a device: install, update and uninstall of all apps (both
+sources) share the lock `Global\IntuneChocoDeployment` and wait up to 30 minutes for it (otherwise exit code 1618,
+which Intune retries). The Chocolatey update helpers also update Chocolatey itself, at most once a day. The check for
+a newer version asks the source for that one package (`choco search <id> --exact`) and compares versions numerically
+(`1.2.0` equals `1.2`).
+
 ### What gets deployed
 - `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and copies `update.ps1` and
   `notify.ps1` to `%ProgramData%\IntuneChocoUpdates\<package>`. It also registers the scheduled tasks under
   `\Intune-Choco-Updates\`:
   - `Update <package> on startup` (Startup and Custom modes). Each device waits a random 5 to 60 minutes after startup
-    (configurable), so many devices behind one IP don't download at the same time.
+    (configurable), so many devices behind one IP don't download at the same time. In Startup mode it also runs once a
+    day; in Custom mode it only checks (the popup and the grace period decide when the update is installed).
   - `Check <package> for updates` (Custom mode) runs every 4 hours.
   - `Notify <package> update` (Custom mode) shows the popup in the user session.
   - `Update <package> now` (Custom mode) is started by the popup. Users may start it, and it runs as SYSTEM.
 
-  Uninstall removes the tasks and the folder again.
+  The helper folders (`%ProgramData%\IntuneChocoUpdates`, `%ProgramData%\IntuneWingetDeployment`) belong to SYSTEM and
+  inherit nothing: SYSTEM and Administrators have full control, Users may only read. A folder somebody else created
+  before is removed first, because the tasks run its scripts as SYSTEM.
+
+  Uninstall runs `choco uninstall <package> --remove-dependencies` (a meta package like `vlc` takes `vlc.install` with
+  it). Only when that succeeds (0, 1605, 1614, 1641, 3010) are the tasks and the folder removed; otherwise the error goes
+  to Intune and everything stays as it is.
+- If the tasks cannot be registered, `install.ps1` exits with 1 and writes no policy marker, so Intune tries again.
 - With a package source configured, install and update task use `choco --source <your feed>`.
 - The detection script checks `%ProgramData%\chocolatey\lib\<package>` and the policy fingerprint.
 - The app gets a dependency to the Chocolatey app (auto install), which is deployed once per tenant.
@@ -192,15 +211,18 @@ New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignme
 ```
 - Package infos and the search come from Microsoft's `Microsoft.WinGet.Client` module (installed by
   `Install-IntunechocoComponents`) and the manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs).
-- `install.ps1` runs `winget install --id <id> --exact --scope machine --silent` as SYSTEM (falling back to no scope
-  for packages without a machine installer). winget is not in SYSTEM's path, so the script takes the newest App
+- `install.ps1` runs `winget install --id <id> --exact --scope machine --silent` as SYSTEM. Packages without a
+  machine-scope installer fail with a clear message (winget exit code -1978335216): installed without scope as SYSTEM,
+  they would land in the profile of SYSTEM instead of for all users. winget is not in SYSTEM's path, so the script takes the newest App
   Installer from `WindowsApps` and waits up to ten minutes when it is not registered yet (right after Autopilot).
 - Update modes, grace period, pinned versions and the sandbox test work as for Chocolatey apps (see [Updates](#updates));
   the tasks are under `\Intune-Winget-Updates\`, the helpers in `%ProgramData%\IntuneWingetDeployment\<id>`. winget cannot
   go back to an older version, so a pinned winget app only moves forward. Apps deployed before keep working and count
   as **latest / Startup** until you change their settings.
-- Uninstall runs `winget uninstall` and removes the tasks. Logs: `%ProgramData%\IntuneWingetDeployment\Logs`.
-- The detection script runs `winget list --id <id> --exact` and checks the policy fingerprint. Requirement: Windows 10
+- Uninstall runs `winget uninstall --id <id> --exact` (without `--source`, winget often cannot map the installed
+  product to the source) and removes tasks and folder only when it succeeded or the package was not installed. Logs: `%ProgramData%\IntuneWingetDeployment\Logs`.
+- The detection script relies on the exit code of `winget list --id <id> --exact --source winget` (the table cuts long
+  ids) and checks the policy fingerprint. Requirement: Windows 10
   1809 or newer.
 - No dependency app: winget is part of Windows. winget downloads from the vendors' sites, so there is no repository
   rate limit. Packages rarely have an icon in winget; catalog apps use the icon of their Chocolatey package.

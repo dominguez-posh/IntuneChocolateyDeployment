@@ -1426,7 +1426,7 @@ Add-Click $ui.BtnTenantApply {
     if (-not $app) { return }
     $policy = Read-PolicyControls 'Tenant'
     $version = if ($ui.CmbTenantVersion.SelectedIndex -le 0) { 'latest' } else { [string]$ui.CmbTenantVersion.SelectedItem }
-    $text = "Change '$($app.DisplayName)' in Intune?`n`nVersion: $(if ($version -eq 'latest') { 'always the latest' } else { $version })`nAutomatic updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)`n`nThe package is rebuilt and uploaded. Devices no longer detect the app as current and run its install script again, which applies these settings."
+    $text = "Change '$($app.DisplayName)' in Intune?`n`nVersion: $(if ($version -eq 'latest') { 'always the latest' } else { $version })`nAutomatic updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)`n`nThe package is rebuilt and uploaded. Devices no longer detect the app as current and run its install script again, which applies these settings.`n`nOnly devices where the app is assigned as Required pick this up on their own; for Available apps Intune does not run the install again."
     if (-not (Confirm-Action $text 'Apply update settings')) { return }
     Start-AppPolicyUpdate -App $app -Version $version -Policy $policy
 }
@@ -1434,7 +1434,7 @@ Add-Click $ui.BtnTenantRelease {
     $app = $ui.DgTenant.SelectedItem
     if (-not $app -or -not $app.UpdateAvailable) { return }
     $how = Format-UpdateText $app.UpdateMode $app.GraceHours
-    if (-not (Confirm-Action "Release version $($app.LatestVersion) of '$($app.DisplayName)'?`n`nIt goes from $($app.Version) to $($app.LatestVersion). Devices install it according to the update mode of the app: $how." 'Release update')) { return }
+    if (-not (Confirm-Action "Release version $($app.LatestVersion) of '$($app.DisplayName)'?`n`nIt goes from $($app.Version) to $($app.LatestVersion). Devices install it according to the update mode of the app: $how.`n`nOnly devices where the app is assigned as Required pick this up on their own; for Available apps Intune does not run the install again." 'Release update')) { return }
     Start-AppPolicyUpdate -App $app -Version $app.LatestVersion -Policy @{ UpdateMode = $app.UpdateMode; GraceHours = $app.GraceHours }
 }
 Add-Click $ui.BtnTenantTest {

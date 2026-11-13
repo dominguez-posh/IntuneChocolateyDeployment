@@ -320,6 +320,8 @@
                             </StackPanel>
                         </Grid>
                         <TextBlock x:Name="TxtTenantUpdateHelp" Style="{StaticResource Hint}" Margin="0,8,0,0"/>
+                        <TextBlock x:Name="TxtTenantAvailableNote" Style="{StaticResource Hint}" Margin="0,4,0,0"
+                                   Text="Changed settings and released versions reach devices on their own only where the app is assigned as Required. For Available apps Intune does not run the install again."/>
                         <WrapPanel Margin="0,8,0,0">
                             <Button x:Name="BtnTenantApply" Tag="&#xE74E;" Content="Apply in Intune" Margin="0,4,4,4"
                                     ToolTip="Rebuilds the package with these settings and changes the app in Intune. Devices then apply them on their own."/>
