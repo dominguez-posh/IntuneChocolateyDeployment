@@ -316,7 +316,7 @@ function Invoke-IntuneChocoBrowserSignIn {
         [string]$Hint,
         # Profile folder kept after the window closes (shared session) and the prompt: login (always ask) or select_account
         [string]$UserDataFolder,
-        [ValidateSet("login", "select_account", "none")][string]$Prompt = "login",
+        [ValidateSet("login", "select_account", "none", "default")][string]$Prompt = "login",
         [System.Windows.Window]$Owner,
         # Tests: gets ($win, $wv) before the window opens (e.g. to render it off-screen)
         [scriptblock]$Configure
@@ -342,6 +342,7 @@ function Invoke-IntuneChocoBrowserSignIn {
         prompt                = $Prompt
     }
     if ($LoginHint) { $query.login_hint = $LoginHint }
+    if ($Prompt -eq 'default') { $query.Remove('prompt') }   # no prompt: an existing session goes straight on (consent page)
     $url = "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/authorize?" + (($query.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, [Uri]::EscapeDataString($_.Value) }) -join '&')
 
     # Window in the Windows 11 look of the tool: hint on top, browser in the middle, Cancel below; modal to the owner
@@ -496,6 +497,7 @@ function Connect-IntuneChocoWithKeevault {
     param(
         [Parameter(Mandatory)][string]$TenantID,
         [Parameter(Mandatory)][string]$ClientID,
+        [string]$UserDataFolder,
         [Parameter(Mandatory)][string]$CacheFolder,
         [string[]]$Scopes,
         [System.Windows.Window]$Owner,
@@ -555,7 +557,7 @@ function Connect-IntuneChocoWithKeevault {
         }
         $hint = if ($passkey) { "Keevault signs in $($login.username) with the passkey; confirm it in Keevault. You can type yourself or choose another sign-in method at any time." }
         else { "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time." }
-        $token = Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -Scopes $Scopes -LoginHint $login.username `
+        $token = Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt default -Scopes $Scopes -LoginHint $login.username `
             -Fill $fill -HasOtp:([bool]$login.totp) -Passkey $passkey -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
     }
     finally {

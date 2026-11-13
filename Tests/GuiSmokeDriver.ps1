@@ -1010,6 +1010,18 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Connect-Intune
                 Test-Smoke 'normal sign-in after the setup gets the setup account as login hint (shared session)' ($script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][3] -eq 'admin@contoso.onmicrosoft.com') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'one sign-in profile folder per run' ($script:SignInSession -like '*PackTuneSignIn-*')
+                # Hint from the current token (signed in by browser or Keevault), session folder and prompt of the real call
+                Connect-Intune   # signed in with the fake embedded window (account admin@contoso)
+                $script:EmbeddedSignInOverride = $null; $script:SignInHint = ''
+                $script:BrowserCall = $null
+                $script:BrowserSignIn = { param($TenantID, $ClientID, $Scopes, $CacheFolder, $Owner, $Title, $Hint, $UserDataFolder, $LoginHint, $Prompt) $script:BrowserCall = @{ LoginHint = $LoginHint; Prompt = $Prompt; UserDataFolder = $UserDataFolder }; New-FakeToken 'Hinted Admin' }
+                try { [void](Get-EmbeddedToken -TenantID 'contoso.onmicrosoft.com' -ClientID 'x') } catch { Test-Smoke "dbg $($_.Exception.Message) avail=$($script:EmbeddedAvailableOverride) signed=$(Test-SignedIn)" $false }
+                $b = $script:BrowserCall
+                Test-Smoke 'hint taken from the current token before an embedded sign-in (grant new permissions)' ($b.LoginHint -like '*@contoso.onmicrosoft.com') $b.LoginHint
+                Test-Smoke 'known account: no account picker, no forced prompt; shared session folder' ($b.Prompt -eq 'default' -and $b.UserDataFolder -eq $script:SignInSession) "$($b.Prompt) $($b.UserDataFolder)"
+                $script:BrowserSignIn = 'Invoke-IntuneChocoBrowserSignIn'
+                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-IntuneChocoWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) '..\Start-IntuneChocoTool.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
+                Disconnect-Intune
                 Disconnect-Intune
                 # The system browser as an explicit choice
                 $script:Shared.UrlHit = $false

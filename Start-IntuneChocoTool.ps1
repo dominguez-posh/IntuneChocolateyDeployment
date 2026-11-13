@@ -2718,13 +2718,20 @@ function Test-EmbeddedSignIn {
 # One WebView2 profile for the whole run: the setup sign-in and the normal sign-in share the Microsoft session
 $script:SignInSession = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
 $script:SignInHint = ''
+$script:BrowserSignIn = 'Invoke-IntuneChocoBrowserSignIn'   # tests replace it
+function Set-SignInHintFromToken {
+    # Signed in already (browser, Keevault or this window): that account is the login hint, so a second sign-in lands on its session
+    if ($script:SignInHint -or -not (Test-SignedIn)) { return }
+    try { $a = (Get-IntuneChocoIdentity).Account; if ($a) { $script:SignInHint = [string]$a } } catch { }
+}
 function Invoke-EmbeddedSignIn {
     # Sign-in window, modal to the main window (its timer keeps the background tasks running). Returns the token response.
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint)
+    Set-SignInHintFromToken
     if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes $script:SignInHint) }
     $params = @{ TenantID = $TenantID; ClientID = $ClientID; Scopes = $Scopes; CacheFolder = (Join-Path $script:WorkRoot 'WebView2'); Owner = $window; Title = 'Sign in to Microsoft'; Hint = $Hint; UserDataFolder = $script:SignInSession }
-    if ($script:SignInHint) { $params.LoginHint = $script:SignInHint; $params.Prompt = 'select_account' }
-    Invoke-IntuneChocoBrowserSignIn @params
+    if ($script:SignInHint) { $params.LoginHint = $script:SignInHint; $params.Prompt = 'default' }
+    & $script:BrowserSignIn @params
 }
 
 function Test-EmbeddedStartFailure($ErrorRecord) { $ErrorRecord.Exception.Message -like 'The embedded browser could not start*' }
@@ -2769,7 +2776,7 @@ function Connect-Intune {
         $window.Cursor = 'Wait'
         try {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
-            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
+            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
             Set-IntuneChocoToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
             if ($token.SignInTenantID -ne $tenant) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-IntuneChocoAuthState
