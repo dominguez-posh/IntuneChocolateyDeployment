@@ -166,6 +166,28 @@ Test-Check 'runtime install: mutex, SIDs, protected folders, 64-bit relaunch, pr
 Test-Check 'runtime detection: winget works and marker revision only, no time limit' ($scripts.Detection -match 'Get-Winget' -and $scripts.Detection -match 'ready\.txt' -and $scripts.Detection -match '--version' -and $scripts.Detection -notmatch 'TotalHours|AddHours|UtcNow|Get-Date')
 Test-Check 'runtime install registers the daily update task for SYSTEM and copies update.ps1' ($scripts.Install -match 'Register-ScheduledTask' -and $scripts.Install -match 'S-1-5-18' -and $scripts.Install -match '-Daily' -and $scripts.Install -match 'Intune-Winget-Updates' -and $scripts.Install -match 'Copy-Item[^\n]*update\.ps1' -and $scripts.Install -match 'Write-ProtectedFile \(Join-Path \$RuntimeRoot "ready\.txt"\)' -and $scripts.Install -notmatch 'upgrade --id')
 Test-Check 'runtime update script: mutex, protected folder check, device log, upgrade once per 20 hours' ($scripts.Update -match 'Enter-DeploymentLock' -and $scripts.Update -match 'Exit-DeploymentLock' -and $scripts.Update -match 'Test-ForeignItem' -and $scripts.Update -match 'Write-DeviceLog' -and $scripts.Update -match '\$LogId = "_winget-runtime"' -and $scripts.Update -match 'upgrade --id Microsoft.AppInstaller' -and $scripts.Update -match 'TotalHours -lt 20' -and $scripts.Update -match 'Global.IntuneChocoDeployment"')
+# security review: folders under %ProgramFiles%, signature pin, no winget from PATH (comments removed before matching)
+function Get-CodeOnly([string]$Text) {
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    foreach ($t in @($tokens | Where-Object { $_.Kind -eq 'Comment' } | Sort-Object { $_.Extent.StartOffset } -Descending)) { $Text = $Text.Remove($t.Extent.StartOffset, $t.Extent.EndOffset - $t.Extent.StartOffset) }
+    $Text
+}
+$rtInstall = Get-CodeOnly $scripts.Install; $rtDetection = Get-CodeOnly $scripts.Detection; $rtUpdate = Get-CodeOnly $scripts.Update
+Test-Check 'runtime: folders under %ProgramFiles%\IntuneChocoDeployment\Winget, nothing under %ProgramData% of the tool' ($rtInstall -match '\$Root = Join-Path \$ToolRoot "Winget"' -and $rtInstall -match 'Protect-Folder \$ToolRoot' -and $rtDetection -match '"IntuneChocoDeployment\\Winget\\Runtime\\ready\.txt"' -and $rtDetection -match 'ProgramW6432' -and ($rtInstall + $rtDetection + $rtUpdate) -notmatch 'IntuneWingetDeployment|IntuneChocoUpdates')
+Test-Check 'runtime: App Installer bundle and dependencies must carry a valid Microsoft signature before provisioning' ($rtInstall -match 'Get-AuthenticodeSignature -LiteralPath \$Path' -and $rtInstall.Contains('"CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"') -and $rtInstall -match '\[string\]\$Signature\.Status -ne "Valid" -or \$Signer -ne \$MicrosoftPublisher' -and $rtInstall.IndexOf('Assert-MicrosoftSigned $File') -gt 0 -and $rtInstall.IndexOf('Assert-MicrosoftSigned $File') -lt $rtInstall.IndexOf('Add-AppxProvisionedPackage -Online -PackagePath $Bundle -DependencyPackagePath'))
+Test-Check 'runtime: winget only from WindowsApps, never from PATH' (($rtInstall + $rtDetection + $rtUpdate) -notmatch 'Get-Command winget' -and $rtDetection -match 'WindowsApps')
+Test-Check 'runtime: revision raised for the new folders' ([int]$script:WingetRuntimeRevision -ge 3 -and $scripts.Detection -match "\`$Revision = '$($script:WingetRuntimeRevision)'")
+# The signature check itself, on a signed and an unsigned file of this machine (read-only)
+$sigAst = [System.Management.Automation.Language.Parser]::ParseInput($scripts.Install, [ref]$null, [ref]$null)
+$sigFn = $sigAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-MicrosoftSigned' }, $true)
+$MicrosoftPublisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+. ([scriptblock]::Create($sigFn.Extent.Text))
+$unsigned = Join-Path $work 'fake.msixbundle'; 'not a package' | Set-Content $unsigned
+Test-Check 'runtime: an unsigned download is refused' ($(try { Assert-MicrosoftSigned $unsigned; $false } catch { $_.Exception.Message -like '*not validly signed by Microsoft*' }))
+# Validly signed, but by "Microsoft Windows" (catalog), not by the App Installer publisher
+Test-Check 'runtime: a valid signature of another Microsoft publisher is refused' ($(try { Assert-MicrosoftSigned "$env:SystemRoot\System32\notepad.exe"; $false } catch { $_.Exception.Message -like '*status Valid*' -or $_.Exception.Message -like '*not validly signed*' }))
+
 $runtimeId = Get-WingetRuntimeWin32ID
 Test-Check 'runtime app found again, not created twice' ($runtimeId -eq $runtime[0].id -and @(Get-Store | Where-Object { $_.notes -like '*WingetRuntimeApp*' }).Count -eq 1)
 # a winget app from before the runtime existed
@@ -207,9 +229,10 @@ ConvertTo-Json -InputObject @($stored) -Depth 6 | Set-Content (Join-Path $env:LO
 Test-Check 'Required plus Available: in place' ((Get-IntuneChocoReleasePath -AppId $reqId) -eq 'InPlace')
 # a failing release leaves nothing behind
 $before = (Get-Store).Count
-$failed = $false
-try { Publish-IntuneChocoRelease -AppId $availId -Version '9.9.9' | Out-Null } catch { $failed = $true }
-Test-Check 'unknown version: error, no new app' ($failed -and (Get-Store).Count -eq $before)
+# (not $failed: variable names ignore case, that would be the failure counter $script:Failed)
+$releaseThrew = $false
+try { Publish-IntuneChocoRelease -AppId $availId -Version '9.9.9' | Out-Null } catch { $releaseThrew = $true }
+Test-Check 'unknown version: error, no new app' ($releaseThrew -and (Get-Store).Count -eq $before)
 
 # --- cleanup of superseded apps
 $rows = @(Get-IntuneChocoSupersededApps)

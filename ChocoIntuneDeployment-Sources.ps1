@@ -14,7 +14,7 @@ $script:SourceFilters = "All", "Winget", "Chocolatey", "Both"
 $script:WingetRuntimeMarker = "WingetRuntimeApp"
 $script:WingetRuntimeName = "winget runtime"
 # Raised when the install or detection script of the runtime app changes (part of its detection)
-$script:WingetRuntimeRevision = 2
+$script:WingetRuntimeRevision = 3
 
 #region versions and recommendation
 
@@ -286,16 +286,16 @@ function Get-WingetRuntimeScripts {
     # Install, uninstall and detection script of the runtime app (plain ASCII, Windows PowerShell 5.1, runs as SYSTEM)
     $GetWinget = @'
 function Get-Winget {
-    # winget.exe is not in the path of SYSTEM: take the newest App Installer for this processor
+    # winget.exe is not in the path of SYSTEM: take the newest App Installer for this processor. Only from the
+    # WindowsApps folder (TrustedInstaller); never from PATH, where a user could have put another winget.exe.
     $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-    $Folders = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
+    $Apps = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "WindowsApps"
+    $Folders = @(Get-ChildItem -Path $Apps -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName "winget.exe") })
     $Preferred = @($Folders | Where-Object { $_.Name -like "*_$($Arch)__*" })
     if ($Preferred.Count -gt 0) { $Folders = $Preferred }
     $Newest = $Folders | Sort-Object { try { [version](($_.Name -split "_")[1]) } catch { [version]"0.0" } } -Descending | Select-Object -First 1
     if ($Newest) { return Join-Path $Newest.FullName "winget.exe" }
-    $InPath = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($InPath) { return $InPath.Source }
     return $null
 }
 '@
@@ -313,16 +313,20 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
     exit $LASTEXITCODE
 }
 
-$Root = Join-Path $env:ProgramData "IntuneWingetDeployment"
-$RuntimeRoot = Join-Path $Root "Runtime"
 $Revision = '__REVISION__'
 $LogId = "_winget-runtime"
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 
 __COMMON__
 
+# %ProgramFiles%\IntuneChocoDeployment\Winget\Runtime (see $ToolRoot). Older revisions used
+# %ProgramData%\IntuneWingetDeployment\Runtime: its task (same name) is replaced below, the old folder is not touched.
+$Root = Join-Path $ToolRoot "Winget"
+$RuntimeRoot = Join-Path $Root "Runtime"
+
 # The folders hold what runs as SYSTEM: users must not be able to write there
 try {
+    Protect-Folder $ToolRoot
     Protect-Folder $Root
     Protect-Folder (Join-Path $Root "Logs")
     Protect-Folder $RuntimeRoot
@@ -348,8 +352,18 @@ try {
     $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
     $Release = "https://github.com/microsoft/winget-cli/releases/latest/download"
 
+    # Only packages signed by Microsoft are provisioned: the download is pinned to Microsoft's signature, not only to TLS
+    $MicrosoftPublisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    function Assert-MicrosoftSigned([string]$Path) {
+        $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+        $Signer = if ($Signature.SignerCertificate) { [string]$Signature.SignerCertificate.Subject } else { "" }
+        if ([string]$Signature.Status -ne "Valid" -or $Signer -ne $MicrosoftPublisher) {
+            throw "$(Split-Path -Path $Path -Leaf) is not validly signed by Microsoft (status $($Signature.Status), signer '$Signer'); nothing is installed"
+        }
+    }
+
     function Install-AppInstaller {
-        # Provisions App Installer for all users with its dependencies (the packages are checked by Windows)
+        # Provisions App Installer for all users with its dependencies, after checking their Microsoft signatures
         $Work = Join-Path $RuntimeRoot "download"
         if (Test-Path -LiteralPath $Work) { Remove-ItemSafely $Work }
         Protect-Folder $Work
@@ -359,6 +373,7 @@ try {
         Invoke-WebRequest -Uri "$Release/DesktopAppInstaller_Dependencies.zip" -OutFile $Zip -UseBasicParsing
         Expand-Archive -LiteralPath $Zip -DestinationPath (Join-Path $Work "dependencies") -Force
         $Dependencies = @(Get-ChildItem -Path (Join-Path $Work "dependencies\$Arch") -Filter "*.appx" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        foreach ($File in @($Bundle) + $Dependencies) { Assert-MicrosoftSigned $File }
         Write-Output "Installing App Installer with $($Dependencies.Count) dependencies"
         if ($Dependencies.Count -gt 0) { Add-AppxProvisionedPackage -Online -PackagePath $Bundle -DependencyPackagePath $Dependencies -SkipLicense | Out-Null }
         else { Add-AppxProvisionedPackage -Online -PackagePath $Bundle -SkipLicense | Out-Null }
@@ -417,7 +432,7 @@ exit 0
     $Detection = @'
 # winget works as SYSTEM and this script version has been installed (the daily App Installer update is a scheduled task)
 $Revision = '__REVISION__'
-$Marker = Join-Path $env:ProgramData "IntuneWingetDeployment\Runtime\ready.txt"
+$Marker = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "IntuneChocoDeployment\Winget\Runtime\ready.txt"
 __GETWINGET__
 if (-not (Test-Path -LiteralPath $Marker) -or (Get-Content -LiteralPath $Marker -Raw).Trim() -ne $Revision) { exit 1 }
 $Winget = Get-Winget
