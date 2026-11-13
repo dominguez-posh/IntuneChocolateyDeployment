@@ -14,7 +14,7 @@ $script:SourceFilters = "All", "Winget", "Chocolatey", "Both"
 $script:WingetRuntimeMarker = "WingetRuntimeApp"
 $script:WingetRuntimeName = "winget runtime"
 # Raised when the install or detection script of the runtime app changes (part of its detection)
-$script:WingetRuntimeRevision = 1
+$script:WingetRuntimeRevision = 2
 
 #region versions and recommendation
 
@@ -316,6 +316,8 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 $Root = Join-Path $env:ProgramData "IntuneWingetDeployment"
 $RuntimeRoot = Join-Path $Root "Runtime"
 $Revision = '__REVISION__'
+$LogId = "_winget-runtime"
+$LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 
 __COMMON__
 
@@ -331,8 +333,9 @@ Start-Transcript -Path (Join-Path $Root "Logs\_runtime.log") -Append | Out-Null
 __GETWINGET__
 
 if ($Uninstall) {
-    # winget belongs to Windows: nothing to remove, only the marker of this app goes (detection fails again)
-    Remove-Item -LiteralPath (Join-Path $RuntimeRoot "checked.txt") -Force -ErrorAction SilentlyContinue
+    # winget belongs to Windows: nothing to remove, the task and the marker of this app go (detection fails again)
+    Unregister-ScheduledTask -TaskName "Update winget runtime" -TaskPath "\Intune-Winget-Updates\" -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $RuntimeRoot "ready.txt") -Force -ErrorAction SilentlyContinue
     Write-Output "winget is part of Windows and stays installed"
     Stop-Transcript | Out-Null
     exit 0
@@ -383,23 +386,28 @@ try {
         if ($LASTEXITCODE -ne 0) { Write-Output "winget still does not start"; Stop-Transcript | Out-Null; exit 1 }
     }
 
-    # App Installer updates itself at most once a day (the detection rule asks for the daily stamp)
-    $Stamp = Join-Path $RuntimeRoot "checked.txt"
-    $Due = $true
-    if (Test-Path -LiteralPath $Stamp) {
-        try {
-            $Parts = (Get-Content -LiteralPath $Stamp -Raw).Trim().Split("|")
-            $Last = [datetime]::Parse($Parts[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-            if ($Parts[0] -eq $Revision -and ([datetime]::UtcNow - $Last.ToUniversalTime()).TotalHours -lt 24) { $Due = $false }
-        }
-        catch { $Due = $true }
+    # Daily App Installer update: a scheduled task on the device (SYSTEM) runs update.ps1; detection does not depend on it
+    $TaskPath = "\Intune-Winget-Updates\"
+    $TaskName = "Update winget runtime"
+    try {
+        Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
+        $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'update.ps1')`""
+        $Triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))))
+        $System = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
+        $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $Action -Trigger $Triggers -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
     }
-    if ($Due) {
-        & $Winget upgrade --id Microsoft.AppInstaller --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Host
-        # No newer version or a failed update must not fail the dependency: winget itself works
-        Write-Output "App Installer update check exit code $LASTEXITCODE"
-        Write-ProtectedFile $Stamp ("{0}|{1}" -f $Revision, [datetime]::UtcNow.ToString("o"))
+    catch {
+        Write-Output "The update task could not be registered: $($_.Exception.Message)"
+        Write-DeviceLog "update task could not be registered: $($_.Exception.Message)"
+        Stop-Transcript | Out-Null
+        exit 1
     }
+    # The marker of this script version for the detection rule
+    Write-ProtectedFile (Join-Path $RuntimeRoot "ready.txt") $Revision
+    Write-DeviceLog "winget runtime ready: $Winget"
 }
 finally { Exit-DeploymentLock }
 Stop-Transcript | Out-Null
@@ -407,27 +415,58 @@ exit 0
 '@
 
     $Detection = @'
-# winget (App Installer) is there, and checked in the last 24 hours (otherwise Intune runs install.ps1, which updates it)
+# winget works as SYSTEM and this script version has been installed (the daily App Installer update is a scheduled task)
 $Revision = '__REVISION__'
-$Stamp = Join-Path $env:ProgramData "IntuneWingetDeployment\Runtime\checked.txt"
+$Marker = Join-Path $env:ProgramData "IntuneWingetDeployment\Runtime\ready.txt"
 __GETWINGET__
+if (-not (Test-Path -LiteralPath $Marker) -or (Get-Content -LiteralPath $Marker -Raw).Trim() -ne $Revision) { exit 1 }
 $Winget = Get-Winget
 if (-not $Winget) { exit 1 }
-if (-not (Test-Path -LiteralPath $Stamp)) { exit 1 }
-try {
-    $Parts = (Get-Content -LiteralPath $Stamp -Raw).Trim().Split("|")
-    $Last = [datetime]::Parse($Parts[1], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-}
-catch { exit 1 }
-if ($Parts[0] -ne $Revision -or ([datetime]::UtcNow - $Last.ToUniversalTime()).TotalHours -ge 24) { exit 1 }
+& $Winget --version 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { exit 1 }
 Write-Output "winget runtime is ready: $Winget"
 exit 0
 '@
 
+    $UpdateScript = @'
+# Daily App Installer update (scheduled task, SYSTEM): winget upgrade of App Installer, at most every 20 hours,
+# inside the device wide lock. Log: Intune Management Extension log folder (IntuneChocoDeployment-_winget-runtime.log).
+$RuntimeRoot = $PSScriptRoot
+$LogId = "_winget-runtime"
+$LogTag = "update"
+
+__COMMON__
+
+__GETWINGET__
+
+try { if (Test-ForeignItem $RuntimeRoot) { Write-DeviceLog "folder is not protected, nothing done"; exit 1 } } catch { exit 1 }
+$Stamp = Join-Path $RuntimeRoot "checked.txt"
+if (Test-Path -LiteralPath $Stamp) {
+    try {
+        $Last = [datetime]::Parse((Get-Content -LiteralPath $Stamp -Raw).Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        if (([datetime]::UtcNow - $Last.ToUniversalTime()).TotalHours -lt 20) { Write-DeviceLog "checked less than 20 hours ago"; exit 0 }
+    }
+    catch { }
+}
+$Winget = Get-Winget
+if (-not $Winget) { Write-DeviceLog "winget.exe not found"; exit 1 }
+if (-not (Enter-DeploymentLock)) { Write-DeviceLog "another installation is still running, next run tries again"; exit 1618 }
+try {
+    & $Winget upgrade --id Microsoft.AppInstaller --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Null
+    # No newer version is not an error; the next run tries again after a failure
+    Write-DeviceLog "App Installer upgrade exit code $LASTEXITCODE"
+    if ($LASTEXITCODE -in 0, -1978335189, -1978335135) { Write-ProtectedFile $Stamp ([datetime]::UtcNow.ToString("o")) }
+}
+finally { Exit-DeploymentLock }
+exit 0
+'@
+
     $Revision = [string]$script:WingetRuntimeRevision
+    $Common = Get-DeviceScriptCommon
     return [pscustomobject]@{
-        Install   = $Install.Replace("__COMMON__", (Get-DeviceScriptCommon)).Replace("__GETWINGET__", $GetWinget).Replace("__REVISION__", $Revision)
+        Install   = $Install.Replace("__COMMON__", $Common).Replace("__GETWINGET__", $GetWinget).Replace("__REVISION__", $Revision)
         Detection = $Detection.Replace("__GETWINGET__", $GetWinget).Replace("__REVISION__", $Revision)
+        Update    = $UpdateScript.Replace("__COMMON__", $Common).Replace("__GETWINGET__", $GetWinget)
     }
 }#Scripts of the winget runtime app
 
@@ -441,6 +480,7 @@ function Install-IntuneWingetRuntime {
     $SourcePath = Join-Path $WorkPath "source"
     $Scripts = Get-WingetRuntimeScripts
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $Scripts.Update -Encoding ASCII
     $DetectionFile = Join-Path $WorkPath "detection.ps1"
     Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
 
