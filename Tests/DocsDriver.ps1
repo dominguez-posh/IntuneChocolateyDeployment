@@ -47,7 +47,7 @@ $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = { param($s) Show-Page 'Apps'; $true } }
     @{ Do = { param($s) if (-not (Test-DocsIdle 'meta')) { return $false }; Update-CatalogRows; $ui.TxtFilter.Text = ''; foreach ($n in '7-Zip', 'Notepad++', 'VLC media player') { Select-Named $n }; $true } }
     @{ Do = { param($s) $s.N++; if ($s.N -lt 5 -or ($s.N -lt 20 -and -not (Test-DocsIdle 'icons'))) { return $false }; Show-AppDetails (@($script:SourceRows | Where-Object { $_.Name -eq '7-Zip' })[0]); $ui.AppsScroll.ScrollToVerticalOffset(235); $window.UpdateLayout(); Save-DocShot 'apps'; $script:DetailRow = $null; $ui.PanelDetails.Visibility = 'Collapsed'; Update-SelectionBar; $true } }
-    @{ Do = { param($s) Show-DeployDialog; Use-Source 'Chocolatey'; Save-DocShot 'deploy'; Close-Dialog; $true } }
+    @{ Do = { param($s) if (-not $s.Shown) { Show-DeployDialog; Use-Source 'Chocolatey'; $s.Shown = $true }; $s.N++; if ($s.N -lt 6 -or -not (Test-DocsIdle 'icons')) { return $false }; Save-DocShot 'deploy'; Close-Dialog; $true } }
     @{ Do = { param($s)
         Show-DeployDialog
         # the recommended source per app stays; Chocolatey for the app that has no recommendation
