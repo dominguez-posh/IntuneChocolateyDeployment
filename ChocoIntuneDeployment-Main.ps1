@@ -64,7 +64,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 2
+$script:DeviceScriptRevision = 3
 
 # Packages whose software license restricts business use or distribution
 $script:LicenseNotes = @{
@@ -194,16 +194,22 @@ function New-ChocoAppPolicy {
 function ConvertTo-ChocoAppNotes {
     param([Parameter(Mandatory = $true)]$Policy, [string]$Marker = $script:AppMarker)
     $Version = if ($Policy.Version) { $Policy.Version } else { "latest" }
-    return "$Marker;package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)"
+    # Package source (URL encoded) and startup delay belong to the app too, so a later change keeps them
+    return "$Marker;package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)" +
+        ";source=$([uri]::EscapeDataString([string]$Policy.PackageSource));delay=$($Policy.UpdateDelayMinMinutes)-$($Policy.UpdateDelayMaxMinutes)"
 }#Notes of the Intune app: marker, package and update policy (read back by ConvertFrom-ChocoAppNotes)
 
 function ConvertFrom-ChocoAppNotes {
     param([string]$Notes)
-    $Result = [ordered]@{ Package = $null; Version = ""; UpdateMode = "Startup"; GraceHours = 48; HasPolicy = $false }
+    # PackageSource and the delays are $null for apps from before they were stored (callers use the current settings)
+    $Result = [ordered]@{ Package = $null; Version = ""; UpdateMode = "Startup"; GraceHours = 48; HasPolicy = $false
+        PackageSource = $null; UpdateDelayMinMinutes = $null; UpdateDelayMaxMinutes = $null }
     if ($Notes -match 'package=([A-Za-z0-9._+-]+)') { $Result.Package = $Matches[1] }
     if ($Notes -match 'version=([0-9A-Za-z.+-]+)' -and $Matches[1] -ne "latest") { $Result.Version = $Matches[1] }
     if ($Notes -match 'update=(Off|Startup|Custom)') { $Result.UpdateMode = $Matches[1]; $Result.HasPolicy = $true }
     if ($Notes -match 'grace=(\d+)') { $Result.GraceHours = [int]$Matches[1] }
+    if ($Notes -match 'source=([^;]*)') { $Result.PackageSource = [uri]::UnescapeDataString($Matches[1]) }
+    if ($Notes -match 'delay=(\d+)-(\d+)') { $Result.UpdateDelayMinMinutes = [int]$Matches[1]; $Result.UpdateDelayMaxMinutes = [int]$Matches[2] }
     # Apps from before the update policy keep their behavior: latest version, update at startup
     return [pscustomobject]$Result
 }#Reads package and update policy from the notes of an Intune app
@@ -850,6 +856,73 @@ function Get-ChocoIconBase64 {
 
 }#Returns a Intune-Deployment-ready Base64-Coded PNG, or $null if there is no usable icon
 
+function Get-DeviceScriptCommon {
+    # Functions of install.ps1 and update.ps1, for Chocolatey and winget apps: the device wide lock and the protected
+    # folders of the update helpers (both run as SYSTEM)
+    return @'
+# One choco or winget operation at a time on the device, for all apps of both sources
+$script:LockHeld = $false
+$script:Lock = New-Object System.Threading.Mutex($false, "Global\IntuneChocoDeployment")
+function Enter-DeploymentLock {
+    try { $script:LockHeld = $script:Lock.WaitOne([TimeSpan]::FromMinutes(30)) }
+    catch [System.Threading.AbandonedMutexException] { $script:LockHeld = $true }
+    return $script:LockHeld
+}
+function Exit-DeploymentLock {
+    if ($script:LockHeld) { $script:Lock.ReleaseMutex(); $script:LockHeld = $false }
+}
+
+function Test-ForeignItem([string]$Path) {
+    # Links, and anything not owned by SYSTEM or Administrators, could have been planted by a user
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $Item) { return $false }
+    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $true }
+    try { $Owner = $Item.GetAccessControl("Owner").GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { return $true }
+    return $Owner -notin "S-1-5-18", "S-1-5-32-544"
+}
+function Remove-ItemSafely([string]$Path) {
+    # Links are removed themselves, never what they point to
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $Item) { return }
+    $IsLink = [bool]($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    if (-not $IsLink) { [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal) }
+    if ($Item.PSIsContainer) {
+        if (-not $IsLink) { foreach ($Child in @(Get-ChildItem -LiteralPath $Path -Force)) { Remove-ItemSafely $Child.FullName } }
+        [IO.Directory]::Delete($Path, $false)
+    }
+    else { [IO.File]::Delete($Path) }
+}
+function Remove-ForeignItems([string]$Path) {
+    foreach ($Child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        if (Test-ForeignItem $Child.FullName) { Remove-ItemSafely $Child.FullName }
+        elseif ($Child.PSIsContainer) { Remove-ForeignItems $Child.FullName }
+    }
+}
+function Protect-Folder([string]$Path) {
+    # Owner SYSTEM, no inherited rights: SYSTEM and Administrators full control, Users read and execute.
+    # A folder a user created before (e.g. to replace update.ps1, which runs as SYSTEM) is removed first.
+    # SIDs, not names: the names are translated on non-English Windows.
+    if (Test-ForeignItem $Path) { Remove-ItemSafely $Path }
+    New-Item -Path $Path -ItemType Directory -Force | Out-Null
+    $Acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $Acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier "S-1-5-18"))
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($Entry in @(@("S-1-5-18", "FullControl"), @("S-1-5-32-544", "FullControl"), @("S-1-5-32-545", "ReadAndExecute"))) {
+        $Sid = New-Object System.Security.Principal.SecurityIdentifier $Entry[0]
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, $Entry[1], "ContainerInherit, ObjectInherit", "None", "Allow")))
+    }
+    [IO.Directory]::SetAccessControl($Path, $Acl)
+    # Now nobody else can add anything; what is left from before and not ours goes
+    Remove-ForeignItems $Path
+}
+function Write-ProtectedFile([string]$Path, [string]$Text) {
+    # A new file instead of writing into an existing one (which could be a hard link)
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII
+}
+'@
+}#Lock and folder protection of the device scripts
+
 function Get-UpdateNotifyScript {
     # The update prompt of Custom mode, for Chocolatey and winget apps (only the task folder differs)
     param([Parameter(Mandatory = $true)][string]$TaskPath)
@@ -934,41 +1007,69 @@ if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot";
 
 $TaskPath = "\Intune-Choco-Updates\"
 $TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update")
-$AppRoot = Join-Path $env:ProgramData "IntuneChocoUpdates\$Package"
+$Base = Join-Path $env:ProgramData "IntuneChocoUpdates"
+$AppRoot = Join-Path $Base $Package
 function Remove-UpdateTasks {
     foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 }
-
-if ($Uninstall) {
-    & $Choco uninstall $Package -y --no-progress
-    $ExitCode = $LASTEXITCODE
-    Remove-UpdateTasks
-    Remove-Item -Path $AppRoot -Recurse -Force -ErrorAction SilentlyContinue
-    exit $ExitCode
-}
-
 $SourceArguments = @()
 if ($Source) { $SourceArguments = @("--source", $Source) }
+
+__COMMON__
+__CHOCOCOMMON__
+
+if ($Uninstall) {
+    $ExitCode = 0
+    if (Get-InstalledVersion) {
+        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; exit 1618 }
+        # --remove-dependencies: a meta package (e.g. vlc) takes its installer package (vlc.install) with it
+        & $Choco uninstall $Package -y --no-progress --remove-dependencies
+        $ExitCode = $LASTEXITCODE
+        Exit-DeploymentLock
+    }
+    # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
+    if ($ExitCode -notin 0, 1605, 1614, 1641, 3010) { Write-Output "choco uninstall failed with exit code $ExitCode"; exit $ExitCode }
+    Remove-UpdateTasks
+    try { Remove-ItemSafely $AppRoot } catch { Write-Output "$AppRoot could not be removed: $($_.Exception.Message)" }
+    if ($ExitCode -in 1641, 3010) { exit $ExitCode }
+    exit 0
+}
+
 $VersionArguments = @()
 if ($Version) { $VersionArguments = @("--version", $Version, "--allow-downgrade") }
-$Installed = Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")
+$Installed = Get-InstalledVersion
+
+# The update helpers run as SYSTEM: their folders must not be writable for users
+try {
+    Protect-Folder $Base
+    Protect-Folder $AppRoot
+}
+catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit 1 }
 
 # A new installation always installs. When only the policy changed (released version, update mode), the device
-# follows its update mode: Off installs a released version right away, Startup at the next startup, Custom asks
-# the user and installs at the latest when the grace period is over.
+# follows its update mode: Off installs a released version right away (latest + Off leaves the installed version
+# alone), Startup at the next startup, Custom asks the user and installs at the latest when the grace period is over.
+$Upgrade = (-not $Installed) -or ($Mode -eq "Off" -and $Version -and (Compare-PackageVersion $Version $Installed) -ne 0)
+if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; exit 1618 }
+if (Test-ChocolateyUpdateDue) { Write-Output (Update-Chocolatey) }
 $ExitCode = 0
-if (-not $Installed -or $Mode -eq "Off") {
+if ($Upgrade) {
     & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments
     $ExitCode = $LASTEXITCODE
 }
+Exit-DeploymentLock
 if ($ExitCode -notin 0, 1641, 3010) { exit $ExitCode }
 
 # Settings for the update helpers; a new policy starts its own grace period
-New-Item -Path $AppRoot -ItemType Directory -Force | Out-Null
-foreach ($File in "update.ps1", "notify.ps1") { Copy-Item -Path (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force }
-@{ Package = $Package; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName } |
-    ConvertTo-Json | Set-Content -Path (Join-Path $AppRoot "config.json") -Encoding UTF8
-Remove-Item -Path (Join-Path $AppRoot "state.json") -Force -ErrorAction SilentlyContinue
+try {
+    foreach ($File in "update.ps1", "notify.ps1") {
+        Remove-Item -LiteralPath (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force -ErrorAction Stop
+    }
+    Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Package = $Package; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName } | ConvertTo-Json)
+    Remove-Item -Path (Join-Path $AppRoot "state.json") -Force -ErrorAction SilentlyContinue
+}
+catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; exit 1 }
 
 Remove-UpdateTasks
 try {
@@ -982,18 +1083,26 @@ try {
         # Each device waits a random time, so a whole office behind one IP doesn't hit the Chocolatey rate limit at once
         $Trigger = New-ScheduledTaskTrigger -AtStartup
         $Trigger.Delay = "PT{0}M" -f (Get-Random -Minimum __DELAYMIN__ -Maximum (__DELAYMAX__ + 1))
-        Register-ScheduledTask -TaskName $TaskNames[0] -TaskPath $TaskPath -Action (& $UpdateAction "Startup") -Trigger $Trigger -Principal $System -Settings $Settings -Force | Out-Null
+        $Triggers = @($Trigger)
+        if ($Mode -eq "Startup") {
+            # With Fast Startup, shutting down is no real startup: also once a day at a random time between 10 and 15
+            # o'clock (a missed run follows when the device is on again)
+            $Triggers += New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))
+        }
+        # Custom only checks at startup: the user prompt and the grace period decide when the update is installed
+        $StartupStep = if ($Mode -eq "Custom") { "Check" } else { "Startup" }
+        Register-ScheduledTask -TaskName $TaskNames[0] -TaskPath $TaskPath -Action (& $UpdateAction $StartupStep) -Trigger $Triggers -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
     }
     if ($Mode -eq "Custom") {
         # "Update now" from the user prompt: started on demand; signed-in users may run it (not change it)
-        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action (& $UpdateAction "Now") -Principal $System -Settings $Settings -Force | Out-Null
+        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action (& $UpdateAction "Now") -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
         $Service = New-Object -ComObject Schedule.Service
         $Service.Connect()
         $Service.GetFolder($TaskPath.TrimEnd("\")).GetTask($TaskNames[1]).SetSecurityDescriptor("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)", 0)
 
         # Every 4 hours: is there an update, is the grace period over?
         $Check = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes((Get-Random -Minimum 5 -Maximum 60)) -RepetitionInterval (New-TimeSpan -Hours 4) -RepetitionDuration (New-TimeSpan -Days 3650)
-        Register-ScheduledTask -TaskName $TaskNames[2] -TaskPath $TaskPath -Action (& $UpdateAction "Check") -Trigger $Check -Principal $System -Settings $Settings -Force | Out-Null
+        Register-ScheduledTask -TaskName $TaskNames[2] -TaskPath $TaskPath -Action (& $UpdateAction "Check") -Trigger $Check -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
 
         # The prompt runs in the session of every signed-in user (Users group), at logon and every hour, without a console window
         $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
@@ -1004,16 +1113,18 @@ try {
             (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650))
         )
         $NotifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force | Out-Null
+        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force -ErrorAction Stop | Out-Null
     }
     Write-Output "Update mode $Mode applied for $Package"
 }
 catch {
+    # Without its tasks the app is not set up: no marker, so detection fails and Intune runs install.ps1 again
     Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
+    exit 1
 }
 
 # The detection rule compares this marker with the policy in Intune
-Set-Content -Path (Join-Path $AppRoot "policy.txt") -Value $Policy -Encoding ASCII
+Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy
 exit $ExitCode
 '@
 
@@ -1037,26 +1148,36 @@ if (-not (Test-Path $Choco)) { Write-Log "choco.exe not found"; exit 1 }
 $SourceArguments = @()
 if ($Config.Source) { $SourceArguments = @("--source", $Config.Source) }
 
-function Get-InstalledVersion {
-    $Nuspec = Join-Path $ChocoRoot "lib\$Package\$Package.nuspec"
-    if (Test-Path $Nuspec) { return ([xml](Get-Content -Path $Nuspec -Raw)).package.metadata.version }
-}
+__COMMON__
+__CHOCOCOMMON__
 
 function Get-TargetVersion {
-    # A released version is known; "latest" asks the source whether something newer than the installed one exists
+    # A released version is known; "latest" asks the source for the newest version of this one package
+    # (choco 2 needs --exact to search for one id; the output is "id|version")
     if ($Config.Version) { return $Config.Version }
-    $Line = & $Choco outdated --limit-output @SourceArguments 2>$null | Where-Object { $_ -like "$Package|*" } | Select-Object -First 1
-    if ($Line) { return ($Line -split "\|")[2] }
+    $Line = & $Choco search $Package --exact --limit-output @SourceArguments 2>$null | Where-Object { $_ -like "$Package|*" } | Select-Object -First 1
+    if ($Line) { return ($Line -split "\|")[1] }
 }
 
 function Invoke-Upgrade {
-    $VersionArguments = @()
-    if ($Config.Version) { $VersionArguments = @("--version", $Config.Version, "--allow-downgrade") }
-    & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments | Out-Null
-    $Code = $LASTEXITCODE
+    if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return 1618 }
+    try {
+        $VersionArguments = @()
+        if ($Config.Version) { $VersionArguments = @("--version", $Config.Version, "--allow-downgrade") }
+        & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments | Out-Null
+        $Code = $LASTEXITCODE
+    }
+    finally { Exit-DeploymentLock }
     Write-Log "choco upgrade $Package exit code $Code"
     if ($Code -in 0, 1641, 3010) { Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue }
     return $Code
+}
+
+# Chocolatey itself, at most once a day (no waiting when another installation runs, the next run does it)
+if (Test-ChocolateyUpdateDue) {
+    if (Enter-DeploymentLock) {
+        try { Write-Log (Update-Chocolatey) } finally { Exit-DeploymentLock }
+    }
 }
 
 switch ($Mode) {
@@ -1065,7 +1186,10 @@ switch ($Mode) {
     "Check" {
         $Installed = Get-InstalledVersion
         $Target = Get-TargetVersion
-        $Pending = if ($Config.Version) { $Target -ne $Installed } else { [bool]$Target }
+        # "1.2.0" and "1.2" are the same version; latest: only something newer than the installed one counts
+        $Pending = if (-not $Installed) { [bool]$Target }
+        elseif ($Config.Version) { (Compare-PackageVersion $Target $Installed) -ne 0 }
+        else { $Target -and (Compare-PackageVersion $Target $Installed) -gt 0 }
         if (-not $Pending) {
             Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
             exit 0
@@ -1094,6 +1218,49 @@ switch ($Mode) {
 }
 '@
 
+    $ChocoCommon = @'
+function Get-InstalledVersion {
+    $Nuspec = Join-Path $ChocoRoot "lib\$Package\$Package.nuspec"
+    if (Test-Path $Nuspec) { return ([xml](Get-Content -Path $Nuspec -Raw)).package.metadata.version }
+}
+function ConvertTo-VersionParts([string]$Text) {
+    # "01.2.0" -> 1, 2: no leading zeros, no trailing .0 parts
+    $Parts = @(([string]$Text).Trim() -split '\.' | ForEach-Object { if ($_ -match '^\d+$') { $_.TrimStart('0') } else { $_ } } |
+        ForEach-Object { if ($_ -eq '') { '0' } else { $_ } })
+    $Count = $Parts.Count
+    while ($Count -gt 1 -and $Parts[$Count - 1] -eq '0') { $Count-- }
+    return , @($Parts[0..($Count - 1)])
+}
+function Compare-PackageVersion([string]$A, [string]$B) {
+    # -1, 0 or 1. Number parts are compared as numbers ("1.10" is newer than "1.9"), other parts as text
+    $Left = ConvertTo-VersionParts $A
+    $Right = ConvertTo-VersionParts $B
+    for ($i = 0; $i -lt [Math]::Max($Left.Count, $Right.Count); $i++) {
+        $L = if ($i -lt $Left.Count) { [string]$Left[$i] } else { '0' }
+        $R = if ($i -lt $Right.Count) { [string]$Right[$i] } else { '0' }
+        if ($L -match '^\d+$' -and $R -match '^\d+$') {
+            # Without leading zeros the longer number is the bigger one; same length compares like text
+            $Result = if ($L.Length -ne $R.Length) { $L.Length.CompareTo($R.Length) } else { [string]::CompareOrdinal($L, $R) }
+        }
+        else { $Result = [string]::Compare($L, $R, [StringComparison]::OrdinalIgnoreCase) }
+        if ($Result -ne 0) { return [Math]::Sign($Result) }
+    }
+    return 0
+}
+# Chocolatey itself is updated at most once a day, by whichever app gets there first
+$ChocoStamp = Join-Path $env:ProgramData "IntuneChocoUpdates\chocolatey-update.txt"
+function Test-ChocolateyUpdateDue {
+    if (-not (Test-Path $ChocoStamp)) { return $true }
+    try { return ([datetime](Get-Content -Path $ChocoStamp -Raw).Trim()).Date -lt (Get-Date).Date } catch { return $true }
+}
+function Update-Chocolatey {
+    # Call it inside the deployment lock
+    Write-ProtectedFile $ChocoStamp (Get-Date).ToString("o")
+    & $Choco upgrade chocolatey -y --no-progress @SourceArguments | Out-Null
+    return "choco upgrade chocolatey exit code $LASTEXITCODE"
+}
+'@
+
     $NotifyScript = Get-UpdateNotifyScript -TaskPath "\Intune-Choco-Updates\"
 
     $DetectionScript = @'
@@ -1114,6 +1281,9 @@ exit 1
     if ($Policy.UpdateDelayMinMinutes -lt 0 -or $Policy.UpdateDelayMaxMinutes -lt $Policy.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     # Values go into single-quoted strings of ASCII files
     $Quote = { param($Text) ([string]$Text -replace '[^\x20-\x7E]', '').Replace("'", "''") }
+    $Common = Get-DeviceScriptCommon
+    $InstallScript = $InstallScript.Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
+    $UpdateScript = $UpdateScript.Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
     $InstallScript = $InstallScript.Replace("__PACKAGE__", $ChocoName).Replace("__SOURCE__", (& $Quote $Policy.PackageSource))
     $InstallScript = $InstallScript.Replace("__VERSION__", (& $Quote $Policy.Version)).Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
@@ -1362,8 +1532,13 @@ function Update-IntuneChocoApp {
     $NewMode = if ($UpdateMode) { $UpdateMode } else { $Current.UpdateMode }
     $NewGrace = if ($PSBoundParameters.ContainsKey("GraceHours")) { $GraceHours } else { $Current.GraceHours }
 
-    $Policy = New-ChocoAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $(if ($IsWinget) { "" } else { $script:Settings.PackageSource }) `
-        -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes
+    # Source and delay stay those of the app; apps from before they were in the notes take the current settings
+    $NewSource = if ($IsWinget) { "" } elseif ($null -ne $Current.PackageSource) { $Current.PackageSource } else { $script:Settings.PackageSource }
+    $DelayMin = if ($null -ne $Current.UpdateDelayMinMinutes) { $Current.UpdateDelayMinMinutes } else { $script:Settings.UpdateDelayMinMinutes }
+    $DelayMax = if ($null -ne $Current.UpdateDelayMaxMinutes) { $Current.UpdateDelayMaxMinutes } else { $script:Settings.UpdateDelayMaxMinutes }
+
+    $Policy = New-ChocoAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
+        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax
     Write-Host ("{0}: version {1}, updates {2}" -f $App.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
 
     Write-Host "Building the package with the new policy"
