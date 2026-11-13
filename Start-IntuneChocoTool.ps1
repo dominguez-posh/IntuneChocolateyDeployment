@@ -1510,7 +1510,7 @@ function Update-DeploySchedule {
 }
 Add-Click $ui.BtnDeploySchedule {
     $s = if ($script:DeploySchedule) { New-ChocoSchedule -Values $script:DeploySchedule -Base (Get-ChocoScheduleDefaults) } else { Get-ChocoScheduleDefaults }
-    Show-ScheduleDialog -Mode 'Deploy' -Schedule $s -Title "When the $($script:Selected.Count) new app$(if ($script:Selected.Count -ne 1) { 's' }) update on devices"
+    Show-ScheduleDialog -Mode 'Deploy' -Schedule $s -Title 'When the new apps update on devices'
 }
 Add-Click $ui.BtnDeployCancel { Close-Dialog }
 Add-Click $ui.BtnDeployGo { Start-Deploy }
@@ -2360,7 +2360,7 @@ function Start-PackageTest {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error' }
-        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success'; Show-Toast "Sandbox test of $($Job.Display) passed." 'ok' }
+        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
         else { Write-UiLog "[$($Job.Package)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
         Update-SelectionBar
         Update-TenantButtons

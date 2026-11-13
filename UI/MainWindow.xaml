@@ -654,9 +654,9 @@
                                                 <StackPanel Margin="0,0,0,12"><TextBlock Text="Architecture" Style="{StaticResource SmallLabel}"/><ComboBox x:Name="CmbArchitecture" HorizontalAlignment="Stretch" AutomationProperties.Name="Architecture"/></StackPanel>
                                                 <StackPanel Margin="0,0,16,0"><TextBlock Text="Version of new apps" Style="{StaticResource SmallLabel}"/><ComboBox x:Name="CmbDefaultVersion" HorizontalAlignment="Stretch" AutomationProperties.Name="Version"/></StackPanel>
                                                 <StackPanel Margin="0,0,16,0"><TextBlock Text="Updates on devices" Style="{StaticResource SmallLabel}"/><ComboBox x:Name="CmbDefaultUpdate" HorizontalAlignment="Stretch" AutomationProperties.Name="Updates on devices"/></StackPanel>
-                                                <StackPanel>
+                                                <StackPanel x:Name="PanelDefaultGrace">
                                                     <TextBlock Text="Deadline (user prompt)" Style="{StaticResource SmallLabel}"/>
-                                                    <StackPanel x:Name="PanelDefaultGrace" Orientation="Horizontal">
+                                                    <StackPanel Orientation="Horizontal">
                                                         <TextBox x:Name="TxtDefaultGrace" Width="64" AutomationProperties.Name="Deadline"/>
                                                         <ComboBox x:Name="CmbDefaultGraceUnit" Width="100" MinWidth="100" Margin="8,0,0,0" AutomationProperties.Name="Unit"/>
                                                     </StackPanel>
@@ -805,7 +805,7 @@
                             </StackPanel>
                         </Border>
                     </Grid>
-                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="470">
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="545">
                         <StackPanel Margin="28,10,28,4">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>

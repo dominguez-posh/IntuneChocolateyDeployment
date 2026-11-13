@@ -369,7 +369,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $apps = Get-StoreApps
         $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
-        $vlcLog = (@((Get-JobLog) -split "`n" | Where-Object { $_ -match 'ependenc' }) -join ' | ')
+        $vlcLog = (@($script:JobRows | Where-Object { $_['Title'] -eq 'VLC media player' } | ForEach-Object { $_.Data.Log } | ForEach-Object { $_.Text } | Where-Object { $_ -match 'ependenc' }) -join ' | ')
         Test-Smoke 'winget app has the winget runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the winget runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
         $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
         Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'")
@@ -579,7 +579,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'import closes the dialog and shows the job' ($ui.DialogLayer.Visibility -eq 'Collapsed' -and $script:CurrentPage -eq 'Activity')
                 # Export file round trip: export the managed apps, read them again as candidates
                 $file = Join-Path $script:SmokeOut 'export.json'
-                $script:ImportApps = @(Get-InsightTenantApps -Context (New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))) -DefaultUpdateMode 'Startup' -DefaultGraceHours 48)
+                $script:ImportApps = @(Get-InsightTenantApps -Context (New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))) -DefaultUpdateMode 'Startup' -DefaultGraceHours 48 | ForEach-Object { $_ })
                 Export-ManagedApps $file
                 $doc = Get-Content $file -Raw | ConvertFrom-Json
                 Test-Smoke 'export writes the managed apps without ids' ($doc.format -eq 'IntuneChocoDeployment.Export' -and @($doc.apps).Count -eq 1 -and (Get-Content $file -Raw) -notmatch 'i4') (Get-Content $file -Raw)
