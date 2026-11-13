@@ -33,7 +33,7 @@ Publish Chocolatey and winget apps to Microsoft Intune as Win32 apps, keep them 
    Install-IntunechocoComponents
    ```
 3. Start the graphical interface with **Start.cmd** and follow the *Start* page (see below). It creates the app registration for you. By hand, the registration is:
-   - Entra admin center > App registrations > New registration, any name (the tool uses "Intune Chocolatey Deployment")
+   - Entra admin center > App registrations > New registration, any name (the tool uses "PackTune"; an earlier "Intune Chocolatey Deployment" registration is reused)
    - Authentication > Add a platform > Mobile and desktop applications > Redirect URI `http://localhost`
    - API permissions > Microsoft Graph > Delegated: the five permissions above, then grant admin consent
    - Note the Application (client) ID and the tenant
@@ -68,7 +68,7 @@ One list for both sources, from the curated list in `catalog.json` and the searc
 - **Install with**: the source per app. The default is the recommended source, else the preferred source from the settings.
 - **Assignment**: Available (in the Company Portal), Required (installed on the devices) or None.
 - **Updates on devices** and **Version on devices**: always the newest version, or one pinned version.
-- Chocolatey apps get the Chocolatey app as a dependency and winget apps the winget runtime app; missing dependency apps are created first.
+- Every app depends on the one PackTune Runtime app (Chocolatey and winget for SYSTEM); it is created first when it is missing.
 
 Deployments run in the background, one after another (see *Activity*).
 
@@ -76,7 +76,7 @@ Deployments run in the background, one after another (see *Activity*).
 
 ![In tenant](docs/screenshots/tenant.png)
 
-Lists the apps this tool created, plus the two dependency apps (Chocolatey and winget runtime). Select an app to change its settings below the list:
+Lists the apps this tool created, plus the PackTune Runtime dependency app (and the two older dependency apps, Chocolatey and winget runtime, while a tenant still has them). Select an app to change its settings below the list:
 
 - **Version on devices** (newest or pinned) and **How devices update** (Off, Automatic, or Ask the user, then install).
 - **When updates install** shows the schedule summary; **Advanced** opens the schedule (see *Update schedule*).
@@ -153,7 +153,9 @@ Each app is one Win32 app in Intune with:
 
 - **Install command**: `install.ps1` (as SYSTEM, in 64-bit PowerShell) with the policy baked in. Uninstall runs the same script with `-Uninstall`.
 - **Detection**: a script that checks the installed package and the policy fingerprint (below).
-- **Dependency**: Chocolatey apps depend on the Chocolatey app, winget apps on the winget runtime app. Both are deployed once per tenant and set to install automatically. The winget runtime app makes App Installer usable for SYSTEM (winget is not in the SYSTEM path, so the newest App Installer in `WindowsApps` is used).
+- **Dependency**: every app, Chocolatey and winget alike, depends on one app, **PackTune Runtime**. It is deployed once per tenant and set to install automatically. Its install script installs Chocolatey (with retries for the download limit and the download URL setting) and makes App Installer usable for SYSTEM (winget is not in the SYSTEM path, so the newest App Installer in `WindowsApps` is used; downloads must carry Microsoft's signature and chain to the Microsoft root), and registers one daily SYSTEM task (`Update PackTune Runtime`, in `Intune-Winget-Updates`) that updates both, inside the device lock. Detection checks that `choco.exe` and winget run and that the marker of the script revision is there; it has no time limit. Uninstalling it removes only the task and the marker, never Chocolatey or App Installer. Folder: `%ProgramFiles%IntuneChocoDeploymentRuntime`.
+- **Trade-off**: one dependency app means devices that only get winget apps now also get Chocolatey. The footprint is small (about 100 MB, no packages installed), and it keeps the dependency chain to one app.
+- **Existing tenants**: older versions created two dependency apps (Chocolatey and winget runtime). `Switch-IntuneChocoAppsToRuntime` moves the apps over (adds the new dependency, removes the old one per app). `Get-IntuneChocoUnusedDependencyApps` lists old dependency apps nothing depends on any more, `Remove-IntuneChocoUnusedDependencyApps` removes them on request; nothing is deleted automatically. `Get-IntuneChocoRuntimeState` reports Missing, Migrate or Ready.
 
 ### Chocolatey apps
 
@@ -221,7 +223,7 @@ Without parameters you are asked for tenant and client ID. A browser window open
 | `Install-IntunechocoComponents` | Installs IntuneWin32App and Microsoft.WinGet.Client (once) |
 | `New-IntuneChocoAppRegistration` | Creates or updates the app registration and grants the admin consent |
 | `Connect-IntuneChoco` | Signs in and sets tenant and client ID |
-| `install-chocolatey` | Deploys the Chocolatey dependency app (normally done automatically) |
+| `Install-PackTuneRuntime` | Deploys the PackTune Runtime dependency app (normally done automatically; `install-chocolatey` is the old name) |
 | `New-IntuneWin32ChocoApplication` | Deploys Chocolatey packages |
 | `New-IntuneWin32WingetApplication` | Deploys winget packages |
 | `Update-IntuneChocoApp` | Changes an app in place: version, update mode, schedule |
@@ -265,7 +267,7 @@ Run in Windows PowerShell 5.1 from the repository folder. None of them contacts 
 - `Tests\Invoke-GuiSmoke.ps1`: starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`), its own `%LOCALAPPDATA%` and a stand-in for the Microsoft sign-in. It drives every page and checks the results. Package infos come from the real Chocolatey feed.
 - `Tests\Check-Insight.ps1`: import, status and device-log functions with fake Graph responses.
 - `Tests\Check-Schedule.ps1`: policy round trip through the notes, fingerprint, notes length and the generated device scripts (they are parsed, never run).
-- `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, winget runtime dependency, release by supersedence or in place.
+- `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, PackTune Runtime dependency and migration, release by supersedence or in place.
 
 The screenshots and the tour are rendered from the same demo data and refreshed with:
 

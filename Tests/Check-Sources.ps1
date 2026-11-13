@@ -150,22 +150,22 @@ $err = $null
 $null = New-IntuneChocoSourceApplication -App (New-IntuneChocoSourceRow -Name 'X' -ChocoId 'x') -Source Winget -ErrorVariable err -ErrorAction SilentlyContinue
 Test-Check 'deploy: source the app does not have is an error' ($err.Count -eq 1)
 
-# --- winget runtime
-$runtime = @(Get-Store | Where-Object { $_.notes -like '*WingetRuntimeApp*' })
-Test-Check 'runtime app is created once per tenant' ($runtime.Count -eq 1 -and $runtime[0].displayName -eq 'winget runtime' -and $runtime[0].assignment -eq 'available')
-Test-Check 'every new winget app depends on the runtime (AutoInstall)' (@($a1.dependencies).targetId -contains $runtime[0].id -and @($a1.dependencies)[0].dependencyType -eq 'autoInstall' -and @((Get-Store | Where-Object id -eq $id4).dependencies).targetId -contains $runtime[0].id)
-Test-Check 'Chocolatey apps keep the Chocolatey dependency, not the runtime' (@($a2.dependencies).Count -eq 1 -and @($a2.dependencies).targetId -notcontains $runtime[0].id)
+# --- PackTune Runtime (one dependency app for both sources)
+$runtime = @(Get-Store | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' })
+Test-Check 'runtime app is created once per tenant' ($runtime.Count -eq 1 -and $runtime[0].displayName -eq 'PackTune Runtime' -and $runtime[0].assignment -eq 'available')
+Test-Check 'every new app of both sources depends on the one runtime (AutoInstall)' (@($a1.dependencies).targetId -contains $runtime[0].id -and @($a1.dependencies)[0].dependencyType -eq 'autoInstall' -and @((Get-Store | Where-Object id -eq $id4).dependencies).targetId -contains $runtime[0].id)
+Test-Check 'Chocolatey apps depend on the same runtime, no separate Chocolatey app is created' (@($a2.dependencies).Count -eq 1 -and @($a2.dependencies).targetId -contains $runtime[0].id -and @(Get-Store | Where-Object { $_.displayName -eq 'Chocolatey' }).Count -eq 0 -and @(Get-Store | Where-Object { $_.displayName -eq 'winget runtime' }).Count -eq 0)
 Test-Check 'runtime app is not listed as an app of the tool' (@(Get-IntuneChocoTenantApps | Where-Object { $_.Id -eq $runtime[0].id }).Count -eq 0)
-$scripts = Get-WingetRuntimeScripts
+$scripts = Get-PackTuneRuntimeScripts
 foreach ($pair in @(@('install', $scripts.Install), @('detection', $scripts.Detection), @('update', $scripts.Update))) {
     $errors = $null; $tokens = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($pair[1], [ref]$tokens, [ref]$errors)
     Test-Check "runtime $($pair[0]) script: valid PowerShell, ASCII, no placeholder" ($errors.Count -eq 0 -and $pair[1] -notmatch '[^\x00-\x7F]' -and $pair[1] -notmatch '__[A-Z]+__') (@($errors | ForEach-Object Message) -join '; ')
 }
-Test-Check 'runtime install: mutex, SIDs, protected folders, 64-bit relaunch, provisioning' ($scripts.Install -match 'Global.IntuneChocoDeployment"' -and $scripts.Install -match 'Enter-DeploymentLock' -and $scripts.Install -match 'Exit-DeploymentLock' -and $scripts.Install -match 'S-1-5-18' -and $scripts.Install -match 'S-1-5-32-544' -and $scripts.Install -match 'Protect-Folder \$RuntimeRoot' -and $scripts.Install -match 'Sysnative' -and $scripts.Install -match 'Add-AppxProvisionedPackage' -and $scripts.Install -match 'DesktopAppInstaller_Dependencies')
-Test-Check 'runtime detection: winget works and marker revision only, no time limit' ($scripts.Detection -match 'Get-Winget' -and $scripts.Detection -match 'ready\.txt' -and $scripts.Detection -match '--version' -and $scripts.Detection -notmatch 'TotalHours|AddHours|UtcNow|Get-Date')
-Test-Check 'runtime install registers the daily update task for SYSTEM and copies update.ps1' ($scripts.Install -match 'Register-ScheduledTask' -and $scripts.Install -match 'S-1-5-18' -and $scripts.Install -match '-Daily' -and $scripts.Install -match 'Intune-Winget-Updates' -and $scripts.Install -match 'Copy-Item[^\n]*update\.ps1' -and $scripts.Install -match 'Write-ProtectedFile \(Join-Path \$RuntimeRoot "ready\.txt"\)' -and $scripts.Install -notmatch 'upgrade --id')
-Test-Check 'runtime update script: mutex, protected folder check, device log, upgrade once per 20 hours' ($scripts.Update -match 'Enter-DeploymentLock' -and $scripts.Update -match 'Exit-DeploymentLock' -and $scripts.Update -match 'Test-ForeignItem' -and $scripts.Update -match 'Write-DeviceLog' -and $scripts.Update -match '\$LogId = "_winget-runtime"' -and $scripts.Update -match 'upgrade --id Microsoft.AppInstaller' -and $scripts.Update -match 'TotalHours -lt 20' -and $scripts.Update -match 'Global.IntuneChocoDeployment"')
+Test-Check 'runtime install (both parts): Chocolatey bootstrap with retry, winget; mutex, SIDs, protected folders, 64-bit relaunch, provisioning' ($scripts.Install -match 'Global.IntuneChocoDeployment"' -and $scripts.Install -match 'Enter-DeploymentLock' -and $scripts.Install -match 'Exit-DeploymentLock' -and $scripts.Install -match 'S-1-5-18' -and $scripts.Install -match 'S-1-5-32-544' -and $scripts.Install -match 'Protect-Folder \$RuntimeRoot' -and $scripts.Install -match 'Sysnative' -and $scripts.Install -match 'Add-AppxProvisionedPackage' -and $scripts.Install -match 'DesktopAppInstaller_Dependencies' -and $scripts.Install -match 'community\.chocolatey\.org/install\.ps1' -and $scripts.Install -match 'Get-Random -Minimum 60 -Maximum 300' -and $scripts.Install -match 'chocolateyDownloadUrl')
+Test-Check 'runtime detection: choco and winget work, marker revision, no time limit' ($scripts.Detection -match 'chocolatey\\bin\\choco\.exe' -and $scripts.Detection -match 'Get-Winget' -and $scripts.Detection -match 'ready\.txt' -and $scripts.Detection -match '--version' -and $scripts.Detection -notmatch 'TotalHours|AddHours|UtcNow|Get-Date')
+Test-Check 'runtime install registers the daily update task for SYSTEM and copies update.ps1' ($scripts.Install -match 'Register-ScheduledTask' -and $scripts.Install -match 'S-1-5-18' -and $scripts.Install -match '-Daily' -and $scripts.Install -match 'Intune-Winget-Updates' -and $scripts.Install -match 'Update PackTune Runtime' -and $scripts.Install -match 'Copy-Item[^\n]*update\.ps1' -and $scripts.Install -match 'Write-ProtectedFile \(Join-Path \$RuntimeRoot "ready\.txt"\)' -and $scripts.Install -notmatch 'upgrade --id')
+Test-Check 'runtime update script: mutex, protected folder check, device log, upgrade once per 20 hours' ($scripts.Update -match 'Enter-DeploymentLock' -and $scripts.Update -match 'Exit-DeploymentLock' -and $scripts.Update -match 'Test-ForeignItem' -and $scripts.Update -match 'Write-DeviceLog' -and $scripts.Update -match '\$LogId = "_packtune-runtime"' -and $scripts.Update -match '"upgrade", "chocolatey"' -and $scripts.Update -match 'upgrade --id Microsoft.AppInstaller' -and $scripts.Update -match 'TotalHours -lt 20' -and $scripts.Update -match 'Global.IntuneChocoDeployment"')
 # security review: folders under %ProgramFiles%, signature pin, no winget from PATH (comments removed before matching)
 function Get-CodeOnly([string]$Text) {
     $tokens = $null; $errors = $null
@@ -174,10 +174,10 @@ function Get-CodeOnly([string]$Text) {
     $Text
 }
 $rtInstall = Get-CodeOnly $scripts.Install; $rtDetection = Get-CodeOnly $scripts.Detection; $rtUpdate = Get-CodeOnly $scripts.Update
-Test-Check 'runtime: folders under %ProgramFiles%\IntuneChocoDeployment\Winget, nothing under %ProgramData% of the tool' ($rtInstall -match '\$Root = Join-Path \$ToolRoot "Winget"' -and $rtInstall -match 'Protect-Folder \$ToolRoot' -and $rtDetection -match '"IntuneChocoDeployment\\Winget\\Runtime\\ready\.txt"' -and $rtDetection -match 'ProgramW6432' -and ($rtInstall + $rtDetection + $rtUpdate) -notmatch 'IntuneWingetDeployment|IntuneChocoUpdates')
+Test-Check 'runtime: folders under %ProgramFiles%\IntuneChocoDeployment\Runtime, nothing under %ProgramData% of the tool' ($rtInstall -match '\$RuntimeRoot = Join-Path \$ToolRoot "Runtime"' -and $rtInstall -match 'Protect-Folder \$ToolRoot' -and $rtDetection -match '"IntuneChocoDeployment\\Runtime\\ready\.txt"' -and $rtDetection -match 'ProgramW6432' -and ($rtInstall + $rtDetection + $rtUpdate) -notmatch 'IntuneWingetDeployment|IntuneChocoUpdates')
 Test-Check 'runtime: App Installer bundle and dependencies must carry a valid Microsoft signature before provisioning' ($rtInstall -match 'Get-AuthenticodeSignature -LiteralPath \$Path' -and $rtInstall.Contains('"CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"') -and $rtInstall -match '\[string\]\$Signature\.Status -ne "Valid" -or \$Signer -ne \$MicrosoftPublisher' -and $rtInstall.IndexOf('Assert-MicrosoftSigned $File') -gt 0 -and $rtInstall.IndexOf('Assert-MicrosoftSigned $File') -lt $rtInstall.IndexOf('Add-AppxProvisionedPackage -Online -PackagePath $Bundle -DependencyPackagePath'))
 Test-Check 'runtime: winget only from WindowsApps, never from PATH' (($rtInstall + $rtDetection + $rtUpdate) -notmatch 'Get-Command winget' -and $rtDetection -match 'WindowsApps')
-Test-Check 'runtime: revision raised for the new folders' ([int]$script:WingetRuntimeRevision -ge 3 -and $scripts.Detection -match "\`$Revision = '$($script:WingetRuntimeRevision)'")
+Test-Check 'runtime: revision in install and detection' ([int]$script:RuntimeRevision -ge 1 -and $scripts.Detection -match "\`$Revision = '$($script:RuntimeRevision)'")
 # The signature check itself, on a signed and an unsigned file of this machine (read-only)
 $sigAst = [System.Management.Automation.Language.Parser]::ParseInput($scripts.Install, [ref]$null, [ref]$null)
 $sigFn = $sigAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-MicrosoftSigned' }, $true)
@@ -186,7 +186,7 @@ $MicrosoftPublisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redm
 $unsigned = Join-Path $work 'fake.msixbundle'; 'not a package' | Set-Content $unsigned
 Test-Check 'runtime: an unsigned download is refused' ($(try { Assert-MicrosoftSigned $unsigned; $false } catch { $_.Exception.Message -like '*not validly signed by Microsoft*' }))
 # Chain root pinned to Microsoft Root Certificate Authority 2011 (an enterprise CA with the Microsoft subject must fail)
-Test-Check 'runtime: signer chain must end in the Microsoft Root CA 2011' ($rtInstall -match '\$MicrosoftRoots = @\("8F43288AD272F3103B6FB1428485EA3014C0BCFE"\)' -and $rtInstall -match '\$Chain\.Build\(\$Signature\.SignerCertificate\)' -and $rtInstall -match '\$Root -notin \$MicrosoftRoots')
+Test-Check 'runtime: signer chain must end in the Microsoft Root CA 2011' ($rtInstall -match '\$MicrosoftRoots = @\("8F43288AD272F3103B6FB1428485EA3014C0BCFE"\)' -and $rtInstall -match '\$Chain\.Build\(\$Signature\.SignerCertificate\)' -and $rtInstall -match '\$ChainRoot -notin \$MicrosoftRoots')
 $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
 if (Test-Path -LiteralPath $edge) {
     # Edge is signed by "Microsoft Corporation" and chains to Root 2011: accepted with the real pin, refused with another root
@@ -199,8 +199,8 @@ if (Test-Path -LiteralPath $edge) {
 # Validly signed, but by "Microsoft Windows" (catalog), not by the App Installer publisher
 Test-Check 'runtime: a valid signature of another Microsoft publisher is refused' ($(try { Assert-MicrosoftSigned "$env:SystemRoot\System32\notepad.exe"; $false } catch { $_.Exception.Message -like '*status Valid*' -or $_.Exception.Message -like '*not validly signed*' }))
 
-$runtimeId = Get-WingetRuntimeWin32ID
-Test-Check 'runtime app found again, not created twice' ($runtimeId -eq $runtime[0].id -and @(Get-Store | Where-Object { $_.notes -like '*WingetRuntimeApp*' }).Count -eq 1)
+$runtimeId = Get-PackTuneRuntimeWin32ID
+Test-Check 'runtime app found again, not created twice' ($runtimeId -eq $runtime[0].id -and @(Get-Store | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' }).Count -eq 1)
 # a winget app from before the runtime existed
 $legacy = Get-Store | Where-Object id -eq $id1
 $stored = Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json
@@ -210,9 +210,55 @@ $without = @(Get-IntuneWingetAppsWithoutRuntime)
 Test-Check 'apps without the runtime dependency are found' ($without.Count -eq 1 -and $without[0].Id -eq $id1) "$($without.Count)"
 $added = @(Add-IntuneWingetRuntimeDependency)
 $after = Get-Store | Where-Object id -eq $id1
-Test-Check 'dependency is added to the old winget app, others are left alone' (@($added | Where-Object Added).Count -eq 1 -and @($added | Where-Object AlreadyThere).Count -ge 1 -and @($after.dependencies).targetId -contains $runtimeId)
+Test-Check 'dependency is added to the old winget app, others are left alone' ($added.Count -eq 1 -and @($added | Where-Object Added).Count -eq 1 -and @($after.dependencies).targetId -contains $runtimeId)
 Test-Check 'adding it again changes nothing' (@(Add-IntuneWingetRuntimeDependency | Where-Object Added).Count -eq 0 -and @((Get-Store | Where-Object id -eq $id1).dependencies).Count -eq 1)
 
+
+# --- migration of an existing tenant: old Chocolatey app and old winget runtime app
+$Store = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+$oldChoco = [pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() }
+$oldWinget = [pscustomobject]@{ id = 'old-winget'; displayName = 'winget runtime'; notes = 'WingetRuntimeApp'; dependencies = @(); supersedence = @(); assignments = @() }
+foreach ($s in $stored) {
+    if ($s.id -eq $id2) { $s.dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }) }
+    if ($s.id -eq $id1) { $s.dependencies = @([pscustomobject]@{ targetId = 'old-winget'; dependencyType = 'autoInstall' }) }
+}
+ConvertTo-Json -InputObject @($stored + $oldChoco + $oldWinget) -Depth 6 | Set-Content $Store
+$old = @(Get-IntuneChocoOldDependencyApps)
+Test-Check 'old Chocolatey app and old winget runtime app are recognized' ($old.Count -eq 2 -and ($old | Where-Object Kind -eq 'Chocolatey').Id -eq 'old-choco' -and ($old | Where-Object Kind -eq 'WingetRuntime').Id -eq 'old-winget')
+Test-Check 'old dependency apps are not apps of the runtime and not in the tool list as dependency of PackTune' (@(Get-IntuneChocoTenantApps | Where-Object { $_.Id -eq 'old-winget' }).Count -eq 0)
+$state = Get-IntuneChocoRuntimeState
+Test-Check 'readiness state: runtime present, apps still on old dependencies -> Migrate' ($state.State -eq 'Migrate' -and $state.RuntimePresent -and $state.RuntimeId -eq $runtimeId -and @($state.AppsOnOldDependencies).Count -ge 2 -and @($state.UnusedOld).Count -eq 0)
+$unusedBefore = @(Get-IntuneChocoUnusedDependencyApps)
+Test-Check 'old apps in use are not offered for removal' ($unusedBefore.Count -eq 0)
+$choco2 = $false
+try { Remove-IntuneChocoApplication -Id 'old-choco' } catch { $choco2 = $_.Exception.Message -like '*Switch them to the PackTune Runtime*' }
+Test-Check 'old Chocolatey app in use cannot be removed' ($choco2 -and @(Get-Store | Where-Object id -eq 'old-choco').Count -eq 1)
+$moved = @(Switch-IntuneChocoAppsToRuntime)
+$after1 = Get-Store | Where-Object id -eq $id1; $after2 = Get-Store | Where-Object id -eq $id2
+Test-Check 'switch: apps get the runtime, the old dependency is taken away' (@($after1.dependencies).Count -eq 1 -and @($after1.dependencies).targetId -eq $runtimeId -and @($after2.dependencies).Count -eq 1 -and @($after2.dependencies).targetId -eq $runtimeId -and $moved.Count -ge 2 -and (@($moved | Where-Object OldRemoved).Count -ge 2))
+Test-Check 'switch again changes nothing' (@(Switch-IntuneChocoAppsToRuntime).Count -eq 0)
+$state = Get-IntuneChocoRuntimeState
+Test-Check 'readiness state after the switch: Ready, both old apps unused' ($state.State -eq 'Ready' -and @($state.UnusedOld).Count -eq 2 -and @($state.AppsOnOldDependencies).Count -eq 0)
+$dry = @(Remove-IntuneChocoUnusedDependencyApps -WhatIf)
+Test-Check '-WhatIf lists the unused old apps and deletes nothing' ($dry.Count -eq 2 -and @(Get-Store | Where-Object id -in 'old-choco', 'old-winget').Count -eq 2)
+Test-Check 'nothing is deleted automatically (switch left the old apps)' (@(Get-Store | Where-Object id -in 'old-choco', 'old-winget').Count -eq 2)
+$gone = @(Remove-IntuneChocoUnusedDependencyApps)
+Test-Check 'unused old dependency apps can be removed on request' ($gone.Count -eq 2 -and @(Get-Store | Where-Object id -in 'old-choco', 'old-winget').Count -eq 0)
+# an old app that is still used by an app outside the tool stays on the list of used ones
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+ConvertTo-Json -InputObject @($stored + [pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() } + [pscustomobject]@{ id = 'foreign'; displayName = 'Other app'; notes = ''; dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }); supersedence = @(); assignments = @() }) -Depth 6 | Set-Content $Store
+Test-Check 'old app used by any app in the tenant is not offered for removal' (@(Get-IntuneChocoUnusedDependencyApps).Count -eq 0)
+ConvertTo-Json -InputObject @(@(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.id -notin 'old-choco', 'foreign' }) -Depth 6 | Set-Content $Store
+# no runtime yet: state Missing
+$none = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+ConvertTo-Json -InputObject @($none | Where-Object { $_.notes -notlike '*PackTuneRuntimeApp*' }) -Depth 6 | Set-Content $Store
+Test-Check 'readiness state without runtime: Missing' ((Get-IntuneChocoRuntimeState).State -eq 'Missing')
+ConvertTo-Json -InputObject @($none) -Depth 6 | Set-Content $Store
+Test-Check 'compat names of the interface point to the one runtime' ((get-ChocoWin32ID) -eq $runtimeId -and (Get-WingetRuntimeWin32ID -NoCreate) -eq $runtimeId)
+# app registration: the old name is recognized, the owner check stays (see GUI smoke test for the creation path)
+$reg = (Get-Command New-IntuneChocoAppRegistration).Parameters
+Test-Check 'app registration is named PackTune and recognizes the old name' ($reg.DisplayName.Attributes.Count -ge 0 -and (Get-Content (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1') -Raw) -match '\[string\]\$DisplayName = "PackTune"' -and (Get-Content (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1') -Raw) -match 'FormerNames = @\("Intune Chocolatey Deployment"\)' -and (Get-Content (Join-Path $repo 'ChocoIntuneDeployment-Main.ps1') -Raw) -match 'you are not its only owner')
 # --- release: supersedence for Available, in place for Required
 $pin = @{ Assignment = 'Available'; IconBase64 = $script:Png; Version = '24.08' }
 $availId = New-IntuneWin32ChocoApplication -ChocoName '7zip' @pin

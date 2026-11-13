@@ -825,18 +825,17 @@ function Get-ReadinessItems {
                     Text = $(if ($busyConnect) { 'Waiting for the sign-in in your browser ...' } else { 'Not signed in' })
                     Fix = 'Sign in'; Action = { Connect-Intune } } })
     )
-    $depsText = 'Chocolatey and winget runtime, created once per tenant, so every app finds its installer'
+    $depsText = 'PackTune Runtime (Chocolatey and winget for SYSTEM), created once per tenant, so every app finds its installer'
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'warn'; Text = $depsText } }
                 elseif ($null -eq $script:TenantApps -or $null -eq $script:RuntimeId) {
                     $reading = (Test-TaskRunning 'tenant') -or (Test-TaskRunning 'deps')
                     @{ Key = 'tenant'; Title = 'Dependency apps in Intune'; State = 'warn'; Wait = $reading
                        Text = $(if ($reading) { 'Reading the apps in the tenant ...' } else { 'The apps in the tenant could not be read yet.' }); Fix = 'Check'; Action = { Start-TenantRefresh } } }
                 else {
-                    $haveChoco = @($script:TenantApps | Where-Object IsChocolatey).Count -gt 0
                     $haveRuntime = [bool]$script:RuntimeId
-                    if ($haveChoco -and $haveRuntime) { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'ok'; Text = 'Chocolatey and the winget runtime are in the tenant.' } }
+                    if ($haveRuntime) { @{ Key = 'deps'; Title = 'Dependency app in Intune'; State = 'ok'; Text = 'The PackTune Runtime is in the tenant.' } }
                     else { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'bad'; Wait = $busyDeps
-                              Text = $(if ($busyDeps) { 'Deploying the dependency apps to Intune ...' } else { "Missing: $(@($(if (-not $haveChoco) { 'Chocolatey' }), $(if (-not $haveRuntime) { 'winget runtime' }) | Where-Object { $_ }) -join ', '). $depsText." })
+                              Text = $(if ($busyDeps) { 'Deploying the PackTune Runtime to Intune ...' } else { "Missing: PackTune Runtime. $depsText." })
                               Fix = 'Create'; Action = { Start-DependencyDeploy } } } })
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
@@ -942,9 +941,9 @@ function Start-DependencyDeploy {
     # Chocolatey app and winget runtime app, once per tenant (each is created only when it is missing)
     if (Test-TaskRunning 'chocolatey') { return }
     Update-UiToken
-    [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the dependency apps (Chocolatey, winget runtime) to Intune' -Display 'Dependency apps' -NeedsAuth -Work 'get-ChocoWin32ID | Out-Null; Get-WingetRuntimeWin32ID | Out-Null' -OnDone {
+    [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the PackTune Runtime to Intune' -Display 'PackTune Runtime' -NeedsAuth -Work 'Get-PackTuneRuntimeWin32ID | Out-Null' -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'succeeded') { Write-UiLog 'Chocolatey and the winget runtime are in the tenant.' 'Success'; Show-Toast 'Dependency apps are in the tenant.' 'ok' }
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'The PackTune Runtime is in the tenant.' 'Success'; Show-Toast 'PackTune Runtime is in the tenant.' 'ok' }
         $script:TenantApps = $null; $script:RuntimeId = $null
         if ($Job.Status -eq 'succeeded') { Start-TenantRefresh } else { Update-Readiness; Complete-SetupStep $false 'deploying the dependency apps' }
     })
@@ -1806,7 +1805,7 @@ function Update-TenantRows {
     $list = New-Object System.Collections.ArrayList
     foreach ($app in $script:TenantApps) { [void]$list.Add($app) }
     if ($script:RuntimeId) {
-        [void]$list.Add([pscustomobject]@{ Id = $script:RuntimeId; DisplayName = 'winget runtime'; Package = ''; Source = 'Winget'; IsChocolatey = $false; IsDependency = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
+        [void]$list.Add([pscustomobject]@{ Id = $script:RuntimeId; DisplayName = 'PackTune Runtime'; Package = ''; Source = 'Winget'; IsChocolatey = $false; IsDependency = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
     }
     $deps = @($list | Where-Object { $_.IsChocolatey -or $_.IsDependency })
     $ordered = @($deps) + @($list | Where-Object { -not ($_.IsChocolatey -or $_.IsDependency) })
@@ -1814,7 +1813,7 @@ function Update-TenantRows {
         $count = $script:DeviceCounts[$app.Id]
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-        $sub = if ($app.IsChocolatey) { 'Dependency of the Chocolatey apps' } elseif ($app.IsDependency) { 'Dependency of the winget apps (App Installer for SYSTEM)' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
+        $sub = if ($app.IsChocolatey) { 'Dependency of the Chocolatey apps' } elseif ($app.IsDependency) { 'Dependency of all apps (Chocolatey and winget for SYSTEM)' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
