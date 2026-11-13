@@ -375,13 +375,14 @@ function Update-JobRow($Job) {
     }
     $progress = switch ($status) { 'running' { [math]::Min(95, [math]::Max(8, [int]($entries.Count * 100 / 9))) } 'queued' { 0 } default { 100 } }
     $logText = (@($entries | ForEach-Object { '{0}  {1}' -f $_.Time, $_.Text }) -join "`n")
+    $jobIcon = if ($Job.Package) { Get-PackageIcon ([string]$Job.Package) $(if ($Job.Source) { [string]$Job.Source } else { 'Chocolatey' }) }
     $open = [bool]$Job.LogOpen -and $entries.Count -gt 0
     Set-Row $row @{
         Sub = $sub; SubFg = $(if ($status -eq 'failed') { '#A11D1D' } else { '#5F5F5F' }); Status = $label
         StatusBg = $script:PillColors[$pillName][0]; StatusFg = $script:PillColors[$pillName][1]
         Progress = $progress; ProgressVis = (ConvertTo-Vis ($status -in 'queued', 'running'))
         Log = $logText; LogVis = (ConvertTo-Vis $open); LogToggle = $(if ($entries.Count) { if ($open) { 'Hide log' } else { 'Show log' } } else { '' })
-        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test')); OpenVis = (ConvertTo-Vis ($status -eq 'succeeded' -and [bool]$row['Open']))
+        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test')); OpenVis = (ConvertTo-Vis ($status -eq 'succeeded' -and [bool]$row['Open'])); Icon = $jobIcon; MonoVis = (ConvertTo-Vis (-not $jobIcon))
     }
 }
 
@@ -1084,6 +1085,14 @@ function New-TagRow([string]$Text, [string]$Kind) {
     }
 }
 
+function Get-AppIconUrl($Src) {
+    # The icon of an app in the list: from the package infos of either source (same for cards, deploy dialog, details)
+    foreach ($source in 'Chocolatey', 'Winget') {
+        $meta = Get-AppMeta $Src $source
+        if ($meta -and $meta.Found -and $meta.IconUrl) { $p = Get-IconPreview ([string]$meta.IconUrl); if ($p) { return [string]$p } }
+    }
+}
+
 function Set-CardRow($Card, $Src) {
     $key = Get-AppKey $Src
     $tags = New-Object System.Collections.ArrayList
@@ -1098,11 +1107,7 @@ function Set-CardRow($Card, $Src) {
     $inTenant = (@($Src.Sources | Where-Object { $id = Get-AppId $Src $_; $id -and $script:TenantPackages.ContainsKey((Get-MetaKey $id $_)) }).Count -gt 0)
     $note = @($Src.Sources | ForEach-Object { $id = Get-AppId $Src $_; $meta = Get-AppMeta $Src $_; if ($meta -and $meta.LicenseNote) { $meta.LicenseNote } else { Get-ChocoLicenseNote $id } } | Where-Object { $_ }) | Select-Object -First 1
     $badge, $kind = if ($inTenant) { 'In tenant', 'ok' } elseif ($note) { 'Check license', 'warn' } else { '', 'ok' }
-    $iconUrl = $null
-    foreach ($source in 'Chocolatey', 'Winget') {
-        $meta = Get-AppMeta $Src $source
-        if (-not $iconUrl -and $meta -and $meta.Found -and $meta.IconUrl) { $p = Get-IconPreview ([string]$meta.IconUrl); if ($p) { $iconUrl = [string]$p } }
-    }
+    $iconUrl = Get-AppIconUrl $Src
     $custom = $script:CustomIcons[$key]
     Set-Row $Card (@{
         Data = $Src; Title = $Src.Name; Items = $tags.ToArray(); Selected = [bool]$script:Selected.Contains($key)
@@ -1461,8 +1466,11 @@ $script:DeployVersionTexts = @{}
 
 function Get-SourceOptionText($Src, [string]$Source) {
     $v = if ($Source -eq 'Winget') { $Src.WingetVersion } else { $Src.ChocoVersion }
-    $text = "$(Get-SourceLabel $Source)$(if ($v) { ' ' + $v })"
-    if ($Src.RecommendedMarked -and $Src.Recommended -eq $Source) { $text += ', recommended (newer)' }
+    $other = if ($Source -eq 'Winget') { $Src.ChocoVersion } else { $Src.WingetVersion }
+    $id = Get-AppId $Src $Source
+    $text = "$(Get-SourceLabel $Source)$(if ($v) { ' ' + $v } elseif ($id -and (Test-MetaMissing $id $Source)) { ' (version loading)' } else { ' (version unknown)' })"
+    # Recommended only when both versions are known and this one is newer
+    if ($Src.RecommendedMarked -and $Src.Recommended -eq $Source -and $v -and $other) { $text += ', recommended (newer)' }
     $text
 }
 
@@ -1487,6 +1495,11 @@ function Show-DeployDialog {
     if ($script:Selected.Count -eq 0) { throw 'Select at least one app first.' }
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
     if (-not $script:ModuleState.Ok) { throw "IntuneWin32App $($script:MinimumModuleVersion) or newer is required (Start > Get ready)." }
+    # The rows as they are now (feed infos may have arrived since the apps were selected)
+    foreach ($key in @($script:Selected.Keys)) {
+        $fresh = @(@($script:SourceRows) + @($script:SearchRows) | Where-Object { (Get-AppKey $_) -eq $key }) | Select-Object -First 1
+        if ($fresh) { $script:Selected[$key] = $fresh }
+    }
     $ui.PanelDeployRows.Children.Clear()
     $script:DeployCombos.Clear()
     foreach ($src in $script:Selected.Values) {
@@ -1504,7 +1517,16 @@ function Show-DeployDialog {
         $tileBox = New-Object System.Windows.Controls.Border
         $tileBox.Width = 32; $tileBox.Height = 32; $tileBox.CornerRadius = 7; $tileBox.Background = ConvertTo-Brush $tile.TileBg; $tileBox.Margin = '0,0,12,0'
         $letter = New-Object System.Windows.Controls.TextBlock; $letter.Text = $tile.Mono; $letter.FontWeight = 'Bold'; $letter.FontSize = 13; $letter.Foreground = ConvertTo-Brush $tile.TileFg
-        $letter.HorizontalAlignment = 'Center'; $letter.VerticalAlignment = 'Center'; $tileBox.Child = $letter
+        $letter.HorizontalAlignment = 'Center'; $letter.VerticalAlignment = 'Center'
+        $tileIcon = Get-AppIconUrl $src
+        $tileGrid = New-Object System.Windows.Controls.Grid
+        [void]$tileGrid.Children.Add($letter)
+        if ($tileIcon) {
+            $img = New-Object System.Windows.Controls.Image; $img.Margin = '3'; $img.Source = ConvertTo-ImageSource $tileIcon
+            [System.Windows.Media.RenderOptions]::SetBitmapScalingMode($img, 'HighQuality')
+            [void]$tileGrid.Children.Add($img); $letter.Visibility = 'Collapsed'
+        }
+        $tileBox.Child = $tileGrid
         $label = New-Object System.Windows.Controls.TextBlock; $label.Text = $src.Name; $label.FontWeight = 'SemiBold'; $label.VerticalAlignment = 'Center'
         [void]$name.Children.Add($tileBox); [void]$name.Children.Add($label)
         $combo = New-Object System.Windows.Controls.ComboBox
@@ -2693,11 +2715,16 @@ function Test-EmbeddedSignIn {
     finally { $window.Cursor = $null }
 }
 
+# One WebView2 profile for the whole run: the setup sign-in and the normal sign-in share the Microsoft session
+$script:SignInSession = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
+$script:SignInHint = ''
 function Invoke-EmbeddedSignIn {
     # Sign-in window, modal to the main window (its timer keeps the background tasks running). Returns the token response.
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint)
-    if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes) }
-    Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -Title 'Sign in to Microsoft' -Hint $Hint
+    if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes $script:SignInHint) }
+    $params = @{ TenantID = $TenantID; ClientID = $ClientID; Scopes = $Scopes; CacheFolder = (Join-Path $script:WorkRoot 'WebView2'); Owner = $window; Title = 'Sign in to Microsoft'; Hint = $Hint; UserDataFolder = $script:SignInSession }
+    if ($script:SignInHint) { $params.LoginHint = $script:SignInHint; $params.Prompt = 'select_account' }
+    Invoke-IntuneChocoBrowserSignIn @params
 }
 
 function Test-EmbeddedStartFailure($ErrorRecord) { $ErrorRecord.Exception.Message -like 'The embedded browser could not start*' }
@@ -2713,7 +2740,13 @@ function Get-EmbeddedToken {
         Write-UiLog "Embedded sign-in not available: $script:EmbeddedReason" 'Warning'
         return $null
     }
-    try { $script:LastSignInPath = 'embedded'; return (Invoke-EmbeddedSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Hint $Hint) }
+    try {
+        $script:LastSignInPath = 'embedded'
+        $token = Invoke-EmbeddedSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Hint $Hint
+        # The account that signed in is the login hint of the next sign-in in this run (same session, no second password)
+        try { $claims = Get-IntuneChocoTokenClaims ([string]$token.access_token); $account = if ($claims.upn) { $claims.upn } elseif ($claims.preferred_username) { $claims.preferred_username } else { '' }; if ($account) { $script:SignInHint = [string]$account } } catch { }
+        return $token
+    }
     catch {
         if (Test-EmbeddedStartFailure $_) {
             $script:LastSignInPath = ''
@@ -3028,6 +3061,7 @@ $window.Add_Closing({
     }
 })
 $window.Add_Closed({
+    try { if (Test-Path $script:SignInSession) { Remove-Item $script:SignInSession -Recurse -Force -ErrorAction SilentlyContinue } } catch { }
     $timer.Stop()
     Save-MetaCache
     # Not waited for: a task may sit in a web request, and the process ends right after this anyway

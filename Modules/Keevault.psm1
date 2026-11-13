@@ -314,6 +314,9 @@ function Invoke-IntuneChocoBrowserSignIn {
         [scriptblock]$Passkey,
         [string]$Title = 'Sign in to Microsoft Intune',
         [string]$Hint,
+        # Profile folder kept after the window closes (shared session) and the prompt: login (always ask) or select_account
+        [string]$UserDataFolder,
+        [ValidateSet("login", "select_account", "none")][string]$Prompt = "login",
         [System.Windows.Window]$Owner,
         # Tests: gets ($win, $wv) before the window opens (e.g. to render it off-screen)
         [scriptblock]$Configure
@@ -336,7 +339,7 @@ function Invoke-IntuneChocoBrowserSignIn {
         state                 = $state
         code_challenge        = $challenge
         code_challenge_method = 'S256'
-        prompt                = 'login'
+        prompt                = $Prompt
     }
     if ($LoginHint) { $query.login_hint = $LoginHint }
     $url = "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/authorize?" + (($query.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, [Uri]::EscapeDataString($_.Value) }) -join '&')
@@ -372,7 +375,8 @@ function Invoke-IntuneChocoBrowserSignIn {
     $foot.Child = $cancel
     [void]$grid.Children.Add($foot)
 
-    $userData = Join-Path ([IO.Path]::GetTempPath()) ('IntuneChocoSignIn-' + [guid]::NewGuid().ToString('N'))
+    $persistent = [bool]$UserDataFolder   # a shared profile keeps the Microsoft session between sign-ins of the same run (no second password)
+    $userData = if ($persistent) { $UserDataFolder } else { Join-Path ([IO.Path]::GetTempPath()) ('IntuneChocoSignIn-' + [guid]::NewGuid().ToString('N')) }
     $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
     $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
     $props.UserDataFolder = $userData
@@ -463,8 +467,8 @@ function Invoke-IntuneChocoBrowserSignIn {
     try { [void]$win.ShowDialog() }
     finally {
         $wv.Dispose()
-        Start-Sleep -Milliseconds 300
-        Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not $persistent) { Start-Sleep -Milliseconds 300 }
+        if (-not $persistent) { Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
     if ($ctx.Error) { throw $ctx.Error }

@@ -301,6 +301,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'recommended source is labelled when versions differ' ((@($zip.Combo.Items) -join '|') -match 'recommended' -or -not $zip.Src.RecommendedMarked) (@($zip.Combo.Items) -join ' | ')
             Test-Smoke 'dialog starts with the settings defaults' ($ui.CmbDeployAssign.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
             Test-Smoke 'dependency hint shown' ($ui.TxtDeployDependency.Inlines.Count -ge 2)
+            $tiles = @($script:DeployCombos | ForEach-Object { $want = Get-AppIconUrl $_.Src; $row = $ui.PanelDeployRows.Children[$script:DeployCombos.IndexOf($_)]; $img = Find-Visual $row ([System.Windows.Controls.Image]); if ($want) { [bool]($img -and $img.Source) } else { -not $img } })
+            Test-Smoke 'deploy dialog rows show the same app icon as the cards (letter tile only without an icon)' ($tiles.Count -eq 2 -and $tiles -notcontains $false) ($tiles -join ',')
+            $fake = [pscustomobject]@{ ChocoId = 'x.fake'; WingetId = 'Fake.Fake'; ChocoVersion = '1.0'; WingetVersion = $null; RecommendedMarked = $true; Recommended = 'Chocolatey' }
+            Test-Smoke 'unknown version of the other source: not called recommended, source still offered with its state' ((Get-SourceOptionText $fake 'Chocolatey') -notlike '*recommended*' -and (Get-SourceOptionText $fake 'Winget') -like 'winget (version *') ((Get-SourceOptionText $fake 'Chocolatey') + ' | ' + (Get-SourceOptionText $fake 'Winget'))
             $ui.CmbDeployUpdate.SelectedIndex = 2
             Test-Smoke 'grace period appears for the user prompt' ($ui.PanelDeployGrace.Visibility -eq 'Visible' -and $ui.TxtDeployUpdateHelp.Text -like '*installed anyway*')
             $ui.TxtDeployGrace.Text = 'x'
@@ -334,6 +338,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1 -or $script:Toasts.Count -ge 1 -or (Get-SmokeLog) -match 'created in Intune')
         $zipRow = @($script:JobRows | Where-Object { $_['Title'] -eq '7-Zip' })[0]
         Test-Smoke 'finished deploy row offers Open in Intune with the app id' ($zipRow['OpenVis'] -eq 'Visible' -and $zipRow['Open'] -eq $zip.id) "$($zipRow['OpenVis']) $($zipRow['Open'])"
+        Test-Smoke 'activity row shows the app icon like the card' ($zipRow['Icon'] -eq (Get-PackageIcon '7zip.install' 'Chocolatey')) $zipRow['Icon']
         Show-Page 'Activity'
         Save-SmokeShot '06-activity-done'
         $true } }
@@ -985,7 +990,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 $script:EmbeddedCalls = New-Object System.Collections.ArrayList
                 $script:EmbeddedAvailableOverride = $true
-                $script:EmbeddedSignInOverride = { param($t, $c, $sc) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','))); New-FakeToken 'Embedded Admin' }
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','), $h)); New-FakeToken 'Embedded Admin' }
                 $script:Shared.UrlHit = $false
                 Connect-Intune
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
@@ -1000,6 +1005,12 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 Test-Smoke 'app registration setup signs in with the embedded window (setup app, admin scopes)' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls[0][2] -like '*Application.ReadWrite.All*DelegatedPermissionGrant.ReadWrite.All*') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'setup finished with the embedded token, browser untouched' (-not $script:Shared.UrlHit -and (Get-SmokeLog) -match 'App registration ready' -and (Get-JobLog) -match 'Admin consent granted') ''
+                # Shared session: the account of the setup sign-in is the login hint of the next one
+                $script:EmbeddedCalls.Clear()
+                Connect-Intune
+                Test-Smoke 'normal sign-in after the setup gets the setup account as login hint (shared session)' ($script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][3] -eq 'admin@contoso.onmicrosoft.com') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
+                Test-Smoke 'one sign-in profile folder per run' ($script:SignInSession -like '*PackTuneSignIn-*')
+                Disconnect-Intune
                 # The system browser as an explicit choice
                 $script:Shared.UrlHit = $false
                 $script:EmbeddedCalls.Clear()

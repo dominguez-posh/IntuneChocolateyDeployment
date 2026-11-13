@@ -102,7 +102,7 @@
                             <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Border Style="{StaticResource MonoTile}" Width="32" Height="32" CornerRadius="7" Background="{Binding [TileBg]}" Margin="0,0,12,0">
-                            <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Grid><TextBlock Text="{Binding [Mono]}" FontWeight="Bold" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding [MonoVis]}"/><Image Source="{Binding [Icon]}" Margin="3"/></Grid>
                         </Border>
                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
