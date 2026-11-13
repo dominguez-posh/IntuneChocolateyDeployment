@@ -185,6 +185,17 @@ $MicrosoftPublisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redm
 . ([scriptblock]::Create($sigFn.Extent.Text))
 $unsigned = Join-Path $work 'fake.msixbundle'; 'not a package' | Set-Content $unsigned
 Test-Check 'runtime: an unsigned download is refused' ($(try { Assert-MicrosoftSigned $unsigned; $false } catch { $_.Exception.Message -like '*not validly signed by Microsoft*' }))
+# Chain root pinned to Microsoft Root Certificate Authority 2011 (an enterprise CA with the Microsoft subject must fail)
+Test-Check 'runtime: signer chain must end in the Microsoft Root CA 2011' ($rtInstall -match '\$MicrosoftRoots = @\("8F43288AD272F3103B6FB1428485EA3014C0BCFE"\)' -and $rtInstall -match '\$Chain\.Build\(\$Signature\.SignerCertificate\)' -and $rtInstall -match '\$Root -notin \$MicrosoftRoots')
+$edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+if (Test-Path -LiteralPath $edge) {
+    # Edge is signed by "Microsoft Corporation" and chains to Root 2011: accepted with the real pin, refused with another root
+    $MicrosoftRoots = @('8F43288AD272F3103B6FB1428485EA3014C0BCFE')
+    Test-Check 'runtime: a Microsoft Corporation file chaining to Root 2011 is accepted' ($(try { Assert-MicrosoftSigned $edge; $true } catch { $false }))
+    $MicrosoftRoots = @('0000000000000000000000000000000000000000')
+    Test-Check 'runtime: same subject but another root is refused' ($(try { Assert-MicrosoftSigned $edge; $false } catch { $_.Exception.Message -like '*does not chain to the Microsoft root*' }))
+    $MicrosoftRoots = @('8F43288AD272F3103B6FB1428485EA3014C0BCFE')
+}
 # Validly signed, but by "Microsoft Windows" (catalog), not by the App Installer publisher
 Test-Check 'runtime: a valid signature of another Microsoft publisher is refused' ($(try { Assert-MicrosoftSigned "$env:SystemRoot\System32\notepad.exe"; $false } catch { $_.Exception.Message -like '*status Valid*' -or $_.Exception.Message -like '*not validly signed*' }))
 

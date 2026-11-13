@@ -354,11 +354,21 @@ try {
 
     # Only packages signed by Microsoft are provisioned: the download is pinned to Microsoft's signature, not only to TLS
     $MicrosoftPublisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    # Microsoft Root Certificate Authority 2011
+    $MicrosoftRoots = @("8F43288AD272F3103B6FB1428485EA3014C0BCFE")
     function Assert-MicrosoftSigned([string]$Path) {
         $Signature = Get-AuthenticodeSignature -LiteralPath $Path
         $Signer = if ($Signature.SignerCertificate) { [string]$Signature.SignerCertificate.Subject } else { "" }
         if ([string]$Signature.Status -ne "Valid" -or $Signer -ne $MicrosoftPublisher) {
             throw "$(Split-Path -Path $Path -Leaf) is not validly signed by Microsoft (status $($Signature.Status), signer '$Signer'); nothing is installed"
+        }
+        # The chain must end in Microsoft's own root, not in a CA the enterprise trusts (TLS inspection could issue a
+        # certificate with the Microsoft subject). Bundle and dependency packages all chain to this root (checked).
+        $Chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        [void]$Chain.Build($Signature.SignerCertificate)
+        $Root = if ($Chain.ChainElements.Count -gt 0) { [string]$Chain.ChainElements[$Chain.ChainElements.Count - 1].Certificate.Thumbprint } else { "" }
+        if ($Root -notin $MicrosoftRoots) {
+            throw "$(Split-Path -Path $Path -Leaf) does not chain to the Microsoft root (root '$Root'); nothing is installed"
         }
     }
 
