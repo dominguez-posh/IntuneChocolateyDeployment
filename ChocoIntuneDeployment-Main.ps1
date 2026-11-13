@@ -70,7 +70,9 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 4
+$script:DeviceScriptRevision = 5
+# Longest random delay of the update tasks that is read back from the notes (one week)
+$script:MaxDelayMinutes = 10080
 
 # Packages whose software license restricts business use or distribution
 $script:LicenseNotes = @{
@@ -318,6 +320,7 @@ function New-ChocoAppPolicy {
     )
     if ($Version -eq "latest") { $Version = "" }
     if ($Version -and $Version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') { throw "'$Version' is not a valid package version" }
+    Assert-ChocoPackageSource $PackageSource
     $ScheduleObject = New-ChocoSchedule -Values $Schedule
     if ($UpdateMode -eq "Startup" -and -not ($ScheduleObject.TriggerStart -or $ScheduleObject.TriggerWindow -or $ScheduleObject.IdleMinutes -gt 0 -or $ScheduleObject.TriggerLogon)) {
         throw "Automatic updates need at least one trigger (PC start, time window, idle or sign-in)"
@@ -340,6 +343,22 @@ function New-ChocoAppPolicy {
         Fingerprint           = $Hash
     }
 }#Returns the update policy of an app with its fingerprint
+
+function Assert-ChocoPackageSource {
+    # A feed URL must not carry a user name, password, query or fragment: they end up in the notes of the app and in
+    # the device scripts, readable for everyone who can read the app in Intune (credentials belong on the device)
+    param([string]$PackageSource)
+    if (-not $PackageSource) { return }
+    $Uri = $null
+    if ([uri]::TryCreate($PackageSource, [UriKind]::Absolute, [ref]$Uri) -and -not $Uri.IsFile -and ($Uri.UserInfo -or $Uri.Query -or $Uri.Fragment)) {
+        throw "The package source must not contain a user name, password or query parameters (e.g. an API key): $($Uri.Scheme)://$($Uri.Host)$($Uri.AbsolutePath)"
+    }
+}#Refuses feed URLs with credentials or query
+
+function Test-HttpsUrl([string]$Url) {
+    $Uri = $null
+    return ([uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$Uri) -and $Uri.Scheme -eq "https" -and -not $Uri.UserInfo)
+}#True for an absolute https URL without user info
 
 function Get-DeviceScheduleText {
     # The schedule as compact JSON for a single-quoted string of a device script (ASCII only, quotes doubled)
@@ -371,9 +390,18 @@ function ConvertFrom-ChocoAppNotes {
     if ($Notes -match 'package=([A-Za-z0-9._+-]+)') { $Result.Package = $Matches[1] }
     if ($Notes -match 'version=([0-9A-Za-z.+-]+)' -and $Matches[1] -ne "latest") { $Result.Version = $Matches[1] }
     if ($Notes -match 'update=(Off|Startup|Custom)') { $Result.UpdateMode = $Matches[1]; $Result.HasPolicy = $true }
-    if ($Notes -match 'grace=(\d+)') { $Result.GraceHours = [int]$Matches[1] }
-    if ($Notes -match 'source=([^;]*)') { $Result.PackageSource = [uri]::UnescapeDataString($Matches[1]) }
-    if ($Notes -match 'delay=(\d+)-(\d+)') { $Result.UpdateDelayMinMinutes = [int]$Matches[1]; $Result.UpdateDelayMaxMinutes = [int]$Matches[2] }
+    # Numbers with TryParse and clamped to the valid ranges: crafted notes (grace=99999999999) must not break the app list
+    $Number = 0
+    if ($Notes -match 'grace=(\d+)' -and [int]::TryParse($Matches[1], [ref]$Number)) { $Result.GraceHours = [Math]::Min(2160, [Math]::Max(1, $Number)) }
+    if ($Notes -match 'source=([^;]*)') { try { $Result.PackageSource = [uri]::UnescapeDataString($Matches[1]) } catch { } }
+    if ($Notes -match 'delay=(\d+)-(\d+)') {
+        $Min = 0; $Max = 0
+        if ([int]::TryParse($Matches[1], [ref]$Min) -and [int]::TryParse($Matches[2], [ref]$Max)) {
+            $Min = [Math]::Min($script:MaxDelayMinutes, $Min)
+            $Result.UpdateDelayMinMinutes = $Min
+            $Result.UpdateDelayMaxMinutes = [Math]::Min($script:MaxDelayMinutes, [Math]::Max($Min, $Max))
+        }
+    }
     if ($Notes -match '(?:^|;)cfg=([A-Za-z0-9_-]+)') {
         try { $Result.Schedule = ConvertFrom-ChocoScheduleCfg $Matches[1]; $Result.HasSchedule = $true }
         catch { Write-Warning "The schedule in the notes could not be read, using the defaults: $($_.Exception.Message)" }
@@ -991,6 +1019,10 @@ function Get-ChocoIconBase64 {
     if ($IconFile) {
         $Bytes = [IO.File]::ReadAllBytes((Resolve-Path $IconFile).ProviderPath)
     }
+    elseif ($IconUrl -and -not (Test-HttpsUrl $IconUrl)) {
+        # The URL comes from the package metadata: only https, never file, UNC or plain http
+        Write-Warning "The icon of $ChocoName is not downloaded: $IconUrl is not an https URL"
+    }
     elseif ($IconUrl) {
         try {
             $Download = Join-Path $WorkPath "download"
@@ -1030,10 +1062,44 @@ function Get-DeviceScriptCommon {
     # Functions of install.ps1 and update.ps1, for Chocolatey and winget apps: the device wide lock and the protected
     # folders of the update helpers (both run as SYSTEM)
     return @'
-# One choco or winget operation at a time on the device, for all apps of both sources
+# Every folder of this tool on the device is under %ProgramFiles%\IntuneChocoDeployment: Chocolatey\<package>,
+# Winget\<id>, Winget\Runtime, Winget\Logs. Users cannot create anything in %ProgramFiles%, so no user can prepare
+# this tree (with links or own folders) before SYSTEM uses it. Older versions used %ProgramData%\IntuneChocoUpdates and
+# %ProgramData%\IntuneWingetDeployment; those folders are left alone (a user could have changed them).
+$ToolRoot = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "IntuneChocoDeployment"
+# SYSTEM, Administrators, TrustedInstaller
+$script:AdminSids = @("S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+
+# One choco or winget operation at a time on the device, for all apps of both sources. The mutex gets a security
+# descriptor (SYSTEM and Administrators only, nothing for users). One that exists already and belongs to someone else
+# was made by a user to block or steer the installations: then nothing is installed (fail closed) and the cause logged.
 $script:LockHeld = $false
-$script:Lock = New-Object System.Threading.Mutex($false, "Global\IntuneChocoDeployment")
+$script:Lock = $null
+$script:LockError = ""
+function Open-DeploymentLock {
+    $Name = "Global\IntuneChocoDeployment"
+    $Security = New-Object System.Security.AccessControl.MutexSecurity
+    foreach ($Sid in "S-1-5-18", "S-1-5-32-544") {
+        $Identity = New-Object System.Security.Principal.SecurityIdentifier $Sid
+        $Security.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule($Identity, [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $Created = $false
+    try { $Mutex = [System.Threading.Mutex]::new($false, $Name, [ref]$Created, $Security) }
+    catch { $script:LockError = "the lock $Name exists but cannot be opened, so it was not made by this tool: nothing is installed ($($_.Exception.GetType().Name))"; return $null }
+    if (-not $Created) {
+        $Owner = ""
+        try { $Owner = $Mutex.GetAccessControl().GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        if ($Owner -notin $script:AdminSids) {
+            $Mutex.Dispose()
+            $script:LockError = "the lock $Name belongs to someone else (owner '$Owner'), not to SYSTEM or Administrators: nothing is installed"
+            return $null
+        }
+    }
+    return $Mutex
+}
 function Enter-DeploymentLock {
+    if (-not $script:Lock) { $script:Lock = Open-DeploymentLock }
+    if (-not $script:Lock) { Write-DeviceLog $script:LockError; Write-Host $script:LockError; return $false }
     try { $script:LockHeld = $script:Lock.WaitOne([TimeSpan]::FromMinutes(30)) }
     catch [System.Threading.AbandonedMutexException] { $script:LockHeld = $true }
     return $script:LockHeld
@@ -1048,10 +1114,36 @@ function Test-ForeignItem([string]$Path) {
     if (-not $Item) { return $false }
     if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $true }
     try { $Owner = $Item.GetAccessControl("Owner").GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { return $true }
-    return $Owner -notin "S-1-5-18", "S-1-5-32-544"
+    return $Owner -notin $script:AdminSids
+}
+function Test-AdminOnlyFolder([string]$Path) {
+    # A real folder (no link), owned by SYSTEM, Administrators or TrustedInstaller, in which nobody else may create,
+    # change or delete anything. Only in such a folder SYSTEM writes, creates or removes files.
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $Item -or -not $Item.PSIsContainer -or ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    try {
+        $Acl = $Item.GetAccessControl()
+        if ($Acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $script:AdminSids) { return $false }
+        # write data, append, write attributes, delete child, delete, change permissions, take ownership, generic all/write
+        $Write = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+        foreach ($Rule in $Acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+            if ($Rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($Rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (([int]$Rule.FileSystemRights -band $Write) -and $Rule.IdentityReference.Value -notin $script:AdminSids) { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+function Assert-ToolPath([string]$Path) {
+    # SYSTEM changes files and folders only inside %ProgramFiles%\IntuneChocoDeployment
+    $Full = [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    if ($Full -ne $ToolRoot -and -not $Full.StartsWith($ToolRoot + "\", [StringComparison]::OrdinalIgnoreCase)) { throw "$Path is not a folder of this tool, nothing is changed there" }
 }
 function Remove-ItemSafely([string]$Path) {
-    # Links are removed themselves, never what they point to
+    # Only inside the tool's folder (no user can create anything there); links are removed themselves, never what
+    # they point to
+    Assert-ToolPath $Path
     $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if (-not $Item) { return }
     $IsLink = [bool]($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)
@@ -1062,18 +1154,17 @@ function Remove-ItemSafely([string]$Path) {
     }
     else { [IO.File]::Delete($Path) }
 }
-function Remove-ForeignItems([string]$Path) {
-    foreach ($Child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
-        if (Test-ForeignItem $Child.FullName) { Remove-ItemSafely $Child.FullName }
-        elseif ($Child.PSIsContainer) { Remove-ForeignItems $Child.FullName }
-    }
-}
 function Protect-Folder([string]$Path) {
     # Owner SYSTEM, no inherited rights: SYSTEM and Administrators full control, Users read and execute.
-    # A folder a user created before (e.g. to replace update.ps1, which runs as SYSTEM) is removed first.
+    # Only folders of this tool, parent first: the parent must be admin-only and the folder must not be a link or a
+    # file. Nothing is removed or entered recursively; anything unexpected stops the script (fail closed).
     # SIDs, not names: the names are translated on non-English Windows.
-    if (Test-ForeignItem $Path) { Remove-ItemSafely $Path }
-    New-Item -Path $Path -ItemType Directory -Force | Out-Null
+    Assert-ToolPath $Path
+    $Parent = Split-Path -Path $Path -Parent
+    if (-not (Test-AdminOnlyFolder $Parent)) { throw "$Parent is not protected (link, other owner or writable for users), nothing is changed" }
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($Item -and (-not $Item.PSIsContainer -or ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint))) { throw "$Path is a link or a file, nothing is changed" }
+    if (-not $Item) { [void][IO.Directory]::CreateDirectory($Path) }
     $Acl = New-Object System.Security.AccessControl.DirectorySecurity
     $Acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier "S-1-5-18"))
     $Acl.SetAccessRuleProtection($true, $false)
@@ -1082,11 +1173,10 @@ function Protect-Folder([string]$Path) {
         $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Sid, $Entry[1], "ContainerInherit, ObjectInherit", "None", "Allow")))
     }
     [IO.Directory]::SetAccessControl($Path, $Acl)
-    # Now nobody else can add anything; what is left from before and not ours goes
-    Remove-ForeignItems $Path
 }
 function Write-ProtectedFile([string]$Path, [string]$Text) {
     # A new file instead of writing into an existing one (which could be a hard link)
+    Assert-ToolPath $Path
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII
 }
@@ -1095,39 +1185,52 @@ function Write-ProtectedFile([string]$Path, [string]$Text) {
 # diagnostics" in Intune includes it. At 1 MB it becomes IntuneChocoDeployment-<id>.1.log (one rollover).
 # The scripts set $LogId (package or winget id, file name safe) and $LogTag before they log.
 function Add-CappedLine([string]$Path, [string]$Line) {
+    # Only into a folder no user can write to (so nobody can have prepared the file or a link there), and never into
+    # a link or a file that belongs to someone else: then nothing is written (fail closed)
     try {
-        if (Test-ForeignItem $Path) { Remove-ItemSafely $Path }
+        if (-not (Test-AdminOnlyFolder (Split-Path -Path $Path -Parent))) { return }
+        if (Test-ForeignItem $Path) { return }
         if ((Test-Path -LiteralPath $Path) -and (Get-Item -LiteralPath $Path).Length -gt 1MB) {
-            Move-Item -LiteralPath $Path -Destination ($Path -replace '\.log$', '.1.log') -Force
+            $Old = $Path -replace '\.log$', '.1.log'
+            if (Test-ForeignItem $Old) { return }
+            Move-Item -LiteralPath $Path -Destination $Old -Force
         }
         Add-Content -LiteralPath $Path -Value $Line
     }
     catch { }
 }
 function Write-DeviceLog([string]$Text) {
-    # The folder belongs to the Intune Management Extension (admin only); it is not created here
+    # The folder belongs to the Intune Management Extension (SYSTEM and Administrators only); it is not created here.
+    # It and the folders above it are checked once per run, not trusted: links or rights for users mean no log there.
     $Dir = Join-Path $env:ProgramData "Microsoft\IntuneManagementExtension\Logs"
-    if (Test-Path -LiteralPath $Dir) { Add-CappedLine (Join-Path $Dir "IntuneChocoDeployment-$LogId.log") ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $LogTag, $Text) }
+    if ($null -eq $script:DeviceLogOk) {
+        $script:DeviceLogOk = $true
+        foreach ($Level in (Join-Path $env:ProgramData "Microsoft"), (Join-Path $env:ProgramData "Microsoft\IntuneManagementExtension"), $Dir) {
+            if (-not (Test-AdminOnlyFolder $Level)) { $script:DeviceLogOk = $false }
+        }
+    }
+    if ($script:DeviceLogOk) { Add-CappedLine (Join-Path $Dir "IntuneChocoDeployment-$LogId.log") ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $LogTag, $Text) }
 }
 
-# last-result.json: the last attempt of this app, in its protected folder (%ProgramData%\IntuneChocoUpdates\<package>
-# or %ProgramData%\IntuneWingetDeployment\<id>), written by install.ps1 and update.ps1. One JSON object, plain ASCII:
-#   Format     1 (raised when fields change meaning)
-#   Package    Chocolatey package id or winget id
-#   Time       time of the attempt, ISO 8601 with offset, local time
-#   Action     install | upgrade | uninstall | check | restart
-#   Status     ok | failed | skipped | pending   (skipped = a condition did not allow it now, pending = update known, not installed yet)
-#   ExitCode   exit code of choco, winget or the installer; 0 for ok, skipped and pending
-#   Cause      short text, e.g. "ok", "up to date", "waiting: on battery", "failed: exit code 1603"
-#   Installed  installed version after the attempt, "" when unknown
-#   Target     version aimed at (pinned version or newest known), "" when unknown
+# last-result.json: the last attempt of this app, in its protected folder (%ProgramFiles%\IntuneChocoDeployment\
+# Chocolatey\<package> or ...\Winget\<id>), written by install.ps1 and update.ps1, read by the status script
+# (Get-InsightStatusScriptText in Modules\TenantInsight.psm1). One JSON object, plain ASCII:
+#   format            1 (raised when fields change meaning)
+#   package           Chocolatey package id or winget id
+#   lastAttempt       time of the attempt, ISO 8601 with offset, local time
+#   action            install | upgrade | uninstall | check | restart
+#   status            ok | failed | skipped | pending   (skipped = a condition did not allow it now, pending = update known, not installed yet)
+#   exitCode          exit code of choco, winget or the installer; 0 for ok, skipped and pending
+#   cause             short text, e.g. "ok", "up to date", "waiting: on battery", "failed: exit code 1603"
+#   installedVersion  installed version after the attempt, "" when unknown
+#   targetVersion     version aimed at (pinned version or newest known), "" when unknown
 # $ResultFile is set by the scripts once the folder is protected.
 function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [string]$Cause, [string]$Installed = "", [string]$Target = "") {
     if (-not $ResultFile) { return }
     $Clean = { param($Text) $Short = ([string]$Text -replace '[^\x20-\x7E]', '?'); if ($Short.Length -gt 120) { $Short.Substring(0, 120) } else { $Short } }
     try {
-        $Result = [ordered]@{ Format = 1; Package = (& $Clean $LogId); Time = (Get-Date).ToString("o"); Action = $Action; Status = $Status
-            ExitCode = $ExitCode; Cause = (& $Clean $Cause); Installed = (& $Clean $Installed); Target = (& $Clean $Target) }
+        $Result = [ordered]@{ format = 1; package = (& $Clean $LogId); lastAttempt = (Get-Date).ToString("o"); action = $Action; status = $Status
+            exitCode = $ExitCode; cause = (& $Clean $Cause); installedVersion = (& $Clean $Installed); targetVersion = (& $Clean $Target) }
         Write-ProtectedFile $ResultFile ($Result | ConvertTo-Json -Compress)
     }
     catch { }
@@ -1137,16 +1240,23 @@ function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [stri
 
 function Get-ScreenProbeScript {
     # Runs in the session of a signed-in user (started on demand by update.ps1 through the task "Probe <id> screen state"):
-    # asks Windows whether the user is presenting or has a full-screen app and writes the answer for update.ps1.
+    # asks Windows whether the user is presenting or has a full-screen app and leaves the answer for update.ps1.
     return @'
-# Writes SHQueryUserNotificationState of this session to %LOCALAPPDATA%\IntuneChocoUpdates\screen-state.txt
+# Writes SHQueryUserNotificationState of this session to the registry of this user,
+# HKCU\Software\IntuneChocoDeployment\ScreenProbe: State (number) and Nonce (the value update.ps1 passed, so it knows
+# the answer is fresh). Not a file: SYSTEM never opens a file in the profile of a user for this.
+# (The exit code cannot carry the answer: the task starts this through conhost --headless, which always returns 0.)
 #   2 busy (full screen), 3 Direct3D full screen, 4 presentation mode, 5 ready for notifications, 6 quiet time, 7 app
+param([string]$Nonce = "")
+if ($Nonce -notmatch '^[0-9a-f]{32}$') { exit 1 }
 Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class NotifyState { [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state); }'
 $State = 0
 [void][NotifyState]::SHQueryUserNotificationState([ref]$State)
-$Folder = Join-Path $env:LOCALAPPDATA "IntuneChocoUpdates"
-New-Item -Path $Folder -ItemType Directory -Force | Out-Null
-Set-Content -Path (Join-Path $Folder "screen-state.txt") -Value $State
+$Key = "HKCU:\Software\IntuneChocoDeployment\ScreenProbe"
+if (-not (Test-Path -LiteralPath $Key)) { New-Item -Path $Key -Force | Out-Null }
+Set-ItemProperty -LiteralPath $Key -Name State -Value ([int]$State) -Type DWord
+Set-ItemProperty -LiteralPath $Key -Name Nonce -Value $Nonce -Type String
+exit 0
 '@
 }#Script that reports the screen state of a user session
 
@@ -1237,7 +1347,8 @@ function Register-UpdateTasks {
         # On demand only: update.ps1 starts it in the session of each signed-in user to ask for the screen state
         $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
         $ProbeScript = Join-Path $AppRoot "probe.ps1"
-        $ProbeAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$ProbeScript`""
+        # $(Arg0) = the nonce update.ps1 passes with RunEx
+        $ProbeAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$ProbeScript`" -Nonce `$(Arg0)"
         $ProbeSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances Parallel
         Register-ScheduledTask -TaskName $TaskNames[8] -TaskPath $TaskPath -Action $ProbeAction -Principal $Users -Settings $ProbeSettings -Force -ErrorAction Stop | Out-Null
     }
@@ -1287,8 +1398,10 @@ function Test-Metered {
 }
 function Test-ScreenBusy {
     # SHQueryUserNotificationState only answers for the session of the caller. SYSTEM has none, so the task "Probe ..."
-    # (Users group, runs probe.ps1) is started in each signed-in session; the answer comes back in a file in the profile
-    # of that user (the user could write a wrong answer there; that only moves the time of an update, nothing else).
+    # (Users group, runs probe.ps1) is started in each signed-in session with a random nonce; the answer comes back in the
+    # registry of that user (HKU\<sid>\Software\IntuneChocoDeployment\ScreenProbe, values State and Nonce). No file of
+    # the user is opened as SYSTEM; the value is only parsed as a number and never logged. The user could give a wrong
+    # answer there; that only moves the time of an update, nothing else.
     try {
         $Sessions = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Where-Object { $_.SessionId -gt 0 } | Sort-Object SessionId -Unique)
         if ($Sessions.Count -eq 0) { return $false }
@@ -1296,23 +1409,24 @@ function Test-ScreenBusy {
         $Service.Connect()
         $Task = $Service.GetFolder($Config.TaskPath.TrimEnd("\")).GetTask("Probe $TaskId screen state")
         foreach ($Explorer in $Sessions) {
-            $Sid = (Invoke-CimMethod -InputObject $Explorer -MethodName GetOwnerSid -ErrorAction Stop).Sid
-            $UserHome = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid" -ErrorAction Stop).ProfileImagePath
-            $File = Join-Path $UserHome "AppData\Local\IntuneChocoUpdates\screen-state.txt"
-            $Start = (Get-Date).AddSeconds(-1)
-            # 4 = TASK_RUN_USE_SESSION_ID
-            [void]$Task.RunEx($null, 4, [int]$Explorer.SessionId, $null)
+            $Sid = [string](Invoke-CimMethod -InputObject $Explorer -MethodName GetOwnerSid -ErrorAction Stop).Sid
+            if ($Sid -notmatch '^S-1-5-21-[0-9-]+$') { continue }
+            $Key = "Registry::HKEY_USERS\$Sid\Software\IntuneChocoDeployment\ScreenProbe"
+            $Nonce = [guid]::NewGuid().ToString("N")
+            # 4 = TASK_RUN_USE_SESSION_ID; the nonce replaces $(Arg0) in the arguments of the task
+            [void]$Task.RunEx($Nonce, 4, [int]$Explorer.SessionId, $null)
             for ($i = 0; $i -lt 15; $i++) {
                 Start-Sleep -Seconds 1
-                if ((Test-Path -LiteralPath $File) -and (Get-Item -LiteralPath $File).LastWriteTime -ge $Start) { break }
-            }
-            if ((Test-Path -LiteralPath $File) -and (Get-Item -LiteralPath $File).LastWriteTime -ge $Start) {
-                $State = [int]((Get-Content -LiteralPath $File -Raw).Trim())
-                if ($State -in 2, 3, 4, 6) { return $true }
+                $Answer = Get-ItemProperty -LiteralPath $Key -ErrorAction SilentlyContinue
+                if ($Answer -and [string]$Answer.Nonce -eq $Nonce) {
+                    $State = 0
+                    if ([int]::TryParse([string]$Answer.State, [ref]$State) -and $State -in 2, 3, 4, 6) { return $true }
+                    break
+                }
             }
         }
     }
-    catch { Write-Log "screen state unknown: $($_.Exception.Message)" }
+    catch { Write-Log "screen state unknown ($($_.Exception.GetType().Name))" }
     return $false
 }
 function Get-IsoDay([datetime]$Date) { if ($Date.DayOfWeek -eq [DayOfWeek]::Sunday) { return 7 } else { return [int]$Date.DayOfWeek } }
@@ -1691,8 +1805,6 @@ if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot";
 $TaskPath = "\Intune-Choco-Updates\"
 $TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update",
     "Update $Package in time window", "Update $Package when idle", "Update $Package at sign-in", "Retry $Package update", "Probe $Package screen state")
-$Base = Join-Path $env:ProgramData "IntuneChocoUpdates"
-$AppRoot = Join-Path $Base $Package
 $LogId = $Package -replace '[^A-Za-z0-9._-]', '_'
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 $ResultFile = ""
@@ -1705,6 +1817,12 @@ if ($Source) { $SourceArguments = @("--source", $Source) }
 
 __COMMON__
 __CHOCOCOMMON__
+
+# The helpers of this app: %ProgramFiles%\IntuneChocoDeployment\Chocolatey\<package> (see $ToolRoot). The tasks of
+# older versions (same names, helpers under %ProgramData%\IntuneChocoUpdates) are replaced below; that old folder is
+# not touched.
+$Base = Join-Path $ToolRoot "Chocolatey"
+$AppRoot = Join-Path $Base $Package
 
 if ($Uninstall) {
     $ExitCode = 0
@@ -1730,6 +1848,7 @@ $Installed = Get-InstalledVersion
 
 # The update helpers run as SYSTEM: their folders must not be writable for users
 try {
+    Protect-Folder $ToolRoot
     Protect-Folder $Base
     Protect-Folder $AppRoot
 }
@@ -1892,7 +2011,7 @@ function Compare-PackageVersion([string]$A, [string]$B) {
     return 0
 }
 # Chocolatey itself is updated at most once a day, by whichever app gets there first
-$ChocoStamp = Join-Path $env:ProgramData "IntuneChocoUpdates\chocolatey-update.txt"
+$ChocoStamp = Join-Path $ToolRoot "Chocolatey\chocolatey-update.txt"
 function Test-ChocolateyUpdateDue {
     if (-not (Test-Path $ChocoStamp)) { return $true }
     try { return ([datetime](Get-Content -Path $ChocoStamp -Raw).Trim()).Date -lt (Get-Date).Date } catch { return $true }
@@ -1913,7 +2032,8 @@ $Policy = "__POLICY__"
 $ChocoRoot = $env:ChocolateyInstall
 if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
 # Installed, and with the update policy that is set in Intune (otherwise Intune runs install.ps1 again to apply it)
-$Marker = Join-Path $env:ProgramData "IntuneChocoUpdates\$Package\policy.txt"
+$ProgramFilesDir = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+$Marker = Join-Path $ProgramFilesDir "IntuneChocoDeployment\Chocolatey\$Package\policy.txt"
 if ((Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")) -and (Test-Path $Marker) -and ((Get-Content -Path $Marker -Raw).Trim() -eq $Policy)) {
     Write-Output "$Package is installed (update policy $Policy)"
     exit 0

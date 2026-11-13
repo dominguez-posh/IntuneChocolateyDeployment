@@ -163,7 +163,7 @@ For pinned apps, **Release** in the tool (or `Update-IntuneChocoApp -Version`) m
 update mode then decides when devices install it.
 
 Settings changes take effect without redeploying. The detection script compares a fingerprint of the policy with
-`%ProgramData%\IntuneChocoUpdates\<package>\policy.txt`. After a change in Intune, detection fails, Intune runs
+`%ProgramFiles%\IntuneChocoDeployment\Chocolatey\<package>\policy.txt`. After a change in Intune, detection fails, Intune runs
 `install.ps1` again, and that applies the new settings.
 
 #### Update schedule (Startup = automatic per schedule)
@@ -191,12 +191,16 @@ settings); `update.ps1` checks the rest. In Custom mode the grace period decides
 app-open conditions (the app is handled by `DeadlineAppMode`); a presentation still delays it by up to 4 hours.
 Presentation detection: `SHQueryUserNotificationState` only answers for the caller's own session, so `update.ps1`
 (SYSTEM) starts the on-demand task `Probe <package> screen state` (Users group) in every signed-in session
-(`RunEx` with the session id); `probe.ps1` writes the state into the user's profile where `update.ps1` reads it.
-Not verified on a real device yet.
+(`RunEx` with the session id and a random nonce); `probe.ps1` writes the state and the nonce into the user's registry
+(`HKCU\Software\IntuneChocoDeployment\ScreenProbe`), where `update.ps1` reads them as numbers (no file of the user is
+opened as SYSTEM, the value is never logged). Not verified on a real device yet.
 
 Every script also logs to `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<package>.log`
-(1 MB, one rollover to `...-<package>.1.log`), which Intune's "Collect diagnostics" includes. Each app folder holds
-`last-result.json` (format in the comment block of `Save-LastResult` in `Get-DeviceScriptCommon`).
+(1 MB, one rollover to `...-<package>.1.log`), which Intune's "Collect diagnostics" includes. The scripts write there
+only while that folder and the folders above it are admin-only and no link, and never into a link or a file someone else
+owns (then that log line is skipped). Each app folder holds `last-result.json` (fields `lastAttempt`, `action`,
+`status`, `exitCode`, `cause`, `installedVersion`, `targetVersion`; see `Save-LastResult` in `Get-DeviceScriptCommon`),
+which the status script reads.
 
 Apps created by older versions keep working. They count as **latest / Startup** until you change their settings.
 
@@ -206,13 +210,14 @@ Apps created by older versions keep working. They count as **latest / Startup** 
 
 Only one choco or winget operation runs at a time on a device: install, update and uninstall of all apps (both
 sources) share the lock `Global\IntuneChocoDeployment` and wait up to 30 minutes for it (otherwise exit code 1618,
-which Intune retries). The Chocolatey update helpers also update Chocolatey itself, at most once a day. The check for
+which Intune retries). The lock is created with a security descriptor for SYSTEM and Administrators only; if it exists
+already and belongs to someone else, nothing is installed and the cause is logged. The Chocolatey update helpers also update Chocolatey itself, at most once a day. The check for
 a newer version asks the source for that one package (`choco search <id> --exact`) and compares versions numerically
 (`1.2.0` equals `1.2`).
 
 ### What gets deployed
 - `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and copies `update.ps1` and
-  `notify.ps1` to `%ProgramData%\IntuneChocoUpdates\<package>`. It also registers the scheduled tasks under
+  `notify.ps1` to `%ProgramFiles%\IntuneChocoDeployment\Chocolatey\<package>`. It also registers the scheduled tasks under
   `\Intune-Choco-Updates\`:
   - `Update <package> on startup` (Startup and Custom modes). Each device waits a random 5 to 60 minutes after startup
     (configurable), so many devices behind one IP don't download at the same time. In Startup mode it also runs once a
@@ -221,9 +226,18 @@ a newer version asks the source for that one package (`choco search <id> --exact
   - `Notify <package> update` (Custom mode) shows the popup in the user session.
   - `Update <package> now` (Custom mode) is started by the popup. Users may start it, and it runs as SYSTEM.
 
-  The helper folders (`%ProgramData%\IntuneChocoUpdates`, `%ProgramData%\IntuneWingetDeployment`) belong to SYSTEM and
-  inherit nothing: SYSTEM and Administrators have full control, Users may only read. A folder somebody else created
-  before is removed first, because the tasks run its scripts as SYSTEM.
+  All helper folders are under `%ProgramFiles%\IntuneChocoDeployment` (`Chocolatey\<package>`, `Winget\<id>`,
+  `Winget\Runtime`, `Winget\Logs`). Users cannot create anything in `%ProgramFiles%`, so nobody can prepare the tree
+  before SYSTEM uses it. The folders belong to SYSTEM and inherit nothing: SYSTEM and Administrators have full control,
+  Users may only read. The scripts change files only inside this tree, never follow or enter links, and stop (fail
+  closed) when a folder above is not admin-only.
+
+  **Devices set up by versions before device script revision 5** used `%ProgramData%\IntuneChocoUpdates` and
+  `%ProgramData%\IntuneWingetDeployment` (a standard user could create these folders before SYSTEM did). The new
+  scripts reach a device with the next settings change of the app (the revision is part of the policy fingerprint):
+  `install.ps1` then registers the tasks with the same names again for the new folders, which replaces the old tasks.
+  The old folders are left alone on purpose: removing a tree a user could have changed as SYSTEM is what the change
+  avoids. Delete them by hand or with your own script if you want them gone.
 
   Uninstall runs `choco uninstall <package> --remove-dependencies` (a meta package like `vlc` takes `vlc.install` with
   it). Only when that succeeds (0, 1605, 1614, 1641, 3010) are the tasks and the folder removed; otherwise the error goes
@@ -248,11 +262,12 @@ New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignme
   they would land in the profile of SYSTEM instead of for all users. winget is not in SYSTEM's path, so the script takes the newest App
   Installer from `WindowsApps` and waits up to ten minutes when it is not registered yet (right after Autopilot).
 - Update modes, grace period, pinned versions and the sandbox test work as for Chocolatey apps (see [Updates](#updates));
-  the tasks are under `\Intune-Winget-Updates\`, the helpers in `%ProgramData%\IntuneWingetDeployment\<id>`. winget cannot
+  the tasks are under `\Intune-Winget-Updates\`, the helpers in `%ProgramFiles%\IntuneChocoDeployment\Winget\<id>`. winget cannot
   go back to an older version, so a pinned winget app only moves forward. Apps deployed before keep working and count
   as **latest / Startup** until you change their settings.
 - Uninstall runs `winget uninstall --id <id> --exact` (without `--source`, winget often cannot map the installed
-  product to the source) and removes tasks and folder only when it succeeded or the package was not installed. Logs: `%ProgramData%\IntuneWingetDeployment\Logs`.
+  product to the source) and removes tasks and folder only when it succeeded or the package was not installed. Logs: `%ProgramFiles%\IntuneChocoDeployment\Winget\Logs`.
+  winget.exe is only taken from the `WindowsApps` folder, never from `PATH`.
 - The detection script relies on the exit code of `winget list --id <id> --exact --source winget` (the table cuts long
   ids) and checks the policy fingerprint. Requirement: Windows 10
   1809 or newer.

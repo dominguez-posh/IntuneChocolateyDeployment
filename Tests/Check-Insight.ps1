@@ -125,6 +125,28 @@ Test-Check 'status output is JSON, failed apps first, overflow counted' ($parsed
 $none = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot (Join-Path $temp 'none') -WingetRoot (Join-Path $temp 'none2')
 Test-Check 'status script tolerates missing folders' (($none | Out-String) -match '"n":0')
 
+# ---- the status script reads what the device scripts write (Save-LastResult of Get-DeviceScriptCommon)
+$commonAst = [Management.Automation.Language.Parser]::ParseInput((Get-DeviceScriptCommon), [ref]$null, [ref]$null)
+$saveFn = $commonAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Save-LastResult' }, $true)
+. ([scriptblock]::Create($saveFn.Extent.Text))
+function Write-ProtectedFile([string]$Path, [string]$Text) { Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII }   # stand-in, the real one only writes under %ProgramFiles%
+$schemaRoot = Join-Path $temp 'schema'
+foreach ($case in @(@('fails.pkg', 'upgrade', 'failed', 1603, 'failed: exit code 1603', '1.0', '2.0'), @('fine.pkg', 'install', 'ok', 0, 'ok', '3.1', '3.1'), @('waits.pkg', 'upgrade', 'skipped', 0, 'waiting: on battery', '4.0', '4.1'))) {
+    $dir = Join-Path $schemaRoot $case[0]; New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $LogId = $case[0]; $ResultFile = Join-Path $dir 'last-result.json'
+    Save-LastResult $case[1] $case[2] $case[3] $case[4] $case[5] $case[6]
+}
+$written = Get-Content (Join-Path $schemaRoot 'fails.pkg\last-result.json') -Raw | ConvertFrom-Json
+Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion') (@($written.PSObject.Properties.Name) -join ',')
+$schemaOut = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot $schemaRoot -WingetRoot (Join-Path $temp 'none')
+$schema = ($schemaOut | Out-String).Trim() | ConvertFrom-Json
+$f = @($schema.f)[0]
+Test-Check 'status script reads every field Save-LastResult writes' ($schema.n -eq 3 -and @($schema.f).Count -eq 1 -and $f.p -eq 'fails.pkg' -and $f.t -match '^\d{4}-\d\d-\d\dT\d\d:\d\d$' -and $f.a -eq 'upgrade' -and $f.e -eq 1603 -and $f.c -eq 'failed: exit code 1603' -and $f.v -eq '1.0' -and $f.g -eq '2.0' -and (@($schema.o) -contains 'fine.pkg=3.1') -and (@($schema.o) -contains 'waits.pkg=4.0')) ($schemaOut | Out-String)
+$statusFields = @([regex]::Matches($scriptText, '\$R\.(\w+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+$missing = @($statusFields | Where-Object { $_ -notin @($written.PSObject.Properties.Name) })
+Test-Check 'status script reads no field the devices do not write' ($statusFields.Count -ge 5 -and $missing.Count -eq 0) ($missing -join ',')
+Test-Check 'status script looks under %ProgramFiles%\IntuneChocoDeployment' ($scriptText -match "ProgramW6432" -and $scriptText -match "'IntuneChocoDeployment\\Chocolatey'" -and $scriptText -match "'IntuneChocoDeployment\\Winget'" -and $scriptText -notmatch 'ProgramData')
+
 # ---- health script create/update and licence degrade
 $calls = New-Object System.Collections.ArrayList
 $ok = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b)

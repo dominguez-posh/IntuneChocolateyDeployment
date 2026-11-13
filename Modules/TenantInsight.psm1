@@ -10,11 +10,13 @@
 #   beta  GET/POST/PATCH /deviceManagement/deviceHealthScripts (+ /assign, /deviceRunStates)   Remediations
 #   v1.0  GET   /oauth2PermissionGrants                                      consent check (admin sign-in)
 
-# Where the device scripts write the last result of one app (feature/schedule). One place to align later.
-# {0} = package folder name. Chocolatey: package id, winget: id with every character outside A-Za-z0-9._- replaced by _.
+# Where the device scripts write the last result of one app (Save-LastResult in Get-DeviceScriptCommon of the core
+# script), relative to %ProgramFiles%. {0} = package folder name. Chocolatey: package id, winget: id with every
+# character outside A-Za-z0-9._- replaced by _. Fields: lastAttempt, action, status, exitCode, cause, installedVersion,
+# targetVersion (Tests\Check-Insight.ps1 checks that the status script reads what Save-LastResult writes).
 $script:LastResultFile = @{
-    Chocolatey = 'IntuneChocoUpdates\{0}\last-result.json'
-    Winget     = 'IntuneWingetDeployment\{0}\last-result.json'
+    Chocolatey = 'IntuneChocoDeployment\Chocolatey\{0}\last-result.json'
+    Winget     = 'IntuneChocoDeployment\Winget\{0}\last-result.json'
 }
 $script:StatusScriptName = 'IntuneChocoDeployment status'
 $script:Hooks = @{}
@@ -420,13 +422,13 @@ function Get-InsightStatusScriptText {
         a margin (1,900); failed apps come first with details, the others as "package=version", the rest is counted
         in x. Always exit 0 (a detection that only reports). Plain ASCII, Windows PowerShell 5.1.
     #>
-    $Choco = ($script:LastResultFile.Chocolatey -split '\\')[0]
-    $Winget = ($script:LastResultFile.Winget -split '\\')[0]
+    $Choco = $script:LastResultFile.Chocolatey -replace '\\\{0\}\\last-result\.json$', ''
+    $Winget = $script:LastResultFile.Winget -replace '\\\{0\}\\last-result\.json$', ''
     $Text = @'
 # IntuneChocoDeployment status: detection only, reports the last result of every managed app (runs as SYSTEM).
 param(
-    [string]$ChocoRoot = (Join-Path $env:ProgramData '__CHOCO__'),
-    [string]$WingetRoot = (Join-Path $env:ProgramData '__WINGET__'),
+    [string]$ChocoRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__CHOCO__'),
+    [string]$WingetRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__WINGET__'),
     [int]$Limit = 1900
 )
 $ErrorActionPreference = 'SilentlyContinue'
@@ -435,7 +437,7 @@ $Good = New-Object System.Collections.ArrayList
 $Count = 0
 foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot))) {
     if (-not (Test-Path $Entry[1])) { continue }
-    foreach ($Dir in @(Get-ChildItem $Entry[1] -Directory)) {
+    foreach ($Dir in @(Get-ChildItem -LiteralPath $Entry[1] -Directory | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
         $File = Join-Path $Dir.FullName 'last-result.json'
         if (-not (Test-Path $File)) { continue }
         $Count++
@@ -448,7 +450,7 @@ foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot))) {
         if ($Cause.Length -gt 48) { $Cause = $Cause.Substring(0, 48) }
         $Code = 0
         try { $Code = [int]$R.exitCode } catch { }
-        if ($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) { [void]$Good.Add(('{0}={1}' -f $Dir.Name, $R.installedVersion)) }
+        if (($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) -and [string]$R.status -ne 'failed') { [void]$Good.Add(('{0}={1}' -f $Dir.Name, $R.installedVersion)) }
         else { [void]$Failed.Add([ordered]@{ p = $Dir.Name; s = $Entry[0]; t = $Time; a = [string]$R.action; e = $Code; c = $Cause; v = [string]$R.installedVersion; g = [string]$R.targetVersion }) }
     }
 }
