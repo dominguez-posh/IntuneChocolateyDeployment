@@ -102,7 +102,7 @@
                             <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Border Style="{StaticResource MonoTile}" Width="32" Height="32" CornerRadius="7" Background="{Binding [TileBg]}" Margin="0,0,12,0">
-                            <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Grid><TextBlock Text="{Binding [Mono]}" FontWeight="Bold" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding [MonoVis]}"/><Image Source="{Binding [Icon]}" Margin="3"/></Grid>
                         </Border>
                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
@@ -460,13 +460,19 @@
                                     <Border x:Name="BannerRuntime" Visibility="Collapsed" Background="{StaticResource AccentFaint}" BorderBrush="#D6E6F7" BorderThickness="1" CornerRadius="8" Padding="16,12" Margin="0,12,0,0">
                                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                             <TextBlock x:Name="TxtBannerRuntime" TextWrapping="Wrap" VerticalAlignment="Center"/>
-                                            <Button x:Name="BtnBannerRuntime" Grid.Column="1" Padding="14,7" Margin="12,0,0,0" Content="Add winget runtime dependency"/>
+                                            <Button x:Name="BtnBannerRuntime" Grid.Column="1" Padding="14,7" Margin="12,0,0,0" Content="Switch to PackTune Runtime"/>
                                         </Grid>
                                     </Border>
                                     <Border x:Name="BannerCleanup" Visibility="Collapsed" Background="#F3F3F3" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1" CornerRadius="8" Padding="16,10" Margin="0,12,0,0">
                                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                             <TextBlock x:Name="TxtBannerCleanup" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Text2}"/>
                                             <Button x:Name="BtnBannerCleanup" Grid.Column="1" Style="{StaticResource SmallButton}" Margin="12,0,0,0" Content="Clean up"/>
+                                        </Grid>
+                                    </Border>
+                                    <Border x:Name="BannerOldDeps" Visibility="Collapsed" Background="#F3F3F3" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1" CornerRadius="8" Padding="16,10" Margin="0,12,0,0">
+                                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="TxtBannerOldDeps" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Text2}"/>
+                                            <Button x:Name="BtnBannerOldDeps" Grid.Column="1" Style="{StaticResource SmallButton}" Margin="12,0,0,0" Content="Remove old dependency apps"/>
                                         </Grid>
                                     </Border>
                                     <Border Style="{StaticResource CardBox}" Margin="0,16,0,0">

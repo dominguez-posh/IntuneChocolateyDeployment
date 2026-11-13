@@ -48,7 +48,7 @@ Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypa
 
 ![Start](docs/screenshots/start.png)
 
-The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency apps in the tenant and, as optional items, the status report and the sandbox test. The sandbox item checks for Windows Sandbox (not available on Windows Home; Install asks for administrator approval and needs a restart, and Set up everything never installs it) and for MSIX Sandbox Studio; until both are there the Test buttons are disabled and say why. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
+The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency app (PackTune Runtime) in the tenant and, as optional items, the status report and the sandbox test. The sandbox item checks for Windows Sandbox (not available on Windows Home; Install asks for administrator approval and needs a restart, and Set up everything never installs it) and for MSIX Sandbox Studio; until both are there the Test buttons are disabled and say why. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
 
 ### Apps
 
@@ -76,7 +76,7 @@ Deployments run in the background, one after another (see *Activity*).
 
 ![In tenant](docs/screenshots/tenant.png)
 
-Lists the apps this tool created, plus the PackTune Runtime dependency app (and the two older dependency apps, Chocolatey and winget runtime, while a tenant still has them). Select an app to change its settings below the list:
+Lists the apps this tool created, plus the PackTune Runtime dependency app (and the two older dependency apps, Chocolatey and winget runtime, while a tenant still has them). When apps still depend on the old apps, a banner offers **Switch to PackTune Runtime** (after a confirmation, as a job); once nothing depends on an old dependency app, **Remove old dependency apps** deletes it, again only on request. Select an app to change its settings below the list:
 
 - **Version on devices** (newest or pinned) and **How devices update** (Off, Automatic, or Ask the user, then install).
 - **When updates install** shows the schedule summary; **Advanced** opens the schedule (see *Update schedule*).

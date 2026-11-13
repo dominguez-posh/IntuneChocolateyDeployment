@@ -301,6 +301,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'recommended source is labelled when versions differ' ((@($zip.Combo.Items) -join '|') -match 'recommended' -or -not $zip.Src.RecommendedMarked) (@($zip.Combo.Items) -join ' | ')
             Test-Smoke 'dialog starts with the settings defaults' ($ui.CmbDeployAssign.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
             Test-Smoke 'dependency hint shown' ($ui.TxtDeployDependency.Inlines.Count -ge 2)
+            $tiles = @($script:DeployCombos | ForEach-Object { $want = Get-AppIconUrl $_.Src; $row = $ui.PanelDeployRows.Children[$script:DeployCombos.IndexOf($_)]; $img = Find-Visual $row ([System.Windows.Controls.Image]); if ($want) { [bool]($img -and $img.Source) } else { -not $img } })
+            Test-Smoke 'deploy dialog rows show the same app icon as the cards (letter tile only without an icon)' ($tiles.Count -eq 2 -and $tiles -notcontains $false) ($tiles -join ',')
+            $fake = [pscustomobject]@{ ChocoId = 'x.fake'; WingetId = 'Fake.Fake'; ChocoVersion = '1.0'; WingetVersion = $null; RecommendedMarked = $true; Recommended = 'Chocolatey' }
+            Test-Smoke 'unknown version of the other source: not called recommended, source still offered with its state' ((Get-SourceOptionText $fake 'Chocolatey') -notlike '*recommended*' -and (Get-SourceOptionText $fake 'Winget') -like 'winget (version *') ((Get-SourceOptionText $fake 'Chocolatey') + ' | ' + (Get-SourceOptionText $fake 'Winget'))
             $ui.CmbDeployUpdate.SelectedIndex = 2
             Test-Smoke 'grace period appears for the user prompt' ($ui.PanelDeployGrace.Visibility -eq 'Visible' -and $ui.TxtDeployUpdateHelp.Text -like '*installed anyway*')
             $ui.TxtDeployGrace.Text = 'x'
@@ -334,6 +338,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1 -or $script:Toasts.Count -ge 1 -or (Get-SmokeLog) -match 'created in Intune')
         $zipRow = @($script:JobRows | Where-Object { $_['Title'] -eq '7-Zip' })[0]
         Test-Smoke 'finished deploy row offers Open in Intune with the app id' ($zipRow['OpenVis'] -eq 'Visible' -and $zipRow['Open'] -eq $zip.id) "$($zipRow['OpenVis']) $($zipRow['Open'])"
+        Test-Smoke 'activity row shows the app icon like the card' ($zipRow['Icon'] -eq (Get-PackageIcon '7zip.install' 'Chocolatey')) $zipRow['Icon']
         Show-Page 'Activity'
         Save-SmokeShot '06-activity-done'
         $true } }
@@ -369,8 +374,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $zip = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
                 $consistent = @($script:TenantRowList | Where-Object { $_.Data.Package } | ForEach-Object { $want = Get-PackageIcon $_.Data.Package $_.Data.Source; if ($want) { $_['Icon'] -eq $want -and $_['MonoVis'] -eq 'Collapsed' } else { $_['MonoVis'] -eq 'Visible' } })
                 Test-Smoke 'rows show the package icon (feed cache) where there is one, the letter tile otherwise' ($consistent.Count -ge 1 -and $consistent -notcontains $false) ($consistent -join ',')
-                $choco = @($script:TenantRowList | Where-Object { $_.Data.IsChocolatey })[0]
-                Test-Smoke 'Chocolatey dependency uses the Chocolatey icon' ($choco['Icon'] -eq (Get-IconFromMeta 'chocolatey' 'Chocolatey')) $choco['Icon']
+                $rt = @($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' })[0]
+                Test-Smoke 'PackTune Runtime is the dependency row (icon of its Intune app or the letter tile)' ($rt -and $rt.Data.IsDependency -and ($rt['Icon'] -or $rt['MonoVis'] -eq 'Visible'))
                 # Scratch: no icon in the feed data, but the Intune app holds one (the fake Graph returns it on the single-app read)
                 $scratch = @($script:TenantApps | Where-Object { $_.Package -eq 'scratch' })[0]
                 $script:Shared.Meta['scratch'].IconUrl = ''
@@ -527,7 +532,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($s.Phase -eq 0) {
             if (-not (Test-Idle)) { return $false }
             Show-Page 'Tenant'; Update-TenantRows -Force
-            Test-Smoke 'banner offers the missing winget runtime dependency' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '*VLC*') $ui.TxtBannerRuntime.Text
+            Test-Smoke 'banner offers to switch the app without the runtime dependency' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '1 app still uses*') $ui.TxtBannerRuntime.Text
             $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'VideoLAN.VLC' })[0]
             Test-Smoke 'panel of the app mentions it too' ($ui.TxtDependencyNote.Visibility -eq 'Visible')
             Save-SmokeShot '09-tenant-runtime-banner'
@@ -539,6 +544,81 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $vlc = Get-StoreApps | Where-Object { $_.notes -like 'PoweredByWinget*' }
         Test-Smoke 'dependency added, banner gone' (@($vlc.dependencies).Count -eq 1 -and $ui.BannerRuntime.Visibility -eq 'Collapsed') "$(@($vlc.dependencies).Count) / $($ui.BannerRuntime.Visibility)"
         $true } }
+    @{ Name = 'PackTune Runtime states: Ready, Migrate, Missing'; Phase = 0; Do = {
+        param($s)
+        function Write-Store($Apps) { ConvertTo-Json -InputObject @($Apps) -Depth 6 | Set-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') }
+        function Get-DepsItem { Get-ReadinessItems | Where-Object Key -in 'deps', 'tenant' | Select-Object -First 1 }
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'; Start-DependencyCheck
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Test-Smoke 'Ready: one dependency item, green, no banners' ($script:RuntimeInfo.State -eq 'Ready' -and $item.Title -eq 'Dependency app (PackTune Runtime)' -and $item.State -eq 'ok' -and $ui.BannerRuntime.Visibility -eq 'Collapsed' -and $ui.BannerOldDeps.Visibility -eq 'Collapsed') "$($script:RuntimeInfo.State) $($item.State)"
+                # Migrate: two old dependency apps in the tenant, 7-Zip still depends on the old Chocolatey app
+                $all = @(Get-StoreApps)
+                $mk = { param($id, $name, $notes) [pscustomobject]@{ id = $id; displayName = $name; notes = $notes; createdDateTime = (Get-Date).ToString('o'); dependencies = @(); supersedence = @(); assignments = @() } }
+                $putty = @($all | Where-Object { $_.notes -like '*package=7zip.install;*' })[0]
+                $putty.dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' })
+                Write-Store (@($all) + (& $mk 'old-choco' 'Chocolatey' 'FiredWithPowershell') + (& $mk 'old-winget' 'winget runtime' 'WingetRuntimeApp'))
+                Start-DependencyCheck
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Test-Smoke 'Migrate: state found, item offers Switch (optional, not part of the set up)' ($script:RuntimeInfo.State -eq 'Migrate' -and $item.Fix -eq 'Switch' -and $item.Optional -and $item.State -eq 'warn') "$($script:RuntimeInfo.State) $($item.Fix)"
+                Update-TenantRows -Force
+                Test-Smoke 'banner: apps still use the old dependency apps, Switch to PackTune Runtime' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '1 app still uses the old dependency apps*' -and $ui.BtnBannerRuntime.Content -eq 'Switch to PackTune Runtime') $ui.TxtBannerRuntime.Text
+                Test-Smoke 'the old dependency apps are listed as old, next to PackTune Runtime' ((@($script:TenantRowList | Where-Object { $_['Title'] -like '*(old)' }).Count -eq 2) -and (@($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' }).Count -eq 1)) (($script:TenantRowList | ForEach-Object { $_['Title'] }) -join ', ')
+                Test-Smoke 'old dependency app nothing uses is offered for removal, never automatic' ($ui.BannerOldDeps.Visibility -eq 'Visible' -and $ui.TxtBannerOldDeps.Text -like '*winget runtime*' -and @(Get-StoreApps | Where-Object { $_.id -eq 'old-winget' }).Count -eq 1) $ui.TxtBannerOldDeps.Text
+                Test-Smoke 'set up everything does not switch the apps' (@(Get-ReadinessItems | Where-Object { $_.Key -eq 'deps' -and $_.Optional }).Count -eq 1)
+                Save-SmokeShot '27-tenant-migrate'
+                & $script:ClickActions[$ui.BtnBannerRuntime]
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                $putty = @(Get-StoreApps | Where-Object { $_.notes -like '*package=7zip.install;*' })[0]
+                $runtime = @(Get-StoreApps | Where-Object { $_.displayName -eq 'PackTune Runtime' })[0]
+                Test-Smoke 'switch (confirmed, as a job): the app depends on PackTune Runtime only' (@($putty.dependencies).Count -eq 1 -and @($putty.dependencies)[0].targetId -eq $runtime.id) (($putty.dependencies | ConvertTo-Json -Compress))
+                Test-Smoke 'state is Ready, banner gone, both old apps unused now and offered for removal' ($script:RuntimeInfo.State -eq 'Ready' -and $ui.BannerRuntime.Visibility -eq 'Collapsed' -and $ui.BannerOldDeps.Visibility -eq 'Visible' -and $ui.TxtBannerOldDeps.Text -like '2 old dependency apps*') $ui.TxtBannerOldDeps.Text
+                Save-SmokeShot '28-tenant-old-deps'
+                & $script:ClickActions[$ui.BtnBannerOldDeps]
+                $s.Phase = 4; return $false
+            }
+            4 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'old dependency apps removed on request, banner gone' (@(Get-StoreApps | Where-Object { $_.id -in 'old-choco', 'old-winget' }).Count -eq 0 -and $ui.BannerOldDeps.Visibility -eq 'Collapsed' -and -not @($script:TenantRowList | Where-Object { $_['Title'] -like '*(old)' }).Count)
+                # Missing: the runtime app is gone from the tenant
+                Write-Store @(Get-StoreApps | Where-Object { $_.displayName -ne 'PackTune Runtime' })
+                Start-DependencyCheck
+                $s.Phase = 5; return $false
+            }
+            5 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Show-Page 'Start'
+                Test-Smoke 'Missing: red item with Create, Set up everything offered' ($script:RuntimeInfo.State -eq 'Missing' -and $item.State -eq 'bad' -and $item.Fix -eq 'Create' -and $ui.BtnSetupAll.Visibility -eq 'Visible') "$($script:RuntimeInfo.State) $($item.State)"
+                Save-SmokeShot '29-start-runtime-missing'
+                Start-SetupAll
+                $s.Phase = 6; return $false
+            }
+            6 {
+                if ($script:SetupRunning -or -not (Test-Idle)) { return $false }
+                Test-Smoke 'Set up everything creates PackTune Runtime' (@(Get-StoreApps | Where-Object { $_.displayName -eq 'PackTune Runtime' }).Count -eq 1 -and $script:RuntimeInfo.State -in 'Migrate', 'Ready') $script:RuntimeInfo.State
+                if ($script:RuntimeInfo.State -eq 'Migrate') { Show-Page 'Tenant'; Update-TenantRows -Force; & $script:ClickActions[$ui.BtnBannerRuntime] }
+                $s.Phase = 7; return $false
+            }
+            7 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'all apps depend on the new runtime: Ready again' ($script:RuntimeInfo.State -eq 'Ready') $script:RuntimeInfo.State
+                $true
+            }
+        } } }
     @{ Name = 'update settings and schedule'; Phase = 0; Do = {
         param($s)
         switch ($s.Phase) {
@@ -910,7 +990,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 $script:EmbeddedCalls = New-Object System.Collections.ArrayList
                 $script:EmbeddedAvailableOverride = $true
-                $script:EmbeddedSignInOverride = { param($t, $c, $sc) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','))); New-FakeToken 'Embedded Admin' }
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','), $h)); New-FakeToken 'Embedded Admin' }
                 $script:Shared.UrlHit = $false
                 Connect-Intune
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
@@ -925,6 +1005,24 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 Test-Smoke 'app registration setup signs in with the embedded window (setup app, admin scopes)' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls[0][2] -like '*Application.ReadWrite.All*DelegatedPermissionGrant.ReadWrite.All*') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'setup finished with the embedded token, browser untouched' (-not $script:Shared.UrlHit -and (Get-SmokeLog) -match 'App registration ready' -and (Get-JobLog) -match 'Admin consent granted') ''
+                # Shared session: the account of the setup sign-in is the login hint of the next one
+                $script:EmbeddedCalls.Clear()
+                Connect-Intune
+                Test-Smoke 'normal sign-in after the setup gets the setup account as login hint (shared session)' ($script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][3] -eq 'admin@contoso.onmicrosoft.com') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
+                Test-Smoke 'one sign-in profile folder per run' ($script:SignInSession -like '*PackTuneSignIn-*')
+                # Hint from the current token (signed in by browser or Keevault), session folder and prompt of the real call
+                Connect-Intune   # signed in with the fake embedded window (account admin@contoso)
+                $script:EmbeddedSignInOverride = $null; $script:SignInHint = ''
+                $script:BrowserCall = $null
+                $script:BrowserSignIn = { param($TenantID, $ClientID, $Scopes, $CacheFolder, $Owner, $Title, $Hint, $UserDataFolder, $LoginHint, $Prompt) $script:BrowserCall = @{ LoginHint = $LoginHint; Prompt = $Prompt; UserDataFolder = $UserDataFolder }; New-FakeToken 'Hinted Admin' }
+                try { [void](Get-EmbeddedToken -TenantID 'contoso.onmicrosoft.com' -ClientID 'x') } catch { Test-Smoke "dbg $($_.Exception.Message) avail=$($script:EmbeddedAvailableOverride) signed=$(Test-SignedIn)" $false }
+                $b = $script:BrowserCall
+                Test-Smoke 'hint taken from the current token before an embedded sign-in (grant new permissions)' ($b.LoginHint -like '*@contoso.onmicrosoft.com') $b.LoginHint
+                Test-Smoke 'known account: no account picker, no forced prompt; shared session folder' ($b.Prompt -eq 'default' -and $b.UserDataFolder -eq $script:SignInSession) "$($b.Prompt) $($b.UserDataFolder)"
+                $script:BrowserSignIn = 'Invoke-IntuneChocoBrowserSignIn'
+                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-IntuneChocoWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) '..\Start-IntuneChocoTool.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
+                Disconnect-Intune
+                Disconnect-Intune
                 # The system browser as an explicit choice
                 $script:Shared.UrlHit = $false
                 $script:EmbeddedCalls.Clear()

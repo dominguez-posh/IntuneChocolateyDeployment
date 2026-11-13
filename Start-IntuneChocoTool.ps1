@@ -295,7 +295,7 @@ $script:TaskBody = {
 $script:JobRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 $ui.LstJobs.ItemsSource = $script:JobRows
 $script:JobNouns = @{ deploy = 'Deployment'; policy = 'Update settings'; release = 'Release'; remove = 'Removal'; test = 'Sandbox test'; components = 'Components'
-    chocolatey = 'Dependency apps'; appreg = 'App registration'; connect = 'Sign-in'; runtime = 'Dependency'; takeover = 'Import'; statusscript = 'Status report'; export = 'Export' }
+    chocolatey = 'Dependency apps'; appreg = 'App registration'; connect = 'Sign-in'; runtime = 'Dependency'; cleanupdeps = 'Dependency'; takeover = 'Import'; statusscript = 'Status report'; export = 'Export' }
 
 function Start-UiTask {
     <#
@@ -375,13 +375,14 @@ function Update-JobRow($Job) {
     }
     $progress = switch ($status) { 'running' { [math]::Min(95, [math]::Max(8, [int]($entries.Count * 100 / 9))) } 'queued' { 0 } default { 100 } }
     $logText = (@($entries | ForEach-Object { '{0}  {1}' -f $_.Time, $_.Text }) -join "`n")
+    $jobIcon = if ($Job.Package) { Get-PackageIcon ([string]$Job.Package) $(if ($Job.Source) { [string]$Job.Source } else { 'Chocolatey' }) }
     $open = [bool]$Job.LogOpen -and $entries.Count -gt 0
     Set-Row $row @{
         Sub = $sub; SubFg = $(if ($status -eq 'failed') { '#A11D1D' } else { '#5F5F5F' }); Status = $label
         StatusBg = $script:PillColors[$pillName][0]; StatusFg = $script:PillColors[$pillName][1]
         Progress = $progress; ProgressVis = (ConvertTo-Vis ($status -in 'queued', 'running'))
         Log = $logText; LogVis = (ConvertTo-Vis $open); LogToggle = $(if ($entries.Count) { if ($open) { 'Hide log' } else { 'Show log' } } else { '' })
-        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test')); OpenVis = (ConvertTo-Vis ($status -eq 'succeeded' -and [bool]$row['Open']))
+        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test')); OpenVis = (ConvertTo-Vis ($status -eq 'succeeded' -and [bool]$row['Open'])); Icon = $jobIcon; MonoVis = (ConvertTo-Vis (-not $jobIcon))
     }
 }
 
@@ -706,8 +707,8 @@ $window.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'Escape' -and $script:
 
 $script:HelpTexts = @{
     Start    = @(
-        @('What it does', 'Deploys Chocolatey or winget packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs as SYSTEM, a detection rule and an update routine. Chocolatey and winget each get a dependency app in the tenant, created once.'),
-        @('Get ready', 'All items should be green before the first deployment. A red item says why and has the button that fixes it. Set up everything runs the fixes one after another: modules, app registration (one sign-in with a Global Administrator, admin consent included), sign-in, dependency apps. The status report is optional.'),
+        @('What it does', 'Deploys Chocolatey or winget packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs as SYSTEM, a detection rule and an update routine. Every app depends on one dependency app in the tenant, PackTune Runtime, created once: it puts Chocolatey and winget on the devices and keeps both up to date.'),
+        @('Get ready', 'All items should be green before the first deployment. A red item says why and has the button that fixes it. Set up everything runs the fixes one after another: modules, app registration (one sign-in with a Global Administrator, admin consent included), sign-in, PackTune Runtime. The status report, the sandbox test and moving older apps to PackTune Runtime are optional.'),
         @('Sign in', 'Microsoft sign-in opens in your browser. The arrow next to Sign in offers the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in, the passkey is confirmed in Keevault.'),
         @('Requirements', 'The IntuneWin32App module 1.5.0 or newer and an Entra ID app registration with redirect URI http://localhost. Chocolatey and winget are not needed on this computer.'))
     Apps     = @(
@@ -717,7 +718,7 @@ $script:HelpTexts = @{
         @('Test in sandbox', 'The details panel tests one app in a fresh Windows Sandbox before it goes to Intune. Needs MSIX Sandbox Studio and Windows Sandbox, no sign-in.'),
         @('License notes', 'Apps whose license restricts business use carry a Check license note. They are deployed only after a confirmation; the license is still yours to clear.'))
     Tenant   = @(
-        @('In tenant', 'The apps this tool created in the tenant, from both sources, with the two dependency apps. Everything is read from Intune; there is no local database.'),
+        @('In tenant', 'The apps this tool created in the tenant, from both sources, with the dependency app PackTune Runtime (and the two older dependency apps until you remove them). Everything is read from Intune; there is no local database.'),
         @('Update settings', 'Select an app: the panel on the right sets the version and how devices update (off, automatic per schedule, ask the user). Apply in Intune rebuilds the package and changes the app.'),
         @('Release an update', 'A pinned app whose package has a newer version shows a banner. Release moves devices to it. Apps that are only Available are updated through a new app that supersedes the old one; Required apps are changed in place.'),
         @('On devices', 'Click the counts to see the install status per device, with the cause of a failure and the log the device reports through the status script (Remediations).'))
@@ -745,7 +746,8 @@ Add-Click $ui.BtnHelpClose { Close-Dialog }
 
 # ---------------------------------------------------------------- start page: readiness
 $script:ReadinessActions = @{}
-$script:RuntimeId = $null          # winget runtime app: $null = not read yet, '' = not in the tenant
+$script:RuntimeId = $null          # PackTune Runtime app: $null = not read yet, '' = not in the tenant
+$script:RuntimeInfo = $null        # Get-IntuneChocoRuntimeState: State Missing | Migrate | Ready, apps on the old dependency apps, unused old apps
 $script:StatusScript = $null       # @{ State = 'Present' | 'Missing' | 'NotAvailable'; Id; Reason }
 
 function New-ReadinessCard {
@@ -826,18 +828,23 @@ function Get-ReadinessItems {
                     Text = $(if ($busyConnect) { 'Waiting for the sign-in in your browser ...' } else { 'Not signed in' })
                     Fix = 'Sign in'; Action = { Connect-Intune } } })
     )
-    $depsText = 'PackTune Runtime (Chocolatey and winget for SYSTEM), created once per tenant, so every app finds its installer'
-    $items += $(if (-not (Test-SignedIn)) { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'warn'; Text = $depsText } }
-                elseif ($null -eq $script:TenantApps -or $null -eq $script:RuntimeId) {
-                    $reading = (Test-TaskRunning 'tenant') -or (Test-TaskRunning 'deps')
-                    @{ Key = 'tenant'; Title = 'Dependency apps in Intune'; State = 'warn'; Wait = $reading
-                       Text = $(if ($reading) { 'Reading the apps in the tenant ...' } else { 'The apps in the tenant could not be read yet.' }); Fix = 'Check'; Action = { Start-TenantRefresh } } }
-                else {
-                    $haveRuntime = [bool]$script:RuntimeId
-                    if ($haveRuntime) { @{ Key = 'deps'; Title = 'Dependency app in Intune'; State = 'ok'; Text = 'The PackTune Runtime is in the tenant.' } }
-                    else { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'bad'; Wait = $busyDeps
-                              Text = $(if ($busyDeps) { 'Deploying the PackTune Runtime to Intune ...' } else { "Missing: PackTune Runtime. $depsText." })
-                              Fix = 'Create'; Action = { Start-DependencyDeploy } } } })
+    $depsText = 'PackTune Runtime puts Chocolatey and winget on the devices (for SYSTEM) and keeps both up to date. Created once per tenant; every app depends on it'
+    $info = $script:RuntimeInfo
+    $items += $(if (-not (Test-SignedIn)) { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Text = $depsText } }
+                elseif ($null -eq $info) {
+                    $reading = (Test-TaskRunning 'tenant') -or (Test-TaskRunning 'deps') -or $busyDeps
+                    @{ Key = 'tenant'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Wait = $reading
+                       Text = $(if ($busyDeps) { 'Deploying PackTune Runtime to Intune ...' } elseif ($reading) { 'Reading the apps in the tenant ...' } else { 'The apps in the tenant could not be read yet.' }); Fix = 'Check'; Action = { Start-TenantRefresh } } }
+                elseif ($info.State -eq 'Missing') {
+                    @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'bad'; Wait = $busyDeps
+                       Text = $(if ($busyDeps) { 'Deploying PackTune Runtime to Intune ...' } else { "Not in the tenant yet. $depsText." })
+                       Fix = 'Create'; Action = { Start-DependencyDeploy } } }
+                elseif ($info.State -eq 'Migrate') {
+                    $n = @($script:WingetNoRuntime).Count
+                    @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'runtime')
+                       Text = "PackTune Runtime is in the tenant. $n app$(if ($n -ne 1) { 's' }) still use$(if ($n -eq 1) { 's' }) the old dependency apps (Chocolatey, winget runtime): switch them over, nothing is removed."
+                       Fix = 'Switch'; Action = { Start-RuntimeSwitch } } }
+                else { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'ok'; Text = 'PackTune Runtime is in the tenant; every app depends on it.' } })
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
                 elseif ($script:StatusScript.State -eq 'Present') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'ok'; Optional = $true; Text = 'The status script is in Intune; devices report their update log hourly.' } }
@@ -971,7 +978,7 @@ function Start-DependencyDeploy {
     [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the PackTune Runtime to Intune' -Display 'PackTune Runtime' -NeedsAuth -Work 'Get-PackTuneRuntimeWin32ID | Out-Null' -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'succeeded') { Write-UiLog 'The PackTune Runtime is in the tenant.' 'Success'; Show-Toast 'PackTune Runtime is in the tenant.' 'ok' }
-        $script:TenantApps = $null; $script:RuntimeId = $null
+        $script:TenantApps = $null; $script:RuntimeId = $null; $script:RuntimeInfo = $null
         if ($Job.Status -eq 'succeeded') { Start-TenantRefresh } else { Update-Readiness; Complete-SetupStep $false 'deploying the dependency apps' }
     })
     Update-Readiness
@@ -1013,12 +1020,17 @@ $State = if ($Avail.Available) { try { Get-InsightStatusScriptState -Context $Ct
 }
 
 function Start-DependencyCheck {
-    # The winget runtime app is not listed with the tool's apps: look it up on its own (hidden)
+    # PackTune Runtime state (Missing / Migrate / Ready), the apps on the old dependency apps and the old apps nothing uses (hidden)
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'deps')) { return }
-    [void](Start-UiTask -Kind 'deps' -Title 'Checking the winget runtime app' -Hidden -NeedsAuth -Work '$id = Get-WingetRuntimeWin32ID -NoCreate; [pscustomobject]@{ Id = [string]$id }' -OnDone {
+    [void](Start-UiTask -Kind 'deps' -Title 'Checking PackTune Runtime' -Hidden -NeedsAuth -Work 'Get-IntuneChocoRuntimeState' -OnDone {
         param($Result, $Job)
-        $r = @($Result | Where-Object { $_ -and $null -ne $_.Id }) | Select-Object -First 1
-        $script:RuntimeId = if ($Job.Status -eq 'succeeded' -and $r) { [string]$r.Id } else { $null }
+        $r = @($Result | Where-Object { $_ -and $_.PSObject.Properties['State'] }) | Select-Object -First 1
+        if ($Job.Status -eq 'succeeded' -and $r) {
+            $script:RuntimeInfo = $r
+            $script:RuntimeId = [string]$r.RuntimeId
+            $script:WingetNoRuntime = @(@($r.AppsOnOldDependencies) + @($r.AppsWithoutRuntime) | Where-Object { $_ } | Group-Object Id | ForEach-Object { $_.Group[0] })
+        }
+        else { $script:RuntimeInfo = $null; $script:RuntimeId = $null }
         Start-AppIconTask
         Update-TenantRows
         Update-Readiness
@@ -1073,6 +1085,14 @@ function New-TagRow([string]$Text, [string]$Kind) {
     }
 }
 
+function Get-AppIconUrl($Src) {
+    # The icon of an app in the list: from the package infos of either source (same for cards, deploy dialog, details)
+    foreach ($source in 'Chocolatey', 'Winget') {
+        $meta = Get-AppMeta $Src $source
+        if ($meta -and $meta.Found -and $meta.IconUrl) { $p = Get-IconPreview ([string]$meta.IconUrl); if ($p) { return [string]$p } }
+    }
+}
+
 function Set-CardRow($Card, $Src) {
     $key = Get-AppKey $Src
     $tags = New-Object System.Collections.ArrayList
@@ -1087,11 +1107,7 @@ function Set-CardRow($Card, $Src) {
     $inTenant = (@($Src.Sources | Where-Object { $id = Get-AppId $Src $_; $id -and $script:TenantPackages.ContainsKey((Get-MetaKey $id $_)) }).Count -gt 0)
     $note = @($Src.Sources | ForEach-Object { $id = Get-AppId $Src $_; $meta = Get-AppMeta $Src $_; if ($meta -and $meta.LicenseNote) { $meta.LicenseNote } else { Get-ChocoLicenseNote $id } } | Where-Object { $_ }) | Select-Object -First 1
     $badge, $kind = if ($inTenant) { 'In tenant', 'ok' } elseif ($note) { 'Check license', 'warn' } else { '', 'ok' }
-    $iconUrl = $null
-    foreach ($source in 'Chocolatey', 'Winget') {
-        $meta = Get-AppMeta $Src $source
-        if (-not $iconUrl -and $meta -and $meta.Found -and $meta.IconUrl) { $p = Get-IconPreview ([string]$meta.IconUrl); if ($p) { $iconUrl = [string]$p } }
-    }
+    $iconUrl = Get-AppIconUrl $Src
     $custom = $script:CustomIcons[$key]
     Set-Row $Card (@{
         Data = $Src; Title = $Src.Name; Items = $tags.ToArray(); Selected = [bool]$script:Selected.Contains($key)
@@ -1450,8 +1466,11 @@ $script:DeployVersionTexts = @{}
 
 function Get-SourceOptionText($Src, [string]$Source) {
     $v = if ($Source -eq 'Winget') { $Src.WingetVersion } else { $Src.ChocoVersion }
-    $text = "$(Get-SourceLabel $Source)$(if ($v) { ' ' + $v })"
-    if ($Src.RecommendedMarked -and $Src.Recommended -eq $Source) { $text += ', recommended (newer)' }
+    $other = if ($Source -eq 'Winget') { $Src.ChocoVersion } else { $Src.WingetVersion }
+    $id = Get-AppId $Src $Source
+    $text = "$(Get-SourceLabel $Source)$(if ($v) { ' ' + $v } elseif ($id -and (Test-MetaMissing $id $Source)) { ' (version loading)' } else { ' (version unknown)' })"
+    # Recommended only when both versions are known and this one is newer
+    if ($Src.RecommendedMarked -and $Src.Recommended -eq $Source -and $v -and $other) { $text += ', recommended (newer)' }
     $text
 }
 
@@ -1466,10 +1485,7 @@ function Update-DeployVersionTexts {
     $ui.TxtDeployDependency.Inlines.Clear()
     $bold = New-Object System.Windows.Documents.Run 'Dependencies are added automatically. '; $bold.FontWeight = 'SemiBold'
     [void]$ui.TxtDeployDependency.Inlines.Add($bold)
-    [void]$ui.TxtDeployDependency.Inlines.Add((New-Object System.Windows.Documents.Run $(
-        if ($sources.Count -eq 2) { 'winget apps depend on the winget runtime app, Chocolatey apps on the Chocolatey app. A missing one is created first.' }
-        elseif ($sources -contains 'Winget') { 'winget apps depend on the winget runtime app. A missing one is created first.' }
-        else { 'Chocolatey apps depend on the Chocolatey app. A missing one is created first.' })))
+    [void]$ui.TxtDeployDependency.Inlines.Add((New-Object System.Windows.Documents.Run 'Every app depends on PackTune Runtime, which puts Chocolatey and winget on the device. It is created first when the tenant does not have it yet.'))
     $notes = @($script:DeployCombos | ForEach-Object { $src = $_.Sources[[Math]::Max(0, $_.Combo.SelectedIndex)]; $n = Get-CardNote $_.Src; if ($n) { "$($_.Src.Name): license note" } })
     $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbDeployAssign.SelectedIndex)]
     $ui.TxtDeployWarn.Text = (@($notes) + @($(if ($assign -eq 'Required') { 'Required installs on every device of all users.' })) | Where-Object { $_ }) -join ' '
@@ -1479,6 +1495,11 @@ function Show-DeployDialog {
     if ($script:Selected.Count -eq 0) { throw 'Select at least one app first.' }
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
     if (-not $script:ModuleState.Ok) { throw "IntuneWin32App $($script:MinimumModuleVersion) or newer is required (Start > Get ready)." }
+    # The rows as they are now (feed infos may have arrived since the apps were selected)
+    foreach ($key in @($script:Selected.Keys)) {
+        $fresh = @(@($script:SourceRows) + @($script:SearchRows) | Where-Object { (Get-AppKey $_) -eq $key }) | Select-Object -First 1
+        if ($fresh) { $script:Selected[$key] = $fresh }
+    }
     $ui.PanelDeployRows.Children.Clear()
     $script:DeployCombos.Clear()
     foreach ($src in $script:Selected.Values) {
@@ -1496,7 +1517,16 @@ function Show-DeployDialog {
         $tileBox = New-Object System.Windows.Controls.Border
         $tileBox.Width = 32; $tileBox.Height = 32; $tileBox.CornerRadius = 7; $tileBox.Background = ConvertTo-Brush $tile.TileBg; $tileBox.Margin = '0,0,12,0'
         $letter = New-Object System.Windows.Controls.TextBlock; $letter.Text = $tile.Mono; $letter.FontWeight = 'Bold'; $letter.FontSize = 13; $letter.Foreground = ConvertTo-Brush $tile.TileFg
-        $letter.HorizontalAlignment = 'Center'; $letter.VerticalAlignment = 'Center'; $tileBox.Child = $letter
+        $letter.HorizontalAlignment = 'Center'; $letter.VerticalAlignment = 'Center'
+        $tileIcon = Get-AppIconUrl $src
+        $tileGrid = New-Object System.Windows.Controls.Grid
+        [void]$tileGrid.Children.Add($letter)
+        if ($tileIcon) {
+            $img = New-Object System.Windows.Controls.Image; $img.Margin = '3'; $img.Source = ConvertTo-ImageSource $tileIcon
+            [System.Windows.Media.RenderOptions]::SetBitmapScalingMode($img, 'HighQuality')
+            [void]$tileGrid.Children.Add($img); $letter.Visibility = 'Collapsed'
+        }
+        $tileBox.Child = $tileGrid
         $label = New-Object System.Windows.Controls.TextBlock; $label.Text = $src.Name; $label.FontWeight = 'SemiBold'; $label.VerticalAlignment = 'Center'
         [void]$name.Children.Add($tileBox); [void]$name.Children.Add($label)
         $combo = New-Object System.Windows.Controls.ComboBox
@@ -1921,17 +1951,23 @@ function Update-TenantRows {
     }
     $selected = if ($ui.LstTenant.SelectedItem) { $ui.LstTenant.SelectedItem.Data.Id } else { $null }
     $list = New-Object System.Collections.ArrayList
-    foreach ($app in $script:TenantApps) { [void]$list.Add($app) }
+    foreach ($app in $script:TenantApps) { if (-not $app.IsChocolatey) { [void]$list.Add($app) } }
     if ($script:RuntimeId) {
         [void]$list.Add([pscustomobject]@{ Id = $script:RuntimeId; DisplayName = 'PackTune Runtime'; Package = ''; Source = 'Winget'; IsChocolatey = $false; IsDependency = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
+    }
+    # The old dependency apps stay in the list until they are removed (Remove old dependency apps)
+    if ($script:RuntimeInfo) {
+        foreach ($o in @($script:RuntimeInfo.OldDependencyApps)) {
+            [void]$list.Add([pscustomobject]@{ Id = $o.Id; DisplayName = $o.DisplayName; Package = ''; Source = 'Chocolatey'; IsChocolatey = ($o.Kind -eq 'Chocolatey'); IsDependency = $true; IsOld = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
+        }
     }
     $deps = @($list | Where-Object { $_.IsChocolatey -or $_.IsDependency })
     $ordered = @($deps) + @($list | Where-Object { -not ($_.IsChocolatey -or $_.IsDependency) })
     $rows = foreach ($app in $ordered) {
         $count = $script:DeviceCounts[$app.Id]
         $isDep = $app.IsChocolatey -or $app.IsDependency
-        $title = if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-        $sub = if ($app.IsChocolatey) { 'Dependency of the Chocolatey apps' } elseif ($app.IsDependency) { 'Dependency of all apps (Chocolatey and winget for SYSTEM)' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
+        $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
+        $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
@@ -1977,9 +2013,13 @@ function Update-TenantRows {
         $ui.BtnBannerRelease.Uid = $u.Id
     }
     else { $ui.BannerRelease.Visibility = 'Collapsed' }
-    $noRuntime = @($script:WingetNoRuntime)
-    $ui.BannerRuntime.Visibility = ConvertTo-Vis ($noRuntime.Count -gt 0)
-    $ui.TxtBannerRuntime.Text = "$($noRuntime.Count) winget app$(if ($noRuntime.Count -ne 1) { 's' }) in the tenant ha$(if ($noRuntime.Count -ne 1) { 've' } else { 's' }) no winget runtime dependency yet: $(($noRuntime | ForEach-Object { $_.DisplayName }) -join ', ')."
+    $noRuntime = @($script:WingetNoRuntime); $info = $script:RuntimeInfo
+    $ui.BannerRuntime.Visibility = ConvertTo-Vis ($info -and $info.State -eq 'Migrate' -and $noRuntime.Count -gt 0)
+    $ui.TxtBannerRuntime.Text = "$($noRuntime.Count) app$(if ($noRuntime.Count -ne 1) { 's' }) still use$(if ($noRuntime.Count -eq 1) { 's' }) the old dependency apps (Chocolatey, winget runtime). PackTune Runtime replaces them."
+    $ui.BtnBannerRuntime.Content = 'Switch to PackTune Runtime'
+    $unusedOld = @(if ($info) { $info.UnusedOld })
+    $ui.BannerOldDeps.Visibility = ConvertTo-Vis ($unusedOld.Count -gt 0)
+    $ui.TxtBannerOldDeps.Text = "$($unusedOld.Count) old dependency app$(if ($unusedOld.Count -ne 1) { 's' }) ($(($unusedOld | ForEach-Object { $_.DisplayName }) -join ', ')) no longer $(if ($unusedOld.Count -ne 1) { 'are' } else { 'is' }) used by any app."
     $old = @($script:SupersededOld)
     $ui.BannerCleanup.Visibility = ConvertTo-Vis ($old.Count -gt 0)
     $ui.TxtBannerCleanup.Text = "$($old.Count) old app version$(if ($old.Count -ne 1) { 's' }) $(if ($old.Count -ne 1) { 'are' } else { 'is' }) no longer installed on any device."
@@ -1999,15 +2039,7 @@ function Update-TenantBadge {
     $ui.TxtBadgeTenant.Foreground = if ($updates -or -not $problems) { Get-Brush 'Warning' } else { Get-Brush 'Danger' }
 }
 
-function Start-RuntimeCheck {
-    # winget apps without the runtime dependency (hidden), for the banner and the panel
-    if (-not (Test-SignedIn) -or (Test-TaskRunning 'runtimecheck')) { return }
-    [void](Start-UiTask -Kind 'runtimecheck' -Title 'Checking the winget runtime dependency' -Hidden -NeedsAuth -Work 'Get-IntuneWingetAppsWithoutRuntime | ForEach-Object { [pscustomobject]@{ Id = $_.Id; DisplayName = $_.DisplayName } }' -OnDone {
-        param($Result, $Job)
-        $script:WingetNoRuntime = @($Result | Where-Object { $_ -and $_.Id })
-        Update-TenantRows
-    })
-}
+function Start-RuntimeCheck { Start-DependencyCheck }   # the runtime state replaces the separate winget check
 
 # ---------------------------------------------------------------- clean up superseded old app versions
 $script:InstallCountFake = ''     # tests only: script text (param($AppId) -> device count) instead of the Graph query
@@ -2037,19 +2069,39 @@ Add-Click $ui.BtnBannerCleanup {
         Start-TenantRefresh
     })
 }
-Add-Click $ui.BtnBannerRuntime {
-    $ids = @($script:WingetNoRuntime | ForEach-Object { $_.Id })
-    Start-RuntimeFix $ids
-}
-function Start-RuntimeFix([string[]]$Ids) {
+Add-Click $ui.BtnBannerRuntime { Start-RuntimeSwitch }
+function Start-RuntimeSwitch {
+    # Moves the apps from the old dependency apps (Chocolatey, winget runtime) to PackTune Runtime; asks first
+    $apps = @($script:WingetNoRuntime)
+    if ($apps.Count -eq 0) { return }
+    $list = ($apps | Select-Object -First 12 | ForEach-Object { "- $($_.DisplayName)" }) -join "`n"
+    if ($apps.Count -gt 12) { $list += "`n- and $($apps.Count - 12) more" }
+    if (-not (Confirm-Action "Switch $($apps.Count) app(s) to PackTune Runtime?`n`n$list`n`nEach app depends on PackTune Runtime instead of the old dependency apps. Nothing is removed, and nothing changes on the devices now." 'Switch to PackTune Runtime')) { return }
     Update-UiToken
-    [void](Start-UiTask -Kind 'runtime' -Title 'Adding the winget runtime dependency to winget apps' -Display 'winget runtime dependency' -NeedsAuth -Arguments @{ Ids = $Ids } -Work 'param($Ids) Add-IntuneWingetRuntimeDependency -AppId $Ids' -OnDone {
+    [void](Start-UiTask -Kind 'runtime' -Title 'Switching the apps to PackTune Runtime' -Display 'Switch to PackTune Runtime' -NeedsAuth -Arguments @{ Ids = @($apps | ForEach-Object { $_.Id }) } -Work 'param($Ids) Switch-IntuneChocoAppsToRuntime -AppId $Ids' -OnDone {
         param($Result, $Job)
-        $added = @($Result | Where-Object { $_.Added }).Count
-        if ($Job.Status -eq 'succeeded') { Show-Toast "Dependency added to $added app(s)." 'ok' }
-        $script:WingetNoRuntime = @()
-        Start-RuntimeCheck
+        $n = @($Result | Where-Object { $_ -and $_.Id }).Count
+        if ($Job.Status -eq 'succeeded') { Show-Toast "$n app(s) now depend on PackTune Runtime." 'ok' }
+        $script:RuntimeInfo = $null; $script:WingetNoRuntime = @()
+        Start-DependencyCheck
         Update-TenantRows
+        Update-Readiness
+    })
+}
+Add-Click $ui.BtnBannerOldDeps { Start-OldDependencyCleanup }
+function Start-OldDependencyCleanup {
+    # Removes the old dependency apps nothing depends on any more; only on request, after a confirmation
+    $old = @($script:RuntimeInfo.UnusedOld)
+    if ($old.Count -eq 0) { return }
+    $list = ($old | ForEach-Object { "- $($_.DisplayName)" }) -join "`n"
+    if (-not (Confirm-Action "Remove these old dependency apps from Intune?`n`n$list`n`nNo app depends on them any more. Devices keep what they installed." 'Remove old dependency apps')) { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'cleanupdeps' -Title "Removing $($old.Count) old dependency app(s)" -Display 'Remove old dependency apps' -NeedsAuth -Work 'Remove-IntuneChocoUnusedDependencyApps' -OnDone {
+        param($Result, $Job)
+        $n = @($Result | Where-Object { $_.Removed }).Count
+        if ($Job.Status -eq 'succeeded') { Show-Toast "$n old dependency app(s) removed." 'ok' }
+        $script:RuntimeInfo = $null; $script:TenantApps = $null
+        Start-TenantRefresh
     })
 }
 
@@ -2106,8 +2158,8 @@ function Update-TenantButtons {
     $t = Get-TileStyle $(if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName })
     $ui.BoxTenantIcon.Background = ConvertTo-Brush $t.TileBg; $ui.TxtTenantMono.Text = $t.Mono; $ui.TxtTenantMono.Foreground = ConvertTo-Brush $t.TileFg
     $tenantIcon = Get-TenantAppIcon $app; $ui.ImgTenant.Source = ConvertTo-ImageSource $tenantIcon; $ui.TxtTenantMono.Visibility = ConvertTo-Vis (-not $tenantIcon)
-    $ui.TxtTenantAppTitle.Text = if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-    $ui.TxtTenantAppSub.Text = if ($isDep) { 'Dependency app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
+    $ui.TxtTenantAppTitle.Text = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
+    $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
     $busy = Test-TaskRunning 'policy'
     $ui.BtnTenantOpen.IsEnabled = $true
     $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
@@ -2119,7 +2171,7 @@ function Update-TenantButtons {
     $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $isDep) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
     $noRuntime = @($script:WingetNoRuntime | Where-Object { $_.Id -eq $app.Id }).Count -gt 0
     $ui.TxtDependencyNote.Visibility = ConvertTo-Vis $noRuntime
-    $ui.TxtDependencyNote.Text = if ($noRuntime) { 'This winget app has no winget runtime dependency yet. Add winget runtime dependency (banner above the list) fixes it.' } else { '' }
+    $ui.TxtDependencyNote.Text = if ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
     if ($isDep) { $script:TenantPolicyApp = ''; return }
     $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
@@ -2663,11 +2715,23 @@ function Test-EmbeddedSignIn {
     finally { $window.Cursor = $null }
 }
 
+# One WebView2 profile for the whole run: the setup sign-in and the normal sign-in share the Microsoft session
+$script:SignInSession = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
+$script:SignInHint = ''
+$script:BrowserSignIn = 'Invoke-IntuneChocoBrowserSignIn'   # tests replace it
+function Set-SignInHintFromToken {
+    # Signed in already (browser, Keevault or this window): that account is the login hint, so a second sign-in lands on its session
+    if ($script:SignInHint -or -not (Test-SignedIn)) { return }
+    try { $a = (Get-IntuneChocoIdentity).Account; if ($a) { $script:SignInHint = [string]$a } } catch { }
+}
 function Invoke-EmbeddedSignIn {
     # Sign-in window, modal to the main window (its timer keeps the background tasks running). Returns the token response.
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint)
-    if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes) }
-    Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -Title 'Sign in to Microsoft' -Hint $Hint
+    Set-SignInHintFromToken
+    if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes $script:SignInHint) }
+    $params = @{ TenantID = $TenantID; ClientID = $ClientID; Scopes = $Scopes; CacheFolder = (Join-Path $script:WorkRoot 'WebView2'); Owner = $window; Title = 'Sign in to Microsoft'; Hint = $Hint; UserDataFolder = $script:SignInSession }
+    if ($script:SignInHint) { $params.LoginHint = $script:SignInHint; $params.Prompt = 'default' }
+    & $script:BrowserSignIn @params
 }
 
 function Test-EmbeddedStartFailure($ErrorRecord) { $ErrorRecord.Exception.Message -like 'The embedded browser could not start*' }
@@ -2683,7 +2747,13 @@ function Get-EmbeddedToken {
         Write-UiLog "Embedded sign-in not available: $script:EmbeddedReason" 'Warning'
         return $null
     }
-    try { $script:LastSignInPath = 'embedded'; return (Invoke-EmbeddedSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Hint $Hint) }
+    try {
+        $script:LastSignInPath = 'embedded'
+        $token = Invoke-EmbeddedSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Hint $Hint
+        # The account that signed in is the login hint of the next sign-in in this run (same session, no second password)
+        try { $claims = Get-IntuneChocoTokenClaims ([string]$token.access_token); $account = if ($claims.upn) { $claims.upn } elseif ($claims.preferred_username) { $claims.preferred_username } else { '' }; if ($account) { $script:SignInHint = [string]$account } } catch { }
+        return $token
+    }
     catch {
         if (Test-EmbeddedStartFailure $_) {
             $script:LastSignInPath = ''
@@ -2706,7 +2776,7 @@ function Connect-Intune {
         $window.Cursor = 'Wait'
         try {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
-            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
+            $token = Connect-IntuneChocoWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
             Set-IntuneChocoToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
             if ($token.SignInTenantID -ne $tenant) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-IntuneChocoAuthState
@@ -2795,7 +2865,7 @@ function Complete-SignIn([string]$How) {
 function Disconnect-Intune {
     $script:Shared.Auth = $null
     Set-IntuneChocoAuthState @{}
-    $script:TenantApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:StatusScript = $null; $script:SupersededOld = @()
+    $script:TenantApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:RuntimeInfo = $null; $script:StatusScript = $null; $script:SupersededOld = @()
     $script:DeviceCounts = @{}; $script:WingetNoRuntime = @(); $script:ImportApps = $null
     Update-TenantRows
     Update-AppList
@@ -2998,6 +3068,7 @@ $window.Add_Closing({
     }
 })
 $window.Add_Closed({
+    try { if (Test-Path $script:SignInSession) { Remove-Item $script:SignInSession -Recurse -Force -ErrorAction SilentlyContinue } } catch { }
     $timer.Stop()
     Save-MetaCache
     # Not waited for: a task may sit in a web request, and the process ends right after this anyway
