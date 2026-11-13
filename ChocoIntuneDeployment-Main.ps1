@@ -2502,6 +2502,9 @@ function New-IntuneWin32ChocoApplicationInstallFromRepo {
 
 # winget packages (same helpers, own install script)
 . (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Winget.ps1")
+# One app list for both sources, the winget runtime app, release via supersedence
+. (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Sources.ps1")
+. (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Release.ps1")
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here
 Import-Module (Join-Path $PSScriptRoot "Modules\TenantInsight.psm1") -Force -Global
