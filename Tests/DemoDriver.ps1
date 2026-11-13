@@ -9,6 +9,10 @@ $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
 $window.ShowInTaskbar = $false
 
+# The demo environment has no WebView2 runtime: keep its "sign-in window not available" warning out of the pictures
+$script:RealShowToast = ${function:Show-Toast}
+function Show-Toast([string]$Text, [string]$Kind = 'info') { if ($Kind -eq 'warn' -and $Text -like 'The sign-in window*') { return }; & $script:RealShowToast $Text $Kind }
+
 #region Overlay: pointer, click ring, caption
 
 $demoRoot = $window.Content

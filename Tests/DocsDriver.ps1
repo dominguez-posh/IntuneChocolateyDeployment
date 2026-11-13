@@ -7,6 +7,10 @@ $window.WindowStartupLocation = 'Manual'
 $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
 $window.ShowInTaskbar = $false
+
+# The demo environment has no WebView2 runtime: keep its "sign-in window not available" warning out of the pictures
+$script:RealShowToast = ${function:Show-Toast}
+function Show-Toast([string]$Text, [string]$Kind = 'info') { if ($Kind -eq 'warn' -and $Text -like 'The sign-in window*') { return }; & $script:RealShowToast $Text $Kind }
 $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
 $script:DocsLog = New-Object System.Collections.ArrayList
 
@@ -42,7 +46,7 @@ $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = { param($s) if (-not (Test-DocsIdle)) { return $false }; Show-Page 'Start'; Save-DocShot 'start'; $true } }
     @{ Do = { param($s) Show-Page 'Apps'; $true } }
     @{ Do = { param($s) if (-not (Test-DocsIdle 'meta')) { return $false }; Update-CatalogRows; $ui.TxtFilter.Text = ''; foreach ($n in '7-Zip', 'Notepad++', 'VLC media player') { Select-Named $n }; $true } }
-    @{ Do = { param($s) $s.N++; if ($s.N -lt 5) { return $false }; Show-AppDetails (@($script:SourceRows | Where-Object { $_.Name -eq '7-Zip' })[0]); $ui.AppsScroll.ScrollToVerticalOffset(235); $window.UpdateLayout(); Save-DocShot 'apps'; $script:DetailRow = $null; $ui.PanelDetails.Visibility = 'Collapsed'; Update-SelectionBar; $true } }
+    @{ Do = { param($s) $s.N++; if ($s.N -lt 5 -or ($s.N -lt 20 -and -not (Test-DocsIdle 'icons'))) { return $false }; Show-AppDetails (@($script:SourceRows | Where-Object { $_.Name -eq '7-Zip' })[0]); $ui.AppsScroll.ScrollToVerticalOffset(235); $window.UpdateLayout(); Save-DocShot 'apps'; $script:DetailRow = $null; $ui.PanelDetails.Visibility = 'Collapsed'; Update-SelectionBar; $true } }
     @{ Do = { param($s) Show-DeployDialog; Use-Source 'Chocolatey'; Save-DocShot 'deploy'; Close-Dialog; $true } }
     @{ Do = { param($s)
         Show-DeployDialog

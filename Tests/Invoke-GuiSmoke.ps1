@@ -28,6 +28,9 @@ New-Item -ItemType Directory -Path (Join-Path $appData 'IntuneChocoDeployment') 
     Set-Content (Join-Path $appData 'IntuneChocoDeployment\settings.json')
 $cache = Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\feedcache.json'
 if (Test-Path $cache) { Copy-Item $cache (Join-Path $appData 'IntuneChocoDeployment\feedcache.json') }
+# Same for the icon cache, so the app list shows real icons instead of letter tiles
+$icons = Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\iconcache'
+if (Test-Path $icons) { Copy-Item $icons (Join-Path $appData 'IntuneChocoDeployment\iconcache') -Recurse }
 
 # Stand-in for the Microsoft sign-in: /authorize redirects straight back with a code, /token hands out tokens
 # (name "Test Admin", after a renewal "Test Admin renewed"). Runs in its own runspace while the GUI process works.

@@ -18,6 +18,7 @@ param(
     [string]$OutDir,
     [string]$Title = 'PackTune',
     [string]$Subtitle = 'winget and Chocolatey apps for Intune',
+    [string]$Url = 'github.com/dominguez-posh/PackTune',
     [int]$Quality = 35,
     [int]$Fps = 30,
     [double]$TourSeconds = 40
@@ -52,7 +53,7 @@ else {
     if (-not $img2webp) { throw 'img2webp.exe was not found. Install it with: winget install Google.Libwebp' }
     if (-not (Test-Module 'imageio_ffmpeg')) { $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; & $python -m pip install --user --quiet imageio-ffmpeg 2>&1 | Out-Null; $ErrorActionPreference = $old }
     $args2 = @($helper, 'video', '--frames', $Source, '--out', (Join-Path $OutDir 'demo.webp'), '--img2webp', $img2webp,
-        '--title', $Title, '--subtitle', $Subtitle, '--quality', $Quality, '--fps', $Fps, '--tour-seconds', $TourSeconds)
+        '--title', $Title, '--subtitle', $Subtitle, '--url', $Url, '--quality', $Quality, '--fps', $Fps, '--tour-seconds', $TourSeconds)
     if (Test-Module 'imageio_ffmpeg') { $args2 += '--mp4', (Join-Path $OutDir 'demo.mp4') } else { Write-Warning 'No ffmpeg encoder available, demo.mp4 is skipped.' }
     & $python @args2
     if ($LASTEXITCODE -ne 0) { throw "showcase.py failed with exit code $LASTEXITCODE" }

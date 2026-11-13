@@ -144,14 +144,13 @@ def frame_shot(rgb, canvas=(1440, 900)):
 
 
 def hero_shot(wins, canvas=(1600, 900)):
-    """Three whole windows layered: status behind, apps in the middle, the deploy dialog in front."""
+    """Two whole windows layered: apps behind, status page in front."""
     img = make_bg(*canvas)
     cw, ch = canvas
-    ww = 940
-    for rgb, x, y, wd in ((wins['status'], cw - ww - 70, 44, ww - 40), (wins['apps'], 60, 138, ww),
-                          (wins['deploy'], 470, 318, ww)):
+    # two layers, both complete and inside generous margins: apps window behind, status page in front and offset
+    for rgb, x, y, wd in ((wins['apps'], 80, 80, 980), (wins['status'], cw - 80 - 800, ch - 80 - 480, 800)):
         h = round(wd * rgb.size[1] / rgb.size[0])
-        compose_window(img, rgb, x, y, wd, h, 12, 0.8)
+        compose_window(img, rgb, x, y, wd, h, 12, 0.85)
     return img.convert('RGB')
 
 
@@ -178,7 +177,7 @@ def run_shots(a):
             continue
         wins[n] = flatten_window(p)
         save_png(frame_shot(wins[n]), os.path.join(a.out, n + '.png'), a.oxipng)
-    if all(k in wins for k in ('apps', 'deploy', 'status')):
+    if all(k in wins for k in ('apps', 'status')):
         save_png(hero_shot(wins), os.path.join(a.out, 'hero.png'), a.oxipng)
     for n in names + ('hero',):
         p = os.path.join(a.out, n + '.png')
@@ -655,7 +654,7 @@ def main():
     v.add_argument('--encode-only', action='store_true')
     v.add_argument('--title', default='PackTune')
     v.add_argument('--subtitle', default='winget and Chocolatey apps for Intune')
-    v.add_argument('--url', default='github.com/dominguez-posh/IntuneChocolateyDeployment')
+    v.add_argument('--url', default='github.com/dominguez-posh/PackTune')
     s = sub.add_parser('shots')
     s.add_argument('--src', required=True)
     s.add_argument('--out', required=True)
