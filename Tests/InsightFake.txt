@@ -22,6 +22,12 @@ if ($P -like '*/deviceHealthScripts*') {
     if (Test-Path (Join-Path $Dir 'fake-health.json')) { return @{ value = @(@{ id = 'hs-1'; displayName = 'IntuneChocoDeployment status' }) } }
     return @{ value = @() }
 }
+if ($P -like '*/mobileApps/*' -and $P -like '*largeIcon*') {
+    $Id = (($P -split '/mobileApps/')[1] -split '\?')[0]
+    $F = Join-Path $Dir 'fake-icon.json'
+    if (Test-Path $F) { $I = Get-Content $F -Raw | ConvertFrom-Json; if ($I.id -eq $Id) { return @{ id = $Id; largeIcon = @{ type = 'image/png'; value = $I.value } } } }
+    return @{ id = $Id }
+}
 if ($P -like '*mobileApps/*' -and $Method -eq 'PATCH') { Add-Content (Join-Path $Dir 'fake-patches.log') $P; return @{} }
 if ($P -like '*/mobileApps?*') {
     if ($P -like '*winGetApp*') { return @{ value = @() } }

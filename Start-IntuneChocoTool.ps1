@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Intune Chocolatey Deployment - graphical interface for ChocoIntuneDeployment-Main.ps1.
+    PackTune (winget and Chocolatey apps for Intune) - graphical interface for ChocoIntuneDeployment-Main.ps1.
 .DESCRIPTION
     Look and window technique of the M365 MFA Administration tool and MSIX Sandbox Studio: shared UI\Theme.xaml,
     slate header with connection state, Start.cmd starts the console hidden. Sign in opens the Microsoft sign-in in
@@ -105,7 +105,7 @@ foreach ($node in $xaml.SelectNodes("//*[@*[local-name()='Name']]")) {
     $name = $node.Attributes | Where-Object LocalName -eq 'Name' | Select-Object -ExpandProperty Value
     $ui[$name] = $window.FindName($name)
 }
-$window.Title = "Intune Choco Deployment $script:ToolVersion"
+$window.Title = "PackTune $script:ToolVersion"
 
 $script:BrushConverter = New-Object System.Windows.Media.BrushConverter
 function Get-Brush([string]$Key) { [System.Windows.Application]::Current.Resources[$Key] }
@@ -209,10 +209,10 @@ function Show-Error([string]$Message) {
     Write-UiLog $Message 'Error'
     Show-Toast $Message 'bad'
     if ($env:INTUNECHOCO_SMOKE) { return }   # tests: no dialogs on the desktop
-    [void][System.Windows.MessageBox]::Show($window, $Message, 'Intune Choco Deployment', 'OK', 'Error')
+    [void][System.Windows.MessageBox]::Show($window, $Message, 'PackTune', 'OK', 'Error')
 }
 
-function Confirm-Action([string]$Message, [string]$Title = 'Intune Choco Deployment') {
+function Confirm-Action([string]$Message, [string]$Title = 'PackTune') {
     if ($env:INTUNECHOCO_SMOKE) { return $true }
     return ([System.Windows.MessageBox]::Show($window, $Message, $Title, 'YesNo', 'Question') -eq 'Yes')
 }
@@ -603,6 +603,7 @@ function Complete-MetaPrefetch {
     Update-AppList
     Update-TenantRows
     Update-DetailIcon
+    Start-AppIconTask
     Save-MetaCache
     $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
     if ($failed.Count -gt 0 -and -not $script:MetaWarned) {
@@ -674,7 +675,7 @@ function Show-Page([string]$Name) {
     $navName = if ($Name -eq 'Status') { 'Tenant' } else { $Name }
     $ui["Nav$navName"].IsChecked = $true
     switch ($Name) {
-        'Start'    { Update-Readiness }
+        'Start'    { $script:SandboxState = $null; Update-Readiness }
         'Apps'     { Update-CatalogRows; Update-AppList; Start-CatalogPrefetch }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
         'Settings' { Update-SettingsView }
@@ -825,18 +826,17 @@ function Get-ReadinessItems {
                     Text = $(if ($busyConnect) { 'Waiting for the sign-in in your browser ...' } else { 'Not signed in' })
                     Fix = 'Sign in'; Action = { Connect-Intune } } })
     )
-    $depsText = 'Chocolatey and winget runtime, created once per tenant, so every app finds its installer'
+    $depsText = 'PackTune Runtime (Chocolatey and winget for SYSTEM), created once per tenant, so every app finds its installer'
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'warn'; Text = $depsText } }
                 elseif ($null -eq $script:TenantApps -or $null -eq $script:RuntimeId) {
                     $reading = (Test-TaskRunning 'tenant') -or (Test-TaskRunning 'deps')
                     @{ Key = 'tenant'; Title = 'Dependency apps in Intune'; State = 'warn'; Wait = $reading
                        Text = $(if ($reading) { 'Reading the apps in the tenant ...' } else { 'The apps in the tenant could not be read yet.' }); Fix = 'Check'; Action = { Start-TenantRefresh } } }
                 else {
-                    $haveChoco = @($script:TenantApps | Where-Object IsChocolatey).Count -gt 0
                     $haveRuntime = [bool]$script:RuntimeId
-                    if ($haveChoco -and $haveRuntime) { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'ok'; Text = 'Chocolatey and the winget runtime are in the tenant.' } }
+                    if ($haveRuntime) { @{ Key = 'deps'; Title = 'Dependency app in Intune'; State = 'ok'; Text = 'The PackTune Runtime is in the tenant.' } }
                     else { @{ Key = 'deps'; Title = 'Dependency apps in Intune'; State = 'bad'; Wait = $busyDeps
-                              Text = $(if ($busyDeps) { 'Deploying the dependency apps to Intune ...' } else { "Missing: $(@($(if (-not $haveChoco) { 'Chocolatey' }), $(if (-not $haveRuntime) { 'winget runtime' }) | Where-Object { $_ }) -join ', '). $depsText." })
+                              Text = $(if ($busyDeps) { 'Deploying the PackTune Runtime to Intune ...' } else { "Missing: PackTune Runtime. $depsText." })
                               Fix = 'Create'; Action = { Start-DependencyDeploy } } } })
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
@@ -845,6 +845,20 @@ function Get-ReadinessItems {
                 else { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statusscript')
                           Text = 'Devices report their update log to Intune, so failures show up with their cause. Needs Remediations (Windows Enterprise E3/E5).'
                           Fix = 'Set up'; Action = { Start-StatusScriptSetup } } })
+    $sb = Get-CachedSandboxState
+    $busyInstall = Test-TaskRunning 'sandboxinstall'
+    $items += $(
+        if ($busyInstall) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true; Wait = $true; Text = 'Installing Windows Sandbox, waiting for the administrator approval ...' } }
+        elseif ($sb.RestartPending) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true; Text = 'Windows Sandbox is installed: restart required. Restart Windows to finish.' } }
+        elseif (-not $sb.Present -and -not $sb.Installable) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true; Text = "Windows Sandbox is not available on this computer. $($sb.Reason)" } }
+        elseif (-not $sb.Present) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true
+                                       Text = "Windows Sandbox is not installed. It tests an app in a throw-away Windows before it goes to Intune. Installing needs administrator approval and a restart.$(if ($sb.Reason) { ' ' + $sb.Reason })"
+                                       Fix = 'Install'; Action = { Start-SandboxInstall } } }
+        elseif (-not $sb.Studio) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true
+                                      Text = 'MSIX Sandbox Studio was not found. Get WindowsSandboxMSIXInstaller from github.com/dominguez-posh/WindowsSandboxMSIXInstaller, or enter its folder in the settings.'
+                                      Fix = 'Get it'; Action = { Start-Process $script:SandboxStudioUrl } } }
+        else { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'ok'; Optional = $true; Text = 'Windows Sandbox and MSIX Sandbox Studio are ready for the Test buttons.' } }
+    )
     $items
 }
 
@@ -910,17 +924,29 @@ function Start-AppRegistration {
     if (Test-TaskRunning 'appreg') { return }
     if (Test-TaskRunning 'connect') { throw 'A sign-in is waiting in the browser. Finish or cancel it first.' }
     $script:Shared.CancelSignIn = $false
+    # The setup sign-in (Microsoft Graph Command Line Tools app, admin consent) in the window of this app; the browser as fallback
+    $setupToken = $null
+    try {
+        $setupToken = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'User.Read') -Hint 'Sign in with an administrator account: this creates the app registration and grants the admin consent.'
+    }
+    catch {
+        if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }
+        Complete-SetupStep $false 'creating the app registration'
+        return
+    }
+    $script:LastSignInPath = if ($setupToken) { 'embedded' } else { 'browser' }
     $work = @'
-param($TenantID, $Authority, $UrlHandler, $GraphUrl)
+param($TenantID, $Authority, $UrlHandler, $GraphUrl, $Token)
 $Params = @{ ShouldCancel = { $Shared.CancelSignIn } }
 if ($TenantID) { $Params.TenantID = $TenantID }
 if ($Authority) { $Params.Authority = $Authority }
 if ($GraphUrl) { $Params.GraphUrl = $GraphUrl }
+if ($Token) { $Params.Token = $Token }
 if ($UrlHandler) { $Params.UrlHandler = [scriptblock]::Create($UrlHandler) }
 New-IntuneChocoAppRegistration @Params
 '@
-    $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl }
-    [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration: sign in with an administrator account in your browser and accept the consent' -Display 'App registration' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
+    $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl; Token = $setupToken }
+    [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration with admin consent' -Display 'App registration' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
         $reg = @($Result | Where-Object { $_ -and $_.ClientID }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded' -and $reg) {
@@ -942,9 +968,9 @@ function Start-DependencyDeploy {
     # Chocolatey app and winget runtime app, once per tenant (each is created only when it is missing)
     if (Test-TaskRunning 'chocolatey') { return }
     Update-UiToken
-    [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the dependency apps (Chocolatey, winget runtime) to Intune' -Display 'Dependency apps' -NeedsAuth -Work 'get-ChocoWin32ID | Out-Null; Get-WingetRuntimeWin32ID | Out-Null' -OnDone {
+    [void](Start-UiTask -Kind 'chocolatey' -Title 'Deploying the PackTune Runtime to Intune' -Display 'PackTune Runtime' -NeedsAuth -Work 'Get-PackTuneRuntimeWin32ID | Out-Null' -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'succeeded') { Write-UiLog 'Chocolatey and the winget runtime are in the tenant.' 'Success'; Show-Toast 'Dependency apps are in the tenant.' 'ok' }
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'The PackTune Runtime is in the tenant.' 'Success'; Show-Toast 'PackTune Runtime is in the tenant.' 'ok' }
         $script:TenantApps = $null; $script:RuntimeId = $null
         if ($Job.Status -eq 'succeeded') { Start-TenantRefresh } else { Update-Readiness; Complete-SetupStep $false 'deploying the dependency apps' }
     })
@@ -993,6 +1019,7 @@ function Start-DependencyCheck {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Id }) | Select-Object -First 1
         $script:RuntimeId = if ($Job.Status -eq 'succeeded' -and $r) { [string]$r.Id } else { $null }
+        Start-AppIconTask
         Update-TenantRows
         Update-Readiness
         Complete-SetupStep ($Job.Status -eq 'succeeded') 'reading the tenant'
@@ -1224,7 +1251,7 @@ function Update-SelectionBar {
     $ui.BtnReview.IsEnabled = $count -gt 0 -and (Test-SignedIn) -and $script:ModuleState.Ok -and -not $wingetMissing
     $ui.BtnReview.ToolTip = if (-not (Test-SignedIn)) { 'Sign in first' } elseif (-not $script:ModuleState.Ok) { 'Install the IntuneWin32App module first (Start)' }
                             elseif ($wingetMissing) { 'Install the Microsoft.WinGet.Client module first (Settings > Components)' } else { 'Choose source, version and updates per app, then deploy' }
-    $ui.BtnDetailTest.IsEnabled = [bool]$script:DetailRow -and -not (Test-TaskRunning 'test')
+    Update-SandboxButtons
 }
 $ui.RbPreferWinget.Add_Checked({ $script:Preferred = 'Winget'; Update-SelectionBar })
 $ui.RbPreferChoco.Add_Checked({ $script:Preferred = 'Chocolatey'; Update-SelectionBar })
@@ -1717,6 +1744,95 @@ $script:DeviceCounts = @{}
 $script:TenantPolicyApp = ''
 $script:TenantSchedule = $null
 
+# ---------------------------------------------------------------- app icons in the tenant views
+# 1. the icon of the package (same cache as the Apps page; winget apps borrow the one of the same catalog app),
+# 2. the icon stored in the Intune app (read lazily in the background, kept on disk next to the other icons),
+# 3. the letter tile.
+$script:AppIconCache = @{}     # Intune app id -> icon file
+$script:AppIconTried = @{}     # "app id|modified" -> asked once
+
+function ConvertTo-ImageSource($Path) {
+    if (-not $Path) { return $null }
+    try {
+        $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
+        $bmp.BeginInit()
+        if (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue) { $bmp.CacheOption = 'OnLoad' }   # local file: read now; a URL loads in the background
+        $bmp.UriSource = [Uri][string]$Path
+        $bmp.EndInit()
+        $bmp
+    }
+    catch { $null }
+}
+
+function Get-IconFromMeta([string]$Id, [string]$Source) {
+    if (-not $Id) { return $null }
+    $meta = $script:Shared.Meta[(Get-MetaKey $Id $Source)]
+    if ($meta -and $meta.Found -and $meta.IconUrl) { $p = Get-IconPreview ([string]$meta.IconUrl); if ($p) { return [string]$p } }
+}
+
+function Get-PackageIcon([string]$Package, [string]$Source) {
+    # Icon of a package; winget packages rarely have one and borrow it from the same app's Chocolatey package
+    $icon = Get-IconFromMeta $Package $Source
+    if ($icon) { return $icon }
+    $entry = @($script:Catalog | Where-Object { ($_.WingetId -and $_.WingetId -ieq $Package) -or ($_.Id -and $_.Id -ieq $Package) }) | Select-Object -First 1
+    if ($entry) {
+        $icon = Get-IconFromMeta $entry.Id 'Chocolatey'
+        if (-not $icon) { $icon = Get-IconFromMeta $entry.WingetId 'Winget' }
+        return $icon
+    }
+}
+
+function Get-AppIconFile([string]$AppId, [string]$Modified) {
+    $sha = [Security.Cryptography.SHA1]::Create()
+    $hash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("$AppId|$Modified")) | ForEach-Object { $_.ToString('x2') })
+    [string](Join-Path $script:IconCacheDir "app-$hash.png")
+}
+
+function Get-TenantAppIcon($App) {
+    if ($App.IsChocolatey) { $icon = Get-IconFromMeta 'chocolatey' 'Chocolatey'; if ($icon) { return $icon } }
+    elseif ($App.Package) { $icon = Get-PackageIcon $App.Package $App.Source; if ($icon) { return $icon } }
+    $file = $script:AppIconCache[$App.Id]
+    if (-not $file) { $disk = Get-AppIconFile $App.Id $App.Modified; if (Test-Path $disk) { $file = $disk; $script:AppIconCache[$App.Id] = $disk } }
+    if ($file) { return [string]$file }
+}
+
+$script:AppIconWork = @'
+param($Items, $Fake)
+$Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }
+foreach ($Item in $Items) {
+    try {
+        $App = Invoke-InsightGraph $Ctx GET "/beta/deviceAppManagement/mobileApps/$($Item.Id)?`$select=largeIcon"
+        if ($App.largeIcon -and $App.largeIcon.value) {
+            New-Item -ItemType Directory -Path (Split-Path $Item.File) -Force | Out-Null
+            [IO.File]::WriteAllBytes($Item.File, [Convert]::FromBase64String([string]$App.largeIcon.value))
+            [pscustomobject]@{ Id = $Item.Id; File = $Item.File }
+        }
+    }
+    catch { }   # no icon for this app: the letter tile stays
+}
+'@
+
+function Start-AppIconTask {
+    # Icons stored in the Intune apps that have no package icon: one single-app read each, in the background
+    if (-not (Test-SignedIn) -or $null -eq $script:TenantApps -or (Test-TaskRunning 'appicons') -or (Test-TaskRunning 'meta')) { return }
+    $apps = @($script:TenantApps | Where-Object { -not $_.IsChocolatey }) + $(if ($script:RuntimeId) { [pscustomobject]@{ Id = $script:RuntimeId; Modified = ''; IsDependency = $true } })
+    $items = foreach ($app in @($apps | Where-Object { $_ })) {
+        if (Get-TenantAppIcon $app) { continue }
+        $key = "$($app.Id)|$($app.Modified)"
+        if ($script:AppIconTried.ContainsKey($key)) { continue }
+        $script:AppIconTried[$key] = $true
+        @{ Id = [string]$app.Id; File = (Get-AppIconFile $app.Id $app.Modified) }
+    }
+    $items = @($items)
+    if ($items.Count -eq 0) { return }
+    [void](Start-UiTask -Kind 'appicons' -Title 'Reading the app icons from Intune' -Hidden -NeedsAuth -Pool $script:MetaPool -Arguments @{ Items = $items; Fake = $script:InsightFake } -Work $script:AppIconWork -OnDone {
+        param($Result, $Job)
+        foreach ($r in @($Result | Where-Object { $_ -and $_.File })) { $script:AppIconCache[$r.Id] = [string]$r.File }
+        Update-TenantRows
+        if ($script:CurrentPage -eq 'Status' -and $script:StatusApp) { Set-StatusIcon }
+    })
+}
+
 function Start-TenantRefresh {
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first.' }
     if (Test-TaskRunning 'tenant') { return }
@@ -1745,9 +1861,10 @@ Get-IntuneChocoTenantApps | ForEach-Object {
             if ($script:RecentDeploys[$key] -gt (Get-Date).AddMinutes(-5)) { $script:TenantPackages[$key] = $true } else { $script:RecentDeploys.Remove($key) }
         }
         $items = foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { @{ Source = $app.Source; Id = $app.Package } } }
-        Start-MetaPrefetch -Items @($items)
+        Start-MetaPrefetch -Items (@($items) + @(@{ Source = 'Chocolatey'; Id = 'chocolatey' }))
         Update-TenantRows -Force
         Update-AppList
+        Start-AppIconTask
         Start-DependencyCheck
         Start-RuntimeCheck
         Start-StatusCheck
@@ -1806,7 +1923,7 @@ function Update-TenantRows {
     $list = New-Object System.Collections.ArrayList
     foreach ($app in $script:TenantApps) { [void]$list.Add($app) }
     if ($script:RuntimeId) {
-        [void]$list.Add([pscustomobject]@{ Id = $script:RuntimeId; DisplayName = 'winget runtime'; Package = ''; Source = 'Winget'; IsChocolatey = $false; IsDependency = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
+        [void]$list.Add([pscustomobject]@{ Id = $script:RuntimeId; DisplayName = 'PackTune Runtime'; Package = ''; Source = 'Winget'; IsChocolatey = $false; IsDependency = $true; Version = ''; UpdateMode = ''; GraceHours = 0; Intents = ''; Schedule = $null; LatestVersion = ''; UpdateAvailable = $false })
     }
     $deps = @($list | Where-Object { $_.IsChocolatey -or $_.IsDependency })
     $ordered = @($deps) + @($list | Where-Object { -not ($_.IsChocolatey -or $_.IsDependency) })
@@ -1814,15 +1931,16 @@ function Update-TenantRows {
         $count = $script:DeviceCounts[$app.Id]
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-        $sub = if ($app.IsChocolatey) { 'Dependency of the Chocolatey apps' } elseif ($app.IsDependency) { 'Dependency of the winget apps (App Installer for SYSTEM)' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
+        $sub = if ($app.IsChocolatey) { 'Dependency of the Chocolatey apps' } elseif ($app.IsDependency) { 'Dependency of all apps (Chocolatey and winget for SYSTEM)' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
+        $icon = Get-TenantAppIcon $app
         New-Row (@{
             Data = $app; Title = $title; Sub = $sub
             Version = $(if ($isDep) { 'latest' } elseif ($app.Version) { $app.Version } else { 'Always newest' })
             Newer = $(if ($app.UpdateAvailable) { "$($app.LatestVersion) available" } else { '' }); NewerVis = (ConvertTo-Vis $app.UpdateAvailable)
-            Updates = $updates; Assigned = (Get-IntentText $app); Ok = $ok; Bad = $bad; BadVis = (ConvertTo-Vis ([bool]$bad)); Icon = $null; MonoVis = 'Visible'
+            Updates = $updates; Assigned = (Get-IntentText $app); Ok = $ok; Bad = $bad; BadVis = (ConvertTo-Vis ([bool]$bad)); Icon = $icon; MonoVis = (ConvertTo-Vis (-not $icon))
         } + (Get-TileStyle $title))
     }
     $rows = @($rows)
@@ -1831,7 +1949,7 @@ function Update-TenantRows {
     if ($same -and -not $Force) {
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $old = $script:TenantRowList[$i]
-            foreach ($k in 'Newer', 'NewerVis', 'Ok', 'Bad', 'BadVis', 'Updates', 'Version', 'Assigned') { $old[$k] = $rows[$i][$k] }
+            foreach ($k in 'Newer', 'NewerVis', 'Ok', 'Bad', 'BadVis', 'Updates', 'Version', 'Assigned', 'Icon', 'MonoVis') { $old[$k] = $rows[$i][$k] }
             $old.Data = $rows[$i].Data
         }
     }
@@ -1987,6 +2105,7 @@ function Update-TenantButtons {
     $isDep = $app.IsChocolatey -or $app.IsDependency
     $t = Get-TileStyle $(if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName })
     $ui.BoxTenantIcon.Background = ConvertTo-Brush $t.TileBg; $ui.TxtTenantMono.Text = $t.Mono; $ui.TxtTenantMono.Foreground = ConvertTo-Brush $t.TileFg
+    $tenantIcon = Get-TenantAppIcon $app; $ui.ImgTenant.Source = ConvertTo-ImageSource $tenantIcon; $ui.TxtTenantMono.Visibility = ConvertTo-Vis (-not $tenantIcon)
     $ui.TxtTenantAppTitle.Text = if ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
     $ui.TxtTenantAppSub.Text = if ($isDep) { 'Dependency app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
     $busy = Test-TaskRunning 'policy'
@@ -1994,7 +2113,7 @@ function Update-TenantButtons {
     $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
     $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $isDep)
     $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $isDep)
-    $ui.BtnTenantTest.IsEnabled = -not $isDep -and -not (Test-TaskRunning 'test')
+    Update-SandboxButtons
     $ui.BtnTenantTest.Visibility = ConvertTo-Vis (-not $isDep)
     $ui.BtnTenantRelease.Visibility = ConvertTo-Vis ($app.UpdateAvailable -and -not $isDep)
     $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $isDep) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
@@ -2102,11 +2221,21 @@ Add-Click $ui.BtnTenantOpen {
 # ---------------------------------------------------------------- status of one app
 $script:StatusApp = $null
 $script:StatusData = $null
+function Set-StatusIcon {
+    $app = $script:StatusApp
+    if (-not $app) { return }
+    $t = Get-TileStyle $app.DisplayName
+    $ui.BoxStatusIcon.Background = ConvertTo-Brush $t.TileBg; $ui.TxtStatusMono.Text = $t.Mono; $ui.TxtStatusMono.Foreground = ConvertTo-Brush $t.TileFg
+    $icon = Get-TenantAppIcon $app
+    $ui.ImgStatus.Source = ConvertTo-ImageSource $icon
+    $ui.TxtStatusMono.Visibility = ConvertTo-Vis (-not $icon)
+}
 function Show-AppStatus($App) {
     $script:StatusApp = $App
     $script:StatusData = $null
     Show-Page 'Status'
     $ui.TxtStatusTitle.Text = "$($App.DisplayName) on devices"
+    Set-StatusIcon
     $ui.TxtStatusSub.Text = 'Intune install status, plus the update log each device reports. Reading ...'
     foreach ($n in 'TxtStatOk', 'TxtStatWait', 'TxtStatFail', 'TxtStatStale') { $ui[$n].Text = '-' }
     $script:DeviceRowList.Clear()
@@ -2237,9 +2366,10 @@ function Update-ImportRows {
         $settings = if ($a.Package -and $a.ProposedAction -ne 'CannotManage') { "$(if ($a.Version) { "Version $($a.Version) pinned" } else { 'Latest' }), $(Format-UpdateText $a.UpdateMode $a.GraceHours)" } else { $a.Reason }
         # The package source an import offers is shown, never taken silently (asked per app when creating)
         if ($a.Source -eq 'Chocolatey' -and $a.PackageSource -and $a.ProposedAction -ne 'CannotManage') { $settings += "; $(Get-ImportFeedText $a)" }
-        New-Row @{ Data = $a; Title = $a.DisplayName; Sub = $(if ($a.Kind -eq 'Export') { 'From the export file' } else { $a.Reason }); Kind = $kind; KindBg = $script:PillColors[$kc][0]; KindFg = $script:PillColors[$kc][1]
+        $icon = if ($a.Package) { Get-PackageIcon $a.Package $a.Source }
+        New-Row (@{ Data = $a; Icon = $icon; MonoVis = (ConvertTo-Vis (-not $icon)); Title = $a.DisplayName; Sub = $(if ($a.Kind -eq 'Export') { 'From the export file' } else { $a.Reason }); Kind = $kind; KindBg = $script:PillColors[$kc][0]; KindFg = $script:PillColors[$kc][1]
             Found = $(if ($a.Package) { "$($a.Source): $($a.Package)" } else { '' }); Settings = $settings; Action = $(if ($script:ActionLabels[[string]$a.ProposedAction]) { $script:ActionLabels[[string]$a.ProposedAction] } else { $a.ProposedAction })
-            Checked = $pick; CanPick = $pick; Opacity = $(if ($pick -or $a.ProposedAction -eq 'Managed') { 1 } else { 0.6 }) }
+            Checked = $pick; CanPick = $pick; Opacity = $(if ($pick -or $a.ProposedAction -eq 'Managed') { 1 } else { 0.6 }) } + (Get-TileStyle $a.DisplayName))
     }
     $script:ImportRowList.Clear()
     foreach ($r in @($rows)) { $script:ImportRowList.Add($r) }
@@ -2407,6 +2537,83 @@ $script:JobRows.Add_CollectionChanged({
 })
 
 # ---------------------------------------------------------------- sandbox test
+# ---------------------------------------------------------------- Windows Sandbox and MSIX Sandbox Studio (optional, for the Test buttons)
+$script:SandboxOverride = $null          # tests: @{ Present; Home; VirtualizationOff; Studio = $true/$false }
+$script:SandboxInstallOverride = $null   # tests: script block that gets the elevated command instead of starting it
+$script:SandboxRestart = $false          # installed in this session, Windows has to restart
+$script:SandboxState = $null
+$script:SandboxStudioUrl = 'https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller'
+
+function Get-SandboxState {
+    # Detected without administrator rights: the program file of the feature, the edition and (if known) the virtualization flag
+    $o = $script:SandboxOverride
+    if ($o) { $present = [bool]$o.Present; $isHome = [bool]$o.Home; $virtOff = [bool]$o.VirtualizationOff; $studio = if ($o.Studio) { 'MsixSandboxStudio.psd1' } else { $null } }
+    else {
+        $present = Test-Path (Join-Path $env:SystemRoot 'System32\WindowsSandbox.exe')
+        $edition = try { [string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).EditionID } catch { '' }
+        $isHome = $edition -match '^Core'
+        $virtOff = $false
+        if (-not $present -and -not $isHome) { try { $virtOff = (@(Get-CimInstance Win32_Processor -ErrorAction Stop | Where-Object { $_.VirtualizationFirmwareEnabled -eq $false }).Count -gt 0) } catch { } }
+        $studio = Find-SandboxStudio
+    }
+    $reason = if ($present) { '' } elseif ($isHome) { 'Windows Home does not include Windows Sandbox (it needs Pro, Enterprise or Education).' } elseif ($virtOff) { 'Virtualization is switched off in the BIOS or UEFI.' } else { '' }
+    [pscustomobject]@{ Present = $present; Installable = (-not $present -and -not $isHome); Reason = $reason; Studio = $studio; RestartPending = $script:SandboxRestart }
+}
+function Update-SandboxState { $script:SandboxState = Get-SandboxState; Update-SandboxButtons }
+function Get-CachedSandboxState { if (-not $script:SandboxState) { $script:SandboxState = Get-SandboxState }; $script:SandboxState }
+
+function Get-SandboxBlocker {
+    # Why the Test buttons cannot be used right now, or $null
+    $s = Get-CachedSandboxState
+    if ($s.RestartPending) { return 'Windows Sandbox needs a restart of Windows first. See the Start page (Sandbox test).' }
+    if (-not $s.Present) { return 'Windows Sandbox is not installed. Set it up on the Start page (Sandbox test).' }
+    if (-not $s.Studio) { return 'MSIX Sandbox Studio was not found. See the Start page (Sandbox test).' }
+    $null
+}
+
+function Update-SandboxButtons {
+    $blocker = Get-SandboxBlocker
+    $busy = Test-TaskRunning 'test'
+    $detail = [bool]$script:DetailRow
+    $ui.BtnDetailTest.IsEnabled = $detail -and -not $busy -and -not $blocker
+    $ui.BtnDetailTest.ToolTip = if ($blocker) { $blocker } elseif ($busy) { 'A sandbox test is running (Windows Sandbox runs one at a time).' } else { $null }
+    $app = Get-SelectedTenantApp
+    $isDep = $app -and ($app.IsChocolatey -or $app.IsDependency)
+    $ui.BtnTenantTest.IsEnabled = [bool]$app -and -not $isDep -and -not $busy -and -not $blocker
+    $ui.BtnTenantTest.ToolTip = if ($blocker) { $blocker } elseif ($busy) { 'A sandbox test is running (Windows Sandbox runs one at a time).' } else { $null }
+}
+
+function Get-SandboxInstallCommand {
+    # The elevated command: only the optional feature, no restart (the user restarts when it suits)
+    $script = '$ErrorActionPreference = ''Stop''; try { $r = Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart; if ($r.RestartNeeded) { exit 3010 } else { exit 0 } } catch { Write-Error $_.Exception.Message; exit 1 }'
+    @{ File = 'powershell.exe'; Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$script`""; Verb = 'RunAs' }
+}
+
+function Start-SandboxInstall {
+    if (Test-TaskRunning 'sandboxinstall') { return }
+    $command = Get-SandboxInstallCommand
+    if ($script:SandboxInstallOverride) { & $script:SandboxInstallOverride $command; return }
+    $work = @'
+param($File, $Arguments)
+try {
+    $p = Start-Process -FilePath $File -ArgumentList $Arguments -Verb RunAs -PassThru -Wait -WindowStyle Hidden
+    [pscustomobject]@{ Exit = $p.ExitCode }
+}
+catch { [pscustomobject]@{ Exit = -1; Declined = ($_.Exception.Message -match 'cancel|abgebrochen|1223' -or $_.Exception.NativeErrorCode -eq 1223); Message = $_.Exception.Message } }
+'@
+    Show-Toast 'Windows asks for administrator approval to install Windows Sandbox.' 'info'
+    [void](Start-UiTask -Kind 'sandboxinstall' -Title 'Installing Windows Sandbox (needs administrator approval)' -Display 'Windows Sandbox' -Pool $script:UserPool -Arguments @{ File = $command.File; Arguments = $command.Arguments } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $null -ne $_.Exit }) | Select-Object -First 1
+        if ($r -and $r.Declined) { Show-Toast 'Installation cancelled: the administrator approval was declined.' 'warn'; Write-UiLog 'Windows Sandbox: the administrator approval was declined.' 'Warning' }
+        elseif ($r -and $r.Exit -in 0, 3010) { $script:SandboxRestart = $true; Show-Toast 'Windows Sandbox is installed. Restart Windows to finish.' 'ok'; Write-UiLog 'Windows Sandbox installed, restart required.' 'Success' }
+        else { Show-Toast "Windows Sandbox could not be installed ($(if ($r) { if ($r.Message) { $r.Message } else { "exit code $($r.Exit)" } } else { 'no answer' }))." 'bad' }
+        Update-SandboxState
+        Update-Readiness
+    })
+    Update-Readiness
+}
+
 function Start-PackageTest {
     param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy)
     if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
@@ -2439,8 +2646,57 @@ function Assert-SignInSettings {
     }
 }
 
+# ---------------------------------------------------------------- embedded sign-in (WebView2 window of this app)
+# Default for the sign-in and the app registration setup. The system browser stays as the explicit choice (sign in
+# menu) and as the automatic fallback when the WebView2 runtime is missing or the embedded window cannot start.
+$script:EmbeddedAvailableOverride = $null   # tests: $true / $false instead of looking for the WebView2 runtime
+$script:EmbeddedSignInOverride = $null      # tests: script block ($TenantID, $ClientID, $Scopes) returning a token response
+$script:EmbeddedReason = ''
+$script:LastSignInPath = ''                 # 'embedded' or 'browser' (what the last sign-in used)
+
+function Test-EmbeddedSignIn {
+    # Is the embedded window usable? Loads the WebView2 SDK once (download from NuGet, signature checked)
+    if ($null -ne $script:EmbeddedAvailableOverride) { $script:EmbeddedReason = 'not available'; return [bool]$script:EmbeddedAvailableOverride }
+    $window.Cursor = 'Wait'
+    try { [void](Get-IntuneChocoWebView2 -CacheFolder (Join-Path $script:WorkRoot 'WebView2')); return $true }
+    catch { $script:EmbeddedReason = $_.Exception.Message; return $false }
+    finally { $window.Cursor = $null }
+}
+
+function Invoke-EmbeddedSignIn {
+    # Sign-in window, modal to the main window (its timer keeps the background tasks running). Returns the token response.
+    param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint)
+    if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes) }
+    Invoke-IntuneChocoBrowserSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -Owner $window -Title 'Sign in to Microsoft' -Hint $Hint
+}
+
+function Test-EmbeddedStartFailure($ErrorRecord) { $ErrorRecord.Exception.Message -like 'The embedded browser could not start*' }
+
+function Get-EmbeddedToken {
+    <#
+    The token of an embedded sign-in, or $null when the browser has to be used instead (a toast says why).
+    A cancelled sign-in throws 'Sign-in cancelled.'.
+    #>
+    param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint)
+    if (-not (Test-EmbeddedSignIn)) {
+        Show-Toast "The sign-in window of this app is not available ($($script:EmbeddedReason -replace '\s+', ' ')). Using the web browser instead." 'warn'
+        Write-UiLog "Embedded sign-in not available: $script:EmbeddedReason" 'Warning'
+        return $null
+    }
+    try { $script:LastSignInPath = 'embedded'; return (Invoke-EmbeddedSignIn -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Hint $Hint) }
+    catch {
+        if (Test-EmbeddedStartFailure $_) {
+            $script:LastSignInPath = ''
+            Show-Toast "The sign-in window could not start. Using the web browser instead." 'warn'
+            Write-UiLog $_.Exception.Message 'Warning'
+            return $null
+        }
+        throw
+    }
+}
+
 function Connect-Intune {
-    param([ValidateSet('Browser', 'Keevault')][string]$Method = 'Browser')
+    param([ValidateSet('Microsoft', 'Browser', 'Keevault')][string]$Method = 'Microsoft')
     Assert-SignInSettings
     $tenant = $script:Settings.TenantID
     $clientId = $script:Settings.ClientID
@@ -2459,6 +2715,24 @@ function Connect-Intune {
         finally { $window.IsEnabled = $true; $window.Cursor = $null; [void]$window.Activate() }
         return
     }
+    if ($Method -eq 'Microsoft') {
+        # Default: the sign-in window of this app; the browser only when it cannot be used
+        try {
+            $token = Get-EmbeddedToken -TenantID $tenant -ClientID $clientId
+            if ($token) {
+                Set-IntuneChocoToken -TokenResponse $token -TenantID $tenant -ClientID $clientId
+                $script:Shared.Auth = Get-IntuneChocoAuthState
+                Complete-SignIn 'in the app'
+                return
+            }
+        }
+        catch {
+            if ($_.Exception.Message -eq 'Sign-in cancelled.') { Write-UiLog 'Sign-in cancelled.'; Complete-SetupStep $false 'the sign-in'; return }
+            Complete-SetupStep $false 'the sign-in'
+            throw
+        }
+    }
+    $script:LastSignInPath = 'browser'
     if (Test-TaskRunning 'connect') { return }
     # Sign-in in the browser (PKCE, answer on a loopback port). It waits in a background runspace, at most five
     # minutes, and "Cancel sign-in" ends it: closing the browser window must not block the next sign-in.
@@ -2529,18 +2803,33 @@ function Disconnect-Intune {
     Write-UiLog 'Signed out. The sign-in in your browser stays, close it there if needed.'
 }
 
+function Show-Flyout {
+    # Windows 11 flyout: right edge on the right edge of the target, 4 px below it (the template leaves 8 px for the shadow)
+    param([Parameter(Mandatory)]$Menu, [Parameter(Mandatory)]$Target)
+    $Menu.PlacementTarget = $Target
+    $Menu.Placement = 'Custom'
+    $Menu.CustomPopupPlacementCallback = [System.Windows.Controls.Primitives.CustomPopupPlacementCallback] {
+        param($popupSize, $targetSize, $offset)
+        $point = New-Object System.Windows.Point ($targetSize.Width - $popupSize.Width + 8), ($targetSize.Height - 4)
+        , @([System.Windows.Controls.Primitives.CustomPopupPlacement]::new($point, [System.Windows.Controls.Primitives.PopupPrimaryAxis]::None))
+    }
+    $script:LastMenu = $Menu
+    $Menu.IsOpen = $true
+}
+
 $script:SignInMenuMethods = @{}
 function Show-SignInMenu($Target) {
     # Options of the split button next to Sign in
     $kv = Find-KeevaultMcp
     $menu = New-Object System.Windows.Controls.ContextMenu
     $items = @(
-        @{ Glyph = [char]0xE774; Header = 'Sign in with Microsoft account'; Text = 'Opens the Microsoft sign-in in your browser, as before.'; Method = 'Browser'; Enabled = $true }
+        @{ Glyph = [char]0xE774; Header = 'Sign in with Microsoft'; Text = 'Opens the Microsoft sign-in in a window of this app.'; Method = 'Microsoft'; Enabled = $true }
+        @{ Glyph = [char]0xE12B; Header = 'Sign in in the web browser'; Text = 'Use it when your organization requires a compliant or joined device.'; Method = 'Browser'; Enabled = $true }
         @{ Glyph = [char]0xE72E; Header = 'Sign in with Keevault'; Method = 'Keevault'; Enabled = ($kv.Installed -and $kv.McpEnabled)
            Text = $(if (-not $kv.Installed) { 'Keevault is not installed.' }
                     elseif (-not $kv.McpEnabled) { 'Switch on AI agents (MCP) in Keevault first.' }
-                    elseif (-not $kv.Running) { 'Start and unlock Keevault first. You pick the account in Keevault; user name, password and one-time code are filled in.' }
-                    else { 'You pick the account in Keevault; user name, password and one-time code are filled into the embedded sign-in.' }) }
+                    elseif (-not $kv.Running) { 'Start and unlock Keevault first, then pick the account there.' }
+                    else { 'Pick the account in Keevault; it fills in password and code or confirms the passkey.' }) }
     )
     foreach ($i in $items) {
         $mi = New-Object System.Windows.Controls.MenuItem
@@ -2554,11 +2843,7 @@ function Show-SignInMenu($Target) {
         })
         [void]$menu.Items.Add($mi)
     }
-    $menu.PlacementTarget = $Target
-    $menu.Placement = 'Bottom'
-    # Right edge of the menu below the right edge of the arrow (its shadow margin is 8 px)
-    $menu.Add_Opened({ param($m) $m.HorizontalOffset = $m.PlacementTarget.ActualWidth - $m.ActualWidth + 8 })
-    $menu.IsOpen = $true
+    Show-Flyout $menu $Target
 }
 
 function Show-AccountMenu {
@@ -2581,10 +2866,7 @@ function Show-AccountMenu {
         $mi.Add_Click({ param($src) try { & $script:AccountMenuActions[$src] } catch { Show-Error $_.Exception.Message } })
         [void]$menu.Items.Add($mi)
     }
-    $menu.PlacementTarget = $ui.BtnAccount
-    $menu.Placement = 'Bottom'
-    $menu.Add_Opened({ param($m) $m.HorizontalOffset = $m.PlacementTarget.ActualWidth - $m.ActualWidth + 8 })
-    $menu.IsOpen = $true
+    Show-Flyout $menu $ui.BtnAccount
 }
 Add-Click $ui.BtnAccount { Show-AccountMenu }
 Add-Click $ui.BtnSignIn {
@@ -2594,7 +2876,25 @@ Add-Click $ui.BtnSignIn {
     }
     else { Connect-Intune }
 }
-Add-Click $ui.BtnSignInMenu { Show-SignInMenu $ui.BtnSignInMenu }
+Add-Click $ui.BtnSignInMenu { Show-SignInMenu $ui.PanelSignedOut }
+
+# ---------------------------------------------------------------- own title bar (WindowChrome): caption buttons, maximized state
+function Update-WindowState {
+    $max = $window.WindowState -eq 'Maximized'
+    $ui.BtnMaximize.Content = [string]$(if ($max) { [char]0xE923 } else { [char]0xE922 })
+    $ui.BtnMaximize.ToolTip = if ($max) { 'Restore' } else { 'Maximize' }
+    # A maximized chrome window reaches over the screen edge by the size of its resize frame: keep the content inside
+    $ui.RootGrid.Margin = if ($max) { [System.Windows.SystemParameters]::WindowResizeBorderThickness } else { New-Object System.Windows.Thickness 0 }
+}
+$window.Add_StateChanged({ Update-WindowState })
+Add-Click $ui.BtnMinimize { $window.WindowState = 'Minimized' }
+Add-Click $ui.BtnMaximize { $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } }
+Add-Click $ui.BtnClose { $window.Close() }
+# Alt+Down (or F4) opens the sign-in options, like a split button
+$ui.PanelSignedOut.Add_PreviewKeyDown({
+    param($s, $e)
+    if (($e.Key -eq 'System' -and $e.SystemKey -eq 'Down') -or $e.Key -eq 'F4') { $e.Handled = $true; try { Show-SignInMenu $ui.PanelSignedOut } catch { Show-Error $_.Exception.Message } }
+})
 Add-Click $ui.BtnStartSignInBrowser { Connect-Intune }
 Add-Click $ui.BtnStartSignInKeevault { Connect-Intune -Method Keevault }
 
@@ -2623,6 +2923,7 @@ function Update-SettingsView {
 function Update-SandboxStudioState {
     $found = Find-SandboxStudio
     $ui.TxtSandboxStudioState.Text = if ($found) { "Found: $found" } else { 'Not found: enter the folder of WindowsSandboxMSIXInstaller. The Test buttons need it and Windows Sandbox.' }
+    $script:SandboxState = $null; Update-Readiness; Update-SandboxButtons
 }
 $ui.CmbArchitecture.ItemsSource = @('x64x86', 'x64', 'x86', 'arm64', 'AllWithARM64')
 $ui.CmbAssignment.ItemsSource = @('Available', 'Required', 'None')
@@ -2692,7 +2993,7 @@ $window.Add_Closing({
     param($s, $e)
     $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -in 'deploy', 'policy' })
     if ($running.Count -gt 0 -and -not $env:INTUNECHOCO_SMOKE) {
-        $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'Intune Choco Deployment', 'YesNo', 'Warning')
+        $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'PackTune', 'YesNo', 'Warning')
         if ($answer -ne 'Yes') { $e.Cancel = $true }
     }
 })
@@ -2707,7 +3008,7 @@ $window.Add_Closed({
 
 Update-ModuleState
 Set-DeployDefaults
-Write-UiLog "Intune Choco Deployment $script:ToolVersion started. Work folder: $script:WorkRoot"
+Write-UiLog "PackTune $script:ToolVersion started. Work folder: $script:WorkRoot"
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it on the start page." 'Warning' }
 Update-CatalogRows
 Update-ConnectionStatus

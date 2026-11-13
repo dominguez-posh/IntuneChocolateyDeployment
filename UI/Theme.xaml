@@ -169,33 +169,81 @@
         <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
         <Setter Property="FontSize" Value="14"/>
     </Style>
-    <Style x:Key="SplitMain" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
-        <Setter Property="Padding" Value="16,8"/>
+    <!-- Split button: one rounded accent block; the halves paint only their own hover/pressed state -->
+    <Style x:Key="SplitMain" TargetType="Button">
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Padding" Value="16,0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6,0,0,6" Padding="{TemplateBinding Padding}">
+                    <Border x:Name="Bd" Background="Transparent" CornerRadius="6,0,0,6" Padding="{TemplateBinding Padding}">
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource PrimaryDark}"/></Trigger>
-                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.45"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource PrimaryDark}"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#00316F"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
-    <Style x:Key="SplitDrop" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
-        <Setter Property="Padding" Value="10,8"/>
+    <Style x:Key="SplitDrop" TargetType="Button">
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="Width" Value="32"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="#3D7FC6" BorderThickness="1,0,0,0" CornerRadius="0,6,6,0" Padding="{TemplateBinding Padding}">
-                        <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="10" Foreground="White" VerticalAlignment="Center"/>
+                    <Border x:Name="Bd" Background="Transparent" CornerRadius="0,6,6,0">
+                        <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="11" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource PrimaryDark}"/></Trigger>
-                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.45"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource PrimaryDark}"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#00316F"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <!-- Caption buttons of the own title bar (Windows 11 look) -->
+    <Style x:Key="CaptionButton" TargetType="Button">
+        <Setter Property="Width" Value="46"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="Transparent">
+                        <TextBlock x:Name="G" Text="{TemplateBinding Content}" FontFamily="{StaticResource IconFont}" FontSize="10" Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="#E9E9E9"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#DDDDDD"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="Background" Value="#E9E9E9"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="CloseCaptionButton" TargetType="Button" BasedOn="{StaticResource CaptionButton}">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="Transparent">
+                        <TextBlock x:Name="G" Text="{TemplateBinding Content}" FontFamily="{StaticResource IconFont}" FontSize="10" Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="#C42B1C"/><Setter TargetName="G" Property="Foreground" Value="White"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#A32316"/><Setter TargetName="G" Property="Foreground" Value="White"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="Background" Value="#C42B1C"/><Setter TargetName="G" Property="Foreground" Value="White"/></Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -484,13 +532,13 @@
         </Setter>
     </Style>
 
-    <!-- Menus (sign-in options, account menu) -->
+    <!-- Menus (sign-in options, account menu): Windows 11 flyout. The outer margin leaves room for the shadow. -->
     <Style TargetType="ContextMenu">
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ContextMenu">
-                    <Border Background="White" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="8" Padding="4" Margin="8" MinWidth="260">
-                        <Border.Effect><DropShadowEffect BlurRadius="10" ShadowDepth="2" Opacity="0.2"/></Border.Effect>
+                    <Border Background="White" BorderBrush="#E5E5E5" BorderThickness="1" CornerRadius="8" Padding="4" Margin="8" Width="360">
+                        <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Direction="270" Opacity="0.2"/></Border.Effect>
                         <StackPanel IsItemsHost="True"/>
                     </Border>
                 </ControlTemplate>
@@ -502,14 +550,15 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="MenuItem">
-                    <Border x:Name="Bd" Background="Transparent" CornerRadius="4" Padding="10,8">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="{TemplateBinding Tag}" FontFamily="{StaticResource IconFont}" FontSize="15" Margin="0,0,12,0" VerticalAlignment="Top"/>
-                            <StackPanel>
-                                <ContentPresenter ContentSource="Header" TextElement.FontWeight="SemiBold"/>
-                                <TextBlock x:Name="Sub" Text="{TemplateBinding ToolTip}" FontSize="12" Foreground="{StaticResource MutedText}" TextWrapping="Wrap" MaxWidth="300" Margin="0,2,0,0"/>
+                    <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Padding="4,9,10,9">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="{TemplateBinding Tag}" FontFamily="{StaticResource IconFont}" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,1,0,0"/>
+                            <StackPanel Grid.Column="1">
+                                <ContentPresenter ContentSource="Header" TextElement.FontWeight="SemiBold" TextElement.FontSize="14"/>
+                                <TextBlock x:Name="Sub" Text="{TemplateBinding ToolTip}" FontSize="12" Foreground="#5F5F5F" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="34" Margin="0,2,0,0"/>
                             </StackPanel>
-                        </StackPanel>
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="ToolTip" Value="{x:Null}"><Setter TargetName="Sub" Property="Visibility" Value="Collapsed"/></Trigger>

@@ -31,6 +31,7 @@ function Get-TenantRow([string]$Title) { @($script:TenantRowList | Where-Object 
 $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = {
         param($s)
+        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
         $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DocsClient = New-Object System.Net.WebClient; [void]$global:DocsClient.DownloadStringTaskAsync([uri]$Url)' }

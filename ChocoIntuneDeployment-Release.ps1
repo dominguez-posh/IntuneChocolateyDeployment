@@ -121,8 +121,14 @@ function Publish-IntuneChocoSupersedingApp {
     if ($null -eq $New -or -not $New.id) { throw "Intune did not return the created app" }
 
     try {
-        # Dependencies first (Chocolatey or winget runtime), then supersedence: the module keeps both when it adds the other
+        # Dependencies first, then supersedence: the module keeps both when it adds the other. An app that still
+        # depends on the old Chocolatey or winget runtime app gets the PackTune Runtime instead.
         $Dependencies = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $AppId } | Where-Object { $_ })
+        $OldIds = @(Get-IntuneChocoOldDependencyApps | ForEach-Object { $_.Id })
+        if (@($Dependencies | Where-Object { [string]$_.targetId -in $OldIds }).Count -gt 0) {
+            $RuntimeId = Get-PackTuneRuntimeWin32ID
+            $Dependencies = @(@($Dependencies | Where-Object { [string]$_.targetId -notin $OldIds -and [string]$_.targetId -ne $RuntimeId }) + [pscustomobject]@{ targetId = $RuntimeId; dependencyType = "autoInstall" })
+        }
         if ($Dependencies.Count -gt 0) {
             Invoke-IntuneModule {
                 $Copies = @(foreach ($Dependency in $Dependencies) {

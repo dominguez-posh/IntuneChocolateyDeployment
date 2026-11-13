@@ -1,5 +1,5 @@
 @echo off
-rem Starts Intune Chocolatey Deployment by double-click (Windows PowerShell 5.1), like the M365 MFA tool:
+rem Starts PackTune by double-click (Windows PowerShell 5.1), like the M365 MFA tool:
 rem -ExecutionPolicy Bypass applies to this process only and changes no system setting.
 rem -WindowStyle Hidden + -HideConsole: no console window next to the tool.
 rem conhost.exe: classic console host, so that Windows Terminal does not take the window over.

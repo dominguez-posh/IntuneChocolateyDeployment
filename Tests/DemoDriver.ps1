@@ -119,6 +119,7 @@ function Select-ByName([string]$Name) { Set-AppSelected (@($script:SourceRows | 
 # Until (wait for background work: frames are then taken in fast forward), Hold (ms to stay afterwards)
 $script:Tour = [System.Collections.ArrayList]@(
     @{ Do = {
+        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
         $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
         $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
@@ -224,7 +225,7 @@ $script:DemoTimer.Add_Tick({
             'wait' {
                 if ($s.Until -and -not (& $s.Until)) { $s.Skip++; if ($s.Skip % 6 -ne 1) { $script:NoFrame = $true } else { $script:FastFrame = 200 }; break }
                 if (-not $s.Since) { $s.Since = $script:FrameWatch.ElapsedMilliseconds }
-                if ($script:FrameWatch.ElapsedMilliseconds - $s.Since -ge ([int]$s.Hold * 0.38)) { $script:Step = $null }
+                if ($script:FrameWatch.ElapsedMilliseconds - $s.Since -ge ([int]$s.Hold * 0.3)) { $script:Step = $null }
             }
         }
         if (-not $script:NoFrame) { Save-Frame ([int]$script:FastFrame) }
