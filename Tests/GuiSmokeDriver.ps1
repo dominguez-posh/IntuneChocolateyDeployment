@@ -316,7 +316,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
         Test-Smoke 'winget VLC has the borrowed icon and the publisher from the manifest' ($vlc.hasIcon -and $vlc.iconValid -and $vlc.publisher -and $vlc.publisher -ne '-') $vlc.publisher
-        Test-Smoke 'winget app has no Chocolatey dependency step' (-not ((Get-SmokeLog) -match '\[VideoLAN\.VLC\] Adding dependency'))
+        $vlcLog = (@((Get-SmokeLog) -split "`n" | Where-Object { $_ -match '\[VideoLAN\.VLC\]' })) -join "`n"
+        Test-Smoke 'winget app has the winget runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the winget runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
         Test-Smoke 'same app from the other source is not created twice' ((Get-SmokeLog) -match '\[7zip\.7zip\] .*already deployed' -and @($apps | Where-Object { $_.displayName -eq '7-Zip' }).Count -eq 1)
         $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
         Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'" -and (Get-Content $pkg.FullName -Raw) -match 'Intune-Winget-Updates')

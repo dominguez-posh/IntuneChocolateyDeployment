@@ -1840,6 +1840,9 @@ function New-IntuneWin32ChocoApplicationInstallFromRepo {
 
 # winget packages (same helpers, own install script)
 . (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Winget.ps1")
+# One app list for both sources, the winget runtime app, release via supersedence
+. (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Sources.ps1")
+. (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Release.ps1")
 
 # Run interactively when started as a script, only load the functions when dot-sourced
 if ($MyInvocation.InvocationName -ne '.') {

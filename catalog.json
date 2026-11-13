@@ -49,7 +49,7 @@
   { "id": "github-desktop", "winget": "GitHub.GitHubDesktop", "name": "GitHub Desktop", "category": "Developer" },
   { "id": "microsoft-windows-terminal", "winget": "Microsoft.WindowsTerminal", "name": "Windows Terminal", "category": "Developer" },
   { "id": "python3", "winget": "Python.Python.3.13", "name": "Python 3", "category": "Developer" },
-  { "id": "brackets", "name": "Brackets", "category": "Developer" },
+  { "id": "brackets", "winget": "Adobe.Brackets", "name": "Brackets", "category": "Developer" },
 
   { "id": "temurin21jre", "winget": "EclipseAdoptium.Temurin.21.JRE", "name": "Eclipse Temurin JRE 21", "category": "Runtimes" },
   { "id": "temurin8jre", "winget": "EclipseAdoptium.Temurin.8.JRE", "name": "Eclipse Temurin JRE 8", "category": "Runtimes" },
