@@ -1,6 +1,6 @@
-# Intune Chocolatey Deployment
+# PackTune
 
-Publish Chocolatey and winget apps to Microsoft Intune as Win32 apps, keep them up to date on the devices, and see what happened on each device.
+**winget and Chocolatey apps for Intune.** Publish winget and Chocolatey apps to Microsoft Intune as Win32 apps, keep them up to date on the devices, and see what happened on each device.
 
 ![Tour](docs/screenshots/demo.webp)
 
@@ -38,17 +38,17 @@ Publish Chocolatey and winget apps to Microsoft Intune as Win32 apps, keep them 
    - API permissions > Microsoft Graph > Delegated: the five permissions above, then grant admin consent
    - Note the Application (client) ID and the tenant
 
-Sign-in uses Microsoft's own sign-in in the browser. Optionally you can sign in with an account from [Keevault](https://keevault.de) (requires *AI agents (MCP)* switched on in Keevault).
+Sign-in opens Microsoft's own sign-in in a window of the tool (Edge WebView2, which is part of Windows 11); the app registration setup uses the same window. If the WebView2 runtime is missing or the window cannot start, the tool says so and uses the web browser instead. **Sign in in the web browser** in the sign-in menu forces the browser, e.g. when your organization requires a compliant or joined device. Optionally you can sign in with an account from [Keevault](https://keevault.de) (requires *AI agents (MCP)* switched on in Keevault).
 
 ## Using the tool
 
-Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`). The header switches the package source between **Chocolatey** and **winget**; the choice is remembered. The **Help** entry in the navigation explains each page.
+Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`). Apps from **winget** and **Chocolatey** are in one list; you choose the source per app when you deploy. The **Help** entry in the navigation explains each page.
 
 ### Start
 
 ![Start](docs/screenshots/start.png)
 
-The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency apps in the tenant and the optional status report. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
+The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency apps in the tenant and, as optional items, the status report and the sandbox test. The sandbox item checks for Windows Sandbox (not available on Windows Home; Install asks for administrator approval and needs a restart, and Set up everything never installs it) and for MSIX Sandbox Studio; until both are there the Test buttons are disabled and say why. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
 
 ### Apps
 
