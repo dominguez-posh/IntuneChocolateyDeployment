@@ -12,9 +12,14 @@
     .\Tests\Invoke-GuiSmoke.ps1
 #>
 [CmdletBinding()]
-param([string]$OutDir = (Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoSmoke'))
+param(
+    [string]$OutDir = (Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoSmoke'),
+    # Another script that drives the window with the same fakes (Tests\Record-Demo.ps1 uses DemoDriver.ps1)
+    [string]$Driver
+)
 
 $ErrorActionPreference = 'Stop'
+if (-not $Driver) { $Driver = Join-Path $PSScriptRoot 'GuiSmokeDriver.ps1' }
 $repo = Split-Path $PSScriptRoot -Parent
 if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 $appData = Join-Path $OutDir 'appdata'
@@ -99,7 +104,7 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.EnvironmentVariables['LOCALAPPDATA'] = $appData
 $psi.EnvironmentVariables['PSModulePath'] = (Join-Path $PSScriptRoot 'Fakes') + ';' + "$env:USERPROFILE\Documents\WindowsPowerShell\Modules;$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
-$psi.EnvironmentVariables['INTUNECHOCO_SMOKE'] = Join-Path $PSScriptRoot 'GuiSmokeDriver.ps1'
+$psi.EnvironmentVariables['INTUNECHOCO_SMOKE'] = $Driver
 $psi.EnvironmentVariables['INTUNECHOCO_SMOKE_OUT'] = $OutDir
 $psi.EnvironmentVariables['INTUNECHOCO_SMOKE_AUTHORITY'] = "http://localhost:$authorityPort"
 $process = [System.Diagnostics.Process]::Start($psi)
@@ -109,6 +114,7 @@ $finished = $process.WaitForExit(15 * 60 * 1000)
 if ($authorityState.Listener) { $authorityState.Listener.Stop() }
 if (-not $finished) { $process.Kill(); throw 'The GUI smoke test did not finish within 15 minutes.' }
 if ($stderr.Result.Trim()) { "--- stderr ---"; $stderr.Result }
+if ($Driver -notlike '*GuiSmokeDriver.ps1') { return }
 if (-not (Test-Path $results)) { "--- stdout ---"; $stdout.Result; throw 'The GUI smoke test wrote no results.' }
 Get-Content $results
 $failed = @(Get-Content $results | Where-Object { $_ -like 'FAIL*' }).Count
