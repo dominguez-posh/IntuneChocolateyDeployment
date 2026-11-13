@@ -62,7 +62,8 @@ function Add-IntuneWin32AppDependency {
     Test-FakeAccessToken
     $Apps = Read-Store; $App = $Apps | Where-Object id -eq $ID
     if (-not $App) { throw "App $ID not found (fake)" }
-    $App.dependencies = @(@($App.dependencies) + @($Dependency | ForEach-Object { [pscustomobject]@{ targetId = $_.targetId; dependencyType = $_.dependencyType } }) | Where-Object { $_ })
+    # The real module replaces the whole dependency list (supersedence stays)
+    $App.dependencies = @(@($Dependency | ForEach-Object { [pscustomobject]@{ targetId = $_.targetId; dependencyType = $_.dependencyType } }) | Where-Object { $_ })
     Write-Store $Apps; $true
 }
 function Get-IntuneWin32AppDependency { param([string]$ID)

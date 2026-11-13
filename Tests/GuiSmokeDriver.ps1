@@ -107,11 +107,11 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (($script:SetupRunning -or -not (Test-Idle)) -and $s.Waited -lt 1500) { return $false }
         $log = Get-SmokeLog + (Get-JobLog)
         Test-Smoke 'set up finished' ((-not $script:SetupRunning) -and $log -match 'Everything is set up') (($log -split "`n" | Select-Object -Last 3) -join ' | ')
-        Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'Intune Chocolatey Deployment' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
+        Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'PackTune' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
         Test-Smoke 'a registration of the same name owned by someone else is not reused' ($log -match 'not reused: you are not its only owner')
         Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com')
         $names = @(Get-StoreApps | ForEach-Object { $_.displayName })
-        Test-Smoke 'Chocolatey and the winget runtime deployed by the set up' (@($script:TenantApps | Where-Object IsChocolatey).Count -eq 1 -and $script:RuntimeId -and ($names -contains 'Chocolatey') -and ($names -contains 'winget runtime')) ($names -join ', ')
+        Test-Smoke 'PackTune Runtime deployed by the set up, no separate Chocolatey app' ($script:RuntimeId -and ($names -contains 'PackTune Runtime') -and ($names -notcontains 'Chocolatey') -and ($names -notcontains 'winget runtime')) ($names -join ', ')
         Test-Smoke 'all required items green, set up button gone' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' -and -not $_.Optional }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
         $true } }
     @{ Name = 'sign in'; Do = {
@@ -235,7 +235,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not (Test-Idle) -and $s.Waited -lt 1500) { return $false }
         $apps = Get-StoreApps
         $names = @($apps | ForEach-Object { $_.displayName })
-        Test-Smoke '7-Zip and Scratch created next to the dependency apps' (($names -contains '7-Zip') -and ($names -contains 'Scratch') -and $apps.Count -eq 4) ($names -join ', ')
+        Test-Smoke '7-Zip and Scratch created next to the runtime app' (($names -contains '7-Zip') -and ($names -contains 'Scratch') -and $apps.Count -eq 3) ($names -join ', ')
         $zip = $apps | Where-Object { $_.displayName -eq '7-Zip' }
         $scratch = $apps | Where-Object { $_.displayName -eq 'Scratch' }
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
@@ -258,8 +258,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not (Test-Idle) -and $s.Waited -lt 1500) { return $false }
         Show-Page 'Tenant'
         $rows = @($script:TenantRowList)
-        Test-Smoke 'tenant lists dependency apps first, then the two apps' ($rows.Count -eq 4 -and $rows[0].Data.IsChocolatey -and $rows[1].Data.IsDependency) (($rows | ForEach-Object { $_['Title'] }) -join ', ')
-        Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 2 dependency apps*contoso*') $ui.TxtTenantCount.Text
+        Test-Smoke 'tenant lists the runtime app first, then the two apps' ($rows.Count -eq 3 -and $rows[0].Data.IsDependency) (($rows | ForEach-Object { $_['Title'] }) -join ', ')
+        Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 1 dependency app*contoso*') $ui.TxtTenantCount.Text
         $zip = $rows | Where-Object { $_['Title'] -eq '7-Zip' }
         Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
         Test-Smoke 'device counts linked from the install status' ($zip['Ok'] -eq '2 installed' -and $zip['Bad'] -eq '1 failed') ($zip['Ok'] + '|' + $zip['Bad'])
@@ -291,16 +291,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($s.Phase -eq 0) {
             $s.Phase = 1
             Show-Page 'Tenant'
-            $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.IsChocolatey })[0]
-            try { & $script:ClickActions[$ui.BtnTenantRemove]; Test-Smoke 'Chocolatey is not removed while apps depend on it' $false }
-            catch { Test-Smoke 'Chocolatey is not removed while apps depend on it' ($_.Exception.Message -like '*dependency of*') $_.Exception.Message }
             $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'scratch' })[0]
             & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }
         if (-not (Test-Idle)) { return $false }
         $rows = @($script:TenantRowList)
-        Test-Smoke 'Scratch removed from the tenant' ($rows.Count -eq 3 -and -not @($rows | Where-Object { $_.Data.Package -eq 'scratch' }).Count -and (Get-SmokeLog) -match '\[scratch\] removed from Intune') $rows.Count
+        Test-Smoke 'Scratch removed from the tenant' ($rows.Count -eq 2 -and -not @($rows | Where-Object { $_.Data.Package -eq 'scratch' }).Count -and (Get-SmokeLog) -match '\[scratch\] removed from Intune') $rows.Count
         Test-Smoke 'list no longer marks Scratch' (-not $script:TenantPackages.ContainsKey('scratch') -and $script:TenantPackages.ContainsKey('7zip.install'))
         $true } }
     @{ Name = 'search both repositories'; Started = $false; Do = {
@@ -337,7 +334,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
         $vlcLog = (@($script:JobRows | Where-Object { $_['Title'] -eq 'VLC media player' } | ForEach-Object { $_.Data.Log } | ForEach-Object { $_.Text } | Where-Object { $_ -match 'ependenc' }) -join ' | ')
-        Test-Smoke 'winget app has the winget runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the winget runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
+        Test-Smoke 'winget app has the PackTune Runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the PackTune Runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
         $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
         Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'")
         Test-GeneratedScripts (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC') 'winget'

@@ -5,9 +5,9 @@
     On the admin machine: package infos and search come from the Microsoft.WinGet.Client module (the winget
     community source) and from the package manifests in github.com/microsoft/winget-pkgs.
     On the devices: install.ps1 runs winget as SYSTEM (winget.exe is not in SYSTEM's path, it is looked up in
-    WindowsApps) and applies the update mode of the app (Off, Startup, Custom), like the Chocolatey apps. No
-    dependency app is needed to run it, but the winget runtime app (ChocoIntuneDeployment-Sources.ps1) makes sure App Installer
-    is there and registered: every winget app has it as AutoInstall dependency.
+    WindowsApps) and applies the update mode of the app (Off, Startup, Custom), like the Chocolatey apps. The
+    PackTune Runtime app (ChocoIntuneDeployment-Runtime.ps1) makes sure App Installer is there and registered:
+    every winget app has it as AutoInstall dependency.
 
         . .\ChocoIntuneDeployment-Main.ps1
         Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<app id>"
@@ -546,8 +546,8 @@ function New-IntuneWin32WingetApplication {
                 # winget needs Windows 10 1809 or newer
                 $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease W10_1809 }
 
-                # winget runtime app (App Installer, registered for SYSTEM): created once per tenant, before the app so that nothing is left half done
-                if ($null -eq $RuntimeId) { Write-Host "Checking if the winget runtime is deployed in Intune"; $RuntimeId = Get-WingetRuntimeWin32ID }
+                # PackTune Runtime (Chocolatey and App Installer for SYSTEM): created once per tenant, before the app so that nothing is left half done
+                if ($null -eq $RuntimeId) { Write-Host "Checking if the PackTune Runtime is deployed in Intune"; $RuntimeId = Get-PackTuneRuntimeWin32ID }
                 Write-Host "Creating and Uploading $AppName as win32 App to Intune"
                 $Description = if ($Infos.Description) { $Infos.Description } elseif ($Infos.Summary) { $Infos.Summary } else { $AppName }
                 $AppParams = @{
@@ -570,7 +570,7 @@ function New-IntuneWin32WingetApplication {
                 $IntuneApp = Invoke-IntuneModule { Add-IntuneWin32App @AppParams }
                 if ($null -eq $IntuneApp -or -not $IntuneApp.id) { throw "Intune did not return the created app" }
 
-                Write-Host "Adding dependency for the winget runtime to the created Application"
+                Write-Host "Adding dependency for the PackTune Runtime to the created Application"
                 Invoke-IntuneModule {
                     $Dependency = New-IntuneWin32AppDependency -ID $RuntimeId -DependencyType AutoInstall
                     Add-IntuneWin32AppDependency -ID $IntuneApp.id -Dependency $Dependency
