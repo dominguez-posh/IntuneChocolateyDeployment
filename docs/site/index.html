@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PackTune - winget and Chocolatey apps for Intune</title>
+<meta name="description" content="Publish winget and Chocolatey apps to Microsoft Intune as Win32 apps, keep them current on the devices and see what happened on each one.">
+<meta property="og:title" content="PackTune">
+<meta property="og:description" content="winget and Chocolatey apps for Intune">
+<meta property="og:image" content="../screenshots/hero.png">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap bar">
+    <a class="brand" href="#top"><img src="assets/icon.svg" alt="" width="28" height="28"><span>PackTune</span></a>
+    <nav aria-label="Page">
+      <a href="#features">Features</a>
+      <a href="#start">Get started</a>
+      <a class="btn small" href="https://github.com/dominguez-posh/PackTune">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">For Microsoft Intune administrators</p>
+      <h1>PackTune</h1>
+      <p class="sub">winget and Chocolatey apps for Intune</p>
+      <p class="claim">Pick an app, choose the source, deploy it as a Win32 app. PackTune keeps it current on the devices and shows what happened on each one.</p>
+      <p class="cta">
+        <a class="btn primary" href="#start">Get started</a>
+        <a class="btn" href="https://github.com/dominguez-posh/PackTune">View on GitHub</a>
+      </p>
+    </div>
+    <div class="wrap video-wrap">
+      <div class="video">
+        <video src="../screenshots/demo.mp4" poster="assets/poster.jpg" autoplay muted loop playsinline preload="auto" aria-label="A short tour of PackTune"></video>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="features">
+    <div class="wrap">
+      <h2 class="section-title">What it does</h2>
+
+      <article class="feature reveal">
+        <div class="text">
+          <h3>One list for winget and Chocolatey</h3>
+          <p>Both sources in one searchable list. For every app PackTune shows both versions and marks the source with the newer one as <strong>Recommended</strong>.</p>
+        </div>
+        <figure><img src="../screenshots/apps.png" alt="The app list with versions per source and Recommended labels" loading="lazy"></figure>
+      </article>
+
+      <article class="feature reveal flip">
+        <div class="text">
+          <h3>Deploy as Win32 app</h3>
+          <p>Each app becomes an Intune Win32 app with install script, detection rule and assignment. A small <strong>PackTune Runtime</strong> app is added automatically as the dependency, so a missing runtime is created first.</p>
+        </div>
+        <figure><img src="../screenshots/deploy.png" alt="The deploy dialog with the source chosen per app" loading="lazy"></figure>
+      </article>
+
+      <article class="feature reveal">
+        <div class="text">
+          <h3>Update schedule per app</h3>
+          <p>Off, automatic per schedule, or ask the user with a grace period. Choose a time window, conditions such as mains power, and a deadline. Versions are the newest one or pinned.</p>
+        </div>
+        <figure><img src="../screenshots/schedule.png" alt="The update schedule dialog" loading="lazy"></figure>
+      </article>
+
+      <article class="feature reveal flip">
+        <div class="text">
+          <h3>Install status per device</h3>
+          <p>See who has the app, who is waiting and who failed, with the update log each device reports and the cause of a failure.</p>
+        </div>
+        <figure><img src="../screenshots/status.png" alt="Install status per device with the cause of a failure" loading="lazy"></figure>
+      </article>
+
+      <article class="feature reveal">
+        <div class="text">
+          <h3>Import what you already have</h3>
+          <p>Take over apps that already exist in a tenant, from another tenant, or from an export file. Nothing changes on the devices until you decide.</p>
+        </div>
+        <figure><img src="../screenshots/import.png" alt="The import dialog listing existing apps" loading="lazy"></figure>
+      </article>
+
+      <article class="feature reveal flip">
+        <div class="text">
+          <h3>Custom applications <span class="soon">Coming soon</span></h3>
+          <p>Package your own installers next to the catalog apps, with the same schedule and status.</p>
+          <h3 class="second">Golden master <span class="soon">Coming soon</span></h3>
+          <p>Describe a reference set of apps once and roll it out to a new device group.</p>
+        </div>
+        <figure><img src="../screenshots/tenant.png" alt="The tenant page with managed apps" loading="lazy"></figure>
+      </article>
+    </div>
+  </section>
+
+  <section id="start" class="getstarted">
+    <div class="wrap narrow">
+      <h2 class="section-title">Get started</h2>
+      <ol class="steps">
+        <li><h3>Download</h3><p>Clone or download the repository and keep it together, for example in <code>C:\admin</code>.</p></li>
+        <li><h3>Install the modules</h3><p>Once, without admin rights:</p>
+<pre><code>. C:\admin\ChocoIntuneDeployment-Main.ps1
+Install-IntunechocoComponents</code></pre></li>
+        <li><h3>Start it</h3><p>Double-click <code>Start.cmd</code> and follow the Start page. It creates the app registration for you.</p></li>
+      </ol>
+      <h3 class="req-title">Requirements</h3>
+      <ul class="req">
+        <li>Windows 10 or Windows 11 on the admin machine, Windows PowerShell 5.1</li>
+        <li>An Entra ID app registration with admin consent (created by the Start page)</li>
+        <li>A Microsoft Intune tenant with permission to manage apps</li>
+      </ul>
+      <p class="cta"><a class="btn primary" href="https://github.com/dominguez-posh/PackTune">Download from GitHub</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span>PackTune - winget and Chocolatey apps for Intune</span>
+    <span><a href="https://github.com/dominguez-posh/PackTune">GitHub</a> &middot; <a href="https://github.com/dominguez-posh/PackTune#licenses-and-rate-limits">License and notes</a></span>
+  </div>
+</footer>
+<script src="assets/site.js"></script>
+</body>
+</html>
