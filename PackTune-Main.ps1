@@ -89,7 +89,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 6
+$script:DeviceScriptRevision = 7
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 
@@ -1226,19 +1226,56 @@ function Remove-ItemSafely([string]$Path) {
     }
     else { [IO.File]::Delete($Path) }
 }
+function Test-AdminOnlyChain([string]$Path) {
+    # Every folder from %ProgramFiles% down to $Path exists, is no link and is admin-only (Test-AdminOnlyFolder)
+    $Full = [IO.Path]::GetFullPath($Path).TrimEnd("\")
+    if (-not $Full.StartsWith($ProgramFilesRoot + "\", [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $Current = $ProgramFilesRoot
+    if (-not (Test-AdminOnlyFolder $Current)) { return $false }
+    foreach ($Part in $Full.Substring($ProgramFilesRoot.Length + 1).Split("\")) {
+        $Current = Join-Path $Current $Part
+        if (-not (Test-AdminOnlyFolder $Current)) { return $false }
+    }
+    return $true
+}
 function Remove-OldToolFolder([string]$Relative) {
     # The folder of the earlier name for this app (%ProgramFiles%\IntuneChocoDeployment\<Relative>), with the safe
-    # helper (links are removed themselves, never followed). Then the emptied rest of the old tree goes too.
+    # helper (links are removed themselves, never followed). Then the emptied rest of the old tree goes too. Only when
+    # the folder and every folder above it up to %ProgramFiles% is admin-only and no link; otherwise it is left as it
+    # is and logged (fail closed): SYSTEM never deletes recursively in a tree someone else could change.
     try {
         $Path = Join-Path $OldToolRoot $Relative
-        if (Test-Path -LiteralPath $Path) { Remove-ItemSafely $Path; Write-DeviceLog "removed the folder of the earlier version: $Path" }
+        Assert-ToolPath $Path -ForRemoval
+        if (Test-Path -LiteralPath $Path) {
+            if (-not (Test-AdminOnlyChain $Path)) { Write-DeviceLog "the folder of the earlier version is left alone, it is not admin-only: $Path"; return }
+            Remove-ItemSafely $Path; Write-DeviceLog "removed the folder of the earlier version: $Path"
+        }
         foreach ($Group in "Chocolatey", "Winget") {
             $Folder = Join-Path $OldToolRoot $Group
-            if ((Test-Path -LiteralPath $Folder) -and @(Get-ChildItem -LiteralPath $Folder -Directory -Force | Where-Object { $_.Name -ne "Logs" }).Count -eq 0) { Remove-ItemSafely $Folder }
+            if ((Test-Path -LiteralPath $Folder) -and @(Get-ChildItem -LiteralPath $Folder -Directory -Force | Where-Object { $_.Name -ne "Logs" }).Count -eq 0) {
+                if (Test-AdminOnlyChain $Folder) { Remove-ItemSafely $Folder } else { Write-DeviceLog "the folder of the earlier version is left alone, it is not admin-only: $Folder" }
+            }
         }
-        if ((Test-Path -LiteralPath $OldToolRoot) -and @(Get-ChildItem -LiteralPath $OldToolRoot -Force).Count -eq 0) { Remove-ItemSafely $OldToolRoot }
+        if ((Test-Path -LiteralPath $OldToolRoot) -and @(Get-ChildItem -LiteralPath $OldToolRoot -Force).Count -eq 0) {
+            if (Test-AdminOnlyChain $OldToolRoot) { Remove-ItemSafely $OldToolRoot } else { Write-DeviceLog "the folder of the earlier version is left alone, it is not admin-only: $OldToolRoot" }
+        }
     }
     catch { Write-DeviceLog "the folder of the earlier version could not be removed: $($_.Exception.Message)" }
+}
+function Remove-OldTaskFolder([string]$Path) {
+    # The task folder of the earlier name (\Intune-Choco-Updates\, \Intune-Winget-Updates\) once its tasks are gone:
+    # only when it is empty, other apps of the earlier version may still have tasks there
+    try {
+        $Service = New-Object -ComObject Schedule.Service
+        $Service.Connect()
+        $Folder = $Service.GetFolder($Path.TrimEnd("\"))
+        # 1 = TASK_ENUM_HIDDEN: hidden tasks count too
+        if ($Folder.GetTasks(1).Count -eq 0 -and $Folder.GetFolders(0).Count -eq 0) {
+            $Service.GetFolder("\").DeleteFolder($Path.Trim("\"), 0)
+            Write-DeviceLog "removed the empty task folder of the earlier version: $Path"
+        }
+    }
+    catch { }
 }
 function Protect-Folder([string]$Path) {
     # Owner SYSTEM, no inherited rights: SYSTEM and Administrators full control, Users read and execute.
@@ -1901,6 +1938,7 @@ function Remove-UpdateTasks {
         Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
     }
+    Remove-OldTaskFolder $OldTaskPath
 }
 $SourceArguments = @()
 if ($Source) { $SourceArguments = @("--source", $Source) }

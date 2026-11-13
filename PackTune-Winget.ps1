@@ -242,6 +242,7 @@ function Remove-UpdateTasks {
         Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
     }
+    Remove-OldTaskFolder $OldTaskPath
 }
 
 if ($Uninstall) {
