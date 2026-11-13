@@ -41,6 +41,20 @@ function Get-FunctionText([string]$Script, [string]$Name) {
     if (-not $Function) { return "" }
     return (Get-CodeText $Function.Body.Extent.Text).Trim().TrimStart('{').Trim()
 }
+function Get-CopiedHelpers([string]$Script) {
+    # File names a generated install.ps1 copies from its own folder: Copy-Item (Join-Path $PSScriptRoot <name or $File>);
+    # for $File the names come from the foreach around it
+    $Ast = [System.Management.Automation.Language.Parser]::ParseInput($Script, [ref]$null, [ref]$null)
+    $Copies = $Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.GetCommandName() -eq 'Copy-Item' -and $Node.Extent.Text -like '*Join-Path $PSScriptRoot*' }, $true)
+    foreach ($Copy in $Copies) {
+        $Join = $Copy.Find({ param($Node) $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.GetCommandName() -eq 'Join-Path' }, $true)
+        $Child = $Join.CommandElements[2]
+        if ($Child -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $Child.Value; continue }
+        $Loop = $Copy.Parent
+        while ($Loop -and -not ($Loop -is [System.Management.Automation.Language.ForEachStatementAst])) { $Loop = $Loop.Parent }
+        if ($Loop) { $Loop.Condition.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value } }
+    }
+}
 function Test-SameSchedule($A, $B) {
     foreach ($Field in $script:ScheduleFields) { if ([string]$A.($Field.Name) -ne [string]$B.($Field.Name)) { return "$($Field.Name): '$($A.($Field.Name))' vs '$($B.($Field.Name))'" } }
     return $null
@@ -218,6 +232,13 @@ foreach ($Case in $Cases) {
     $TaskFolder = if ($Case.Source -eq "Winget") { "Intune-Winget-Updates" } else { "Intune-Choco-Updates" }
     Test-Check "$Label notify.ps1 starts the task of its source" ($Notify.Contains("\$TaskFolder\Update"))
     Test-Check "$Label install.ps1 copies the helpers" ($Install -match '"update\.ps1", "notify\.ps1", "probe\.ps1"')
+    # Every file install.ps1 copies from its own folder is in the package and in the sandbox lab project (the lab once missed probe.ps1)
+    $Helpers = @(Get-CopiedHelpers $Install)
+    $Lab = Join-Path $Folder "lab"; New-Item -Path $Lab -ItemType Directory -Force | Out-Null
+    Copy-LabPackageFiles -SourcePath (Join-Path $Folder "source") -Destination $Lab
+    $MissingSource = @($Helpers | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Folder "source\$_")) })
+    $MissingLab = @($Helpers | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Lab $_)) })
+    Test-Check "$Label every helper install.ps1 copies is in the package and in the lab project" ($Helpers.Count -ge 3 -and $MissingSource.Count -eq 0 -and $MissingLab.Count -eq 0 -and (Test-Path (Join-Path $Lab "choco-app.ps1")) -and -not (Test-Path (Join-Path $Lab "install.ps1"))) "helpers: $($Helpers -join ','); missing in package: $($MissingSource -join ','); missing in lab: $($MissingLab -join ',')"
     if ($Case.Source -eq "Winget") { Test-Check "$Label winget update.ps1 asks winget for upgrades and uses machine scope" ($Update -match '--upgrade-available' -and $Update -match '--scope machine') }
     else { Test-Check "$Label choco update.ps1 uses choco upgrade" ($Update -match 'upgrade \$Package') }
 }

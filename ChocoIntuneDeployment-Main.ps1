@@ -2368,6 +2368,19 @@ function Find-SandboxStudio {
     return $null
 }
 
+function Copy-LabPackageFiles {
+    <#
+        The package content for the Win32 Test Lab: every file of the generated source folder, like the Intune package
+        (which packs the whole folder), so a new helper of install.ps1 cannot be forgotten. install.ps1 becomes
+        choco-app.ps1, because the lab's own Install.ps1 is the same file name on Windows.
+    #>
+    param([Parameter(Mandatory = $true)][string]$SourcePath, [Parameter(Mandatory = $true)][string]$Destination)
+    foreach ($File in @(Get-ChildItem -LiteralPath $SourcePath -File)) {
+        $Name = if ($File.Name -eq "install.ps1") { "choco-app.ps1" } else { $File.Name }
+        Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $Destination $Name) -Force
+    }
+}#Copies the generated package files into the lab project
+
 function Test-IntuneChocoPackage {
     <#
         Tests a package in Windows Sandbox with the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller):
@@ -2441,8 +2454,7 @@ exit $LASTEXITCODE
     $Project = Save-Win32AppProject -Id $Id -DisplayName "$($Info.Title) ($Source)" -Publisher $(if ($Info.Authors) { [string]$Info.Authors } else { "" }) `
         -Version $(if ($Version) { $Version } else { $Info.Version }) -Detection (New-Win32Detection -Type Script) -RunAs system `
         -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect; "Update.ps1" = "" }
-    Copy-Item -Path (Join-Path $SourcePath "install.ps1") -Destination (Join-Path $Project.SourcePath "choco-app.ps1") -Force
-    foreach ($File in "update.ps1", "notify.ps1") { Copy-Item -Path (Join-Path $SourcePath $File) -Destination $Project.SourcePath -Force }
+    Copy-LabPackageFiles -SourcePath $SourcePath -Destination $Project.SourcePath
 
     Write-Host "Opening the Win32 Test Lab in Windows Sandbox for $($Info.Title): run Install, Detect, Uninstall there, then report the result"
     $Result = Start-Win32TestLab -Id $Id
