@@ -175,7 +175,7 @@ function ConvertTo-InsightApp {
     $Notes = [string]$Raw.notes
     $Result = [ordered]@{
         Id = [string]$Raw.id; DisplayName = [string]$Raw.displayName; Kind = 'Other'; Source = ''; Package = $null; Version = ''
-        UpdateMode = $DefaultUpdateMode; GraceHours = $DefaultGraceHours; PackageSource = ''; HasPolicy = $false
+        UpdateMode = $DefaultUpdateMode; GraceHours = $DefaultGraceHours; PackageSource = ''; UseOfferedSource = $false; HasPolicy = $false
         Infrastructure = $false; Managed = $false; Created = $Raw.createdDateTime; AppVersion = $Raw.displayVersion
         Duplicate = $false; DuplicateOf = $null; ProposedAction = 'CannotManage'; Reason = ''
     }
@@ -260,6 +260,16 @@ function Set-InsightAppTakeOver {
     }
 }
 
+function Test-InsightFeedUrl {
+    <#
+        A package source offered by an import (export file, notes of another tenant) is only ever used as an absolute
+        https URL without user info, query or fragment: no attacker feed with credentials, no UNC or file path.
+    #>
+    param([string]$Url)
+    $Uri = $null
+    return ([uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$Uri) -and $Uri.Scheme -eq 'https' -and -not $Uri.UserInfo -and -not $Uri.Query -and -not $Uri.Fragment)
+}
+
 function Remove-InsightUserInfo([string]$Url) {
     # No credentials or tokens in an export: drop user info, query and fragment of a feed URL
     if (-not $Url) { return '' }
@@ -280,7 +290,10 @@ function Export-InsightManagedApps {
 }
 
 function Read-InsightExportFile {
-    <# Reads an export file into candidates (ProposedAction Recreate). #>
+    <#
+        Reads an export file into candidates (ProposedAction Recreate). PackageSource is what the file offers; it is
+        only used when UseOfferedSource is set after an explicit confirmation per app (see New-InsightRecreatedApps).
+    #>
     param([Parameter(Mandatory)][string]$Path)
     $Document = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
     if ($Document.format -ne 'IntuneChocoDeployment.Export' -or [int]$Document.version -gt 1) { throw 'This is not an export file of this tool (or from a newer version).' }
@@ -288,7 +301,7 @@ function Read-InsightExportFile {
         if ($Item.source -notin 'Chocolatey', 'Winget' -or $Item.package -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') { throw "Invalid entry in the export file: $($Item.package)" }
         [pscustomobject]@{ Id = $null; DisplayName = [string]$Item.displayName; Kind = 'Export'; Source = [string]$Item.source; Package = [string]$Item.package
             Version = [string]$Item.version; UpdateMode = [string]$Item.updateMode; GraceHours = [int]$Item.graceHours; PackageSource = [string]$Item.packageSource
-            Managed = $false; Infrastructure = $false; Duplicate = $false; ProposedAction = 'Recreate'; Reason = 'from export file' }
+            UseOfferedSource = $false; Managed = $false; Infrastructure = $false; Duplicate = $false; ProposedAction = 'Recreate'; Reason = 'from export file' }
     }
 }
 
@@ -305,15 +318,23 @@ function New-InsightRecreatedApps {
     <#
         Recreates selected apps (from another tenant or an export file) in the current tenant through the tool's
         deploy functions. Apps already managed here (same package) are skipped. Assignment defaults to None.
+        Chocolatey apps use the package source of this tool's settings. The source the import offers (PackageSource)
+        is used only when the caller set UseOfferedSource after asking for this app, and only when it is an https URL
+        without user info and query (Test-InsightFeedUrl); otherwise the app is not created.
     #>
     param([Parameter(Mandatory)][object[]]$Candidates, [object[]]$ExistingApps = @(), [ValidateSet('Available', 'Required', 'None')][string]$Assignment = 'None')
     foreach ($App in $Candidates) {
         $Exists = @($ExistingApps | Where-Object { $_.Managed -and $_.Package -and $_.Package -eq $App.Package -and $_.Source -eq $App.Source }).Count -gt 0
         if ($Exists) { [pscustomobject]@{ Package = $App.Package; Done = $false; Message = 'already managed in this tenant' }; continue }
+        $UseOffered = $App.Source -eq 'Chocolatey' -and [string]$App.PackageSource -and $App.PSObject.Properties['UseOfferedSource'] -and $App.UseOfferedSource -eq $true
+        if ($UseOffered -and -not (Test-InsightFeedUrl ([string]$App.PackageSource))) {
+            [pscustomobject]@{ Package = $App.Package; Done = $false; Message = 'package source refused: only https URLs without user name, password or query are taken from an import' }; continue
+        }
         try {
             $Args = @{ Assignment = $Assignment; UpdateMode = $App.UpdateMode; GraceHours = $App.GraceHours; Version = $(if ($App.Version) { $App.Version } else { 'latest' }); NoIconPrompt = $true }
             if ($App.Source -eq 'Winget') { & $script:Hooks.NewWingetApp -WingetId $App.Package @Args | Out-Null }
-            else { & $script:Hooks.NewChocoApp -ChocoName $App.Package -PackageSource $App.PackageSource @Args | Out-Null }
+            elseif ($UseOffered) { & $script:Hooks.NewChocoApp -ChocoName $App.Package -PackageSource ([string]$App.PackageSource) @Args | Out-Null }
+            else { & $script:Hooks.NewChocoApp -ChocoName $App.Package @Args | Out-Null }
             [pscustomobject]@{ Package = $App.Package; Done = $true; Message = 'created' }
         }
         catch { [pscustomobject]@{ Package = $App.Package; Done = $false; Message = $_.Exception.Message } }
@@ -608,6 +629,6 @@ function Expand-InsightLogs {
 
 Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, Invoke-InsightGraph, Get-InsightRequiredScopes, Get-InsightScopeSet,
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
-Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
+Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Test-InsightFeedUrl, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
 Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
 Set-InsightStatusScript, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs

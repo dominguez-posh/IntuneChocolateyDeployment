@@ -65,12 +65,35 @@ Test-Check 'import: foreign file rejected' ($(try { Read-InsightExportFile -Path
 
 # ---- recreate through the deploy functions (replaced by fakes)
 $deployed = New-Object System.Collections.ArrayList
+$feeds = @{}
 Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker } -ConvertFromNotes ${function:ConvertFrom-ChocoAppNotes} -ConvertToNotes ${function:ConvertTo-ChocoAppNotes} -NewPolicy ${function:New-ChocoAppPolicy} `
-    -NewChocoApp { param($ChocoName, $Assignment, $UpdateMode, $GraceHours, $Version, $PackageSource, $NoIconPrompt) [void]$deployed.Add("choco:$ChocoName`:$Version`:$UpdateMode") }.GetNewClosure() `
+    -NewChocoApp { param($ChocoName, $Assignment, $UpdateMode, $GraceHours, $Version, $PackageSource, $NoIconPrompt) [void]$deployed.Add("choco:$ChocoName`:$Version`:$UpdateMode"); $feeds[$ChocoName] = $PSBoundParameters.ContainsKey('PackageSource') }.GetNewClosure() `
     -NewWingetApp { param($WingetId, $Assignment, $UpdateMode, $GraceHours, $Version, $NoIconPrompt) [void]$deployed.Add("winget:$WingetId`:$Version`:$UpdateMode") }.GetNewClosure()
 $rc = @(New-InsightRecreatedApps -Candidates $cand -ExistingApps @((Get-C a1)))
 Test-Check 'recreate: deploy functions called, managed package skipped' ($deployed.Count -eq 3 -and ($rc | Where-Object Package -eq 'git').Done -eq $false -and ($rc | Where-Object Package -eq 'git').Message -like 'already*')
 Test-Check 'recreate: pinned version and mode passed' (($deployed -contains 'choco:7zip:23.01:Off') -and ($deployed -contains 'winget:VideoLAN.VLC:latest:Custom'))
+
+# ---- import: the package source of a file or another tenant is shown, checked and only used after a yes per app
+Test-Check 'feed url: only https without user info, query or fragment' ((Test-InsightFeedUrl 'https://feed.example/nuget/') -and -not (Test-InsightFeedUrl 'http://feed.example/nuget') -and -not (Test-InsightFeedUrl '\\attacker\share') -and -not (Test-InsightFeedUrl 'file:///C:/feed') -and -not (Test-InsightFeedUrl 'https://u:p@feed.example/nuget') -and -not (Test-InsightFeedUrl 'https://feed.example/nuget?key=1') -and -not (Test-InsightFeedUrl ''))
+$feedFile = Join-Path $temp 'feeds.json'
+@{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = '2026-11-13'; apps = @(
+        @{ displayName = 'Good feed'; source = 'Chocolatey'; package = 'goodfeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = 'https://feed.example/nuget/' }
+        @{ displayName = 'UNC feed'; source = 'Chocolatey'; package = 'uncfeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '\\attacker\share' }
+        @{ displayName = 'No feed'; source = 'Chocolatey'; package = 'nofeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '' }) } | ConvertTo-Json -Depth 5 | Set-Content $feedFile
+$feedCand = @(Read-InsightExportFile -Path $feedFile)
+Test-Check 'import: offered source is kept for display, not marked for use' ($feedCand.Count -eq 3 -and ($feedCand | Where-Object Package -eq 'uncfeed').PackageSource -eq '\\attacker\share' -and @($feedCand | Where-Object { $_.UseOfferedSource }).Count -eq 0)
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $feedCand)
+Test-Check 'import without a yes: every app gets the own package source' (@($fr | Where-Object Done).Count -eq 3 -and $feeds['goodfeed'] -eq $false -and $feeds['uncfeed'] -eq $false -and $feeds['nofeed'] -eq $false) ($feeds | ConvertTo-Json -Compress)
+foreach ($cand in $feedCand) { $cand.UseOfferedSource = $true }
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $feedCand)
+Test-Check 'import with a yes: https source used, UNC source refused, app not created' ($feeds['goodfeed'] -eq $true -and -not $feeds.ContainsKey('uncfeed') -and ($fr | Where-Object Package -eq 'uncfeed').Done -eq $false -and ($fr | Where-Object Package -eq 'uncfeed').Message -like '*refused*' -and $feeds['nofeed'] -eq $false) ($fr | ConvertTo-Json -Compress)
+$foreign = Get-InsightClassification -RawApps @([pscustomobject]@{ id = 'f1'; displayName = 'Foreign'; notes = 'PoweredByChocolatey;package=evil;version=latest;update=Startup;grace=48;source=https%3A%2F%2Fu%3Ap%40feed.example%2Fx%3Fk%3D1;delay=5-60'; createdDateTime = '2026-01-01T10:00:00Z'; AppType = 'Win32' })
+$foreign[0].ProposedAction = 'Recreate'; $foreign[0].UseOfferedSource = $true
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $foreign)
+Test-Check 'import from another tenant: a source with user info and query in the notes is refused' (-not $feeds.ContainsKey('evil') -and $fr[0].Done -eq $false) ($fr | ConvertTo-Json -Compress)
 
 # ---- error codes
 Test-Check 'error 1618' ((Get-InsightErrorCause 1618) -like '*another installation*')

@@ -622,6 +622,12 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Show-Page 'Tenant'; Show-ImportDialog
                 $ui.RbImpFile.IsChecked = $true
                 Test-Smoke 'export file source shows the file chooser' ($ui.PanelImpFile.Visibility -eq 'Visible')
+                @{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = '2026-01-01'; apps = @(
+                        @{ displayName = 'Feed ok'; source = 'Chocolatey'; package = 'feedok'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = 'https://feed.example.test/nuget/' }
+                        @{ displayName = 'Feed bad'; source = 'Chocolatey'; package = 'feedbad'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '\\attacker.example.test\share' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $script:SmokeOut 'export3.json')
+                Read-ImportFile (Join-Path $script:SmokeOut 'export3.json')
+                $feedRows = @{}; foreach ($r in @($script:ImportRowList)) { $feedRows[$r['Title']] = $r }
+                Test-Smoke 'import rows show the offered package source' ($feedRows['Feed ok']['Settings'] -like '*offers package source https://feed.example.test/nuget/*asked*' -and $feedRows['Feed bad']['Settings'] -like '*attacker.example.test*refused*') (($feedRows.Values | ForEach-Object { $_['Settings'] }) -join ' | ')
                 @{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = '2026-01-01'; apps = @(@{ displayName = 'Scratch'; source = 'Chocolatey'; package = 'scratch'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $script:SmokeOut 'export2.json')
                 Read-ImportFile (Join-Path $script:SmokeOut 'export2.json')
                 Test-Smoke 'file rows are offered as Create here' ($script:ImportRowList.Count -eq 1 -and $script:ImportRowList[0]['Action'] -eq 'Create here' -and $script:ImportRowList[0]['Kind'] -eq 'Export file') ($script:ImportRowList[0] | ConvertTo-Json -Compress)
