@@ -17,6 +17,9 @@ $demoOverlay.IsHitTestVisible = $false
 [System.Windows.Controls.Grid]::SetRowSpan($demoOverlay, 99)
 [System.Windows.Controls.Panel]::SetZIndex($demoOverlay, 1000)
 [void]$demoRoot.Children.Add($demoOverlay)
+# Raw mode (Tests\Record-Demo.ps1): the compositor draws pointer, click ring and captions from frames.json
+if ($env:INTUNECHOCO_DEMO_RAW) { $demoOverlay.Opacity = 0 }
+$script:Focus = $null; $script:LastBounds = $null; $script:Scene = 0
 
 $demoPointer = New-Object System.Windows.Shapes.Path
 $demoPointer.Data = [System.Windows.Media.Geometry]::Parse('M0,0 L0,18 L4.6,13.8 L7.8,21 L10.6,19.8 L7.6,12.8 L13.4,12.8 Z')
@@ -58,6 +61,8 @@ Set-PointerAt 640 470
 function Get-Center($Element) {
     $Element.UpdateLayout()
     $p = $Element.TranslatePoint((New-Object System.Windows.Point ($Element.ActualWidth / 2), ($Element.ActualHeight / 2)), $demoRoot)
+    $tl = $Element.TranslatePoint((New-Object System.Windows.Point 0, 0), $demoRoot)
+    $script:LastBounds = @{ X = $tl.X; Y = $tl.Y; W = $Element.ActualWidth; H = $Element.ActualHeight }
     return @{ X = $p.X; Y = $p.Y }
 }
 function Get-RowElement($Grid, $Item) {
@@ -86,7 +91,15 @@ function Save-Frame([int]$Cap = 0) {
     try { $enc.Save($fs) } finally { $fs.Dispose() }
     $now = $script:FrameWatch.ElapsedMilliseconds
     if ($script:LastFrame) { $script:LastFrame.ms = [int]($now - $script:LastFrame.at); if ($script:LastFrame.cap) { $script:LastFrame.ms = [Math]::Min($script:LastFrame.ms, $script:LastFrame.cap) } }
+    $f = $script:Focus
+    $ringAge = -1; if ($demoRing.Visibility -eq 'Visible') { $ringAge = [int]$demoRing.Tag }
+    $capText = ''; $capNum = ''; if ($demoCaption.Opacity -ge 0.9) { $capText = $demoCaptionText.Text; $capNum = $demoBadgeText.Text }
     $script:LastFrame = [ordered]@{ file = $name; at = $now; ms = 100; cap = $Cap }
+    # Pointer, focus rectangle (the element being targeted, $null between scenes), scene, click ring age and caption for Tests\Render-Showcase.ps1
+    $script:LastFrame.px = [Math]::Round($script:DemoPos.X, 1); $script:LastFrame.py = [Math]::Round($script:DemoPos.Y, 1)
+    $script:LastFrame.fx = $null; $script:LastFrame.fy = $null; $script:LastFrame.fw = $null; $script:LastFrame.fh = $null
+    if ($f) { $script:LastFrame.fx = [Math]::Round($f.X, 1); $script:LastFrame.fy = [Math]::Round($f.Y, 1); $script:LastFrame.fw = [Math]::Round($f.W, 1); $script:LastFrame.fh = [Math]::Round($f.H, 1) }
+    $script:LastFrame.scene = $script:Scene; $script:LastFrame.ring = $ringAge; $script:LastFrame.caption = $capText; $script:LastFrame.captionNumber = $capNum
     [void]$script:Frames.Add($script:LastFrame)
 }
 
@@ -94,7 +107,10 @@ function Save-Frame([int]$Cap = 0) {
 
 #region Tour
 
-function Show-Caption([string]$Number, [string]$Text) { $script:CaptionTarget = @{ Number = $Number; Text = $Text } }
+function Show-Caption([string]$Number, [string]$Text) {
+    $script:CaptionTarget = @{ Number = $Number; Text = $Text }
+    $script:Focus = $null; if ($Number) { $script:Scene = [int]$Number } else { $script:Scene = 0 }
+}
 function Find-AppRow([string]$Key) { @($script:SourceRows | Where-Object { (Get-AppKey $_) -eq $Key })[0] }
 function Get-ListCenter($Element) { $c = Get-Center $Element; @{ X = [Math]::Min($c.X, 420); Y = $c.Y } }
 function Select-ByName([string]$Name) { Set-AppSelected (@($script:SourceRows | Where-Object { $_.Name -eq $Name })[0]) $true }
@@ -186,7 +202,7 @@ $script:DemoTimer.Add_Tick({
                 if ($s.Do) { & $s.Do }
                 if ($s.Caption) { Show-Caption $s.Caption[0] $s.Caption[1] }
                 $s.Phase = if ($s.Target) { 'move' } elseif ($s.Type) { 'type' } else { 'wait' }
-                if ($s.Target) { $t = & $s.Target; $s.From = @{ X = $script:DemoPos.X; Y = $script:DemoPos.Y }; $s.To = @{ X = $t.X - 2; Y = $t.Y - 2 }; $s.N = 0 }
+                if ($s.Target) { $t = & $s.Target; $script:Focus = $script:LastBounds; $s.From = @{ X = $script:DemoPos.X; Y = $script:DemoPos.Y }; $s.To = @{ X = $t.X - 2; Y = $t.Y - 2 }; $s.N = 0 }
                 $s.Typed = 0; $s.Since = $null
             }
             'move' {

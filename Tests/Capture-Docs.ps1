@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Renders the README screenshots (docs\screenshots\*.png) with the fakes of the GUI smoke test: demo data only.
+    Renders the README screenshots (docs\screenshots\*.png, framed by Tests\Render-Showcase.ps1, plus hero.png) with the
+    fakes of the GUI smoke test: demo data only.
 .EXAMPLE
     .\Tests\Capture-Docs.ps1
 #>
@@ -15,9 +16,6 @@ $work = Join-Path ([IO.Path]::GetTempPath()) 'IntuneChocoDocs'
 $log = Join-Path $work 'results.txt'
 if (-not (Test-Path $log)) { throw 'The screenshot run wrote no results.' }
 if (Get-Content $log | Where-Object { $_ -like 'FAIL*' }) { throw (Get-Content $log -Raw) }
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-foreach ($name in 'start', 'apps', 'deploy', 'tenant', 'schedule', 'status', 'import', 'activity', 'settings') {
-    $file = Join-Path $work "$name.png"
-    if (Test-Path $file) { Copy-Item $file (Join-Path $OutDir "$name.png") -Force } else { Write-Warning "$name.png was not rendered" }
-}
+# Frame every screenshot on the showcase stage (soft background, floating window) and compose hero.png
+& (Join-Path $PSScriptRoot 'Render-Showcase.ps1') -Mode Shots -Source $work -OutDir $OutDir
 "Screenshots written to $OutDir"
