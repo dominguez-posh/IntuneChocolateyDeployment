@@ -2446,6 +2446,7 @@ function Get-IntuneChocoTenantApps {
             UpdateMode   = $Policy.UpdateMode
             GraceHours   = $Policy.GraceHours
             HasPolicy    = $Policy.HasPolicy
+            Schedule     = $Policy.Schedule
         }
     }
 
