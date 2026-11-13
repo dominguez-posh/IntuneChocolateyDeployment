@@ -53,43 +53,7 @@ function Test-GeneratedScripts([string]$Folder, [string]$What) {
 }
 
 # Fake Graph for the insight functions (counts, status, status script, import): script text, run inside the task runspaces
-$script:InsightFake = @'
-param([string]$Method, [string]$Path, $Body)
-$Dir = $env:LOCALAPPDATA
-$P = [uri]::UnescapeDataString($Path)
-$Now = (Get-Date).ToUniversalTime()
-if ($P -like '*/deviceStatuses*') {
-    return @{ value = @(
-        @{ deviceId = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = '23.1'; errorCode = 1; lastSyncDateTime = $Now.ToString('o') }
-        @{ deviceId = 'md-2'; deviceName = 'NB-0288'; userPrincipalName = 'a.keller@example.test'; installState = 'pendingInstall'; installStateDetail = 'pending'; displayVersion = '23.1'; lastSyncDateTime = $Now.ToString('o') }
-        @{ deviceId = 'md-3'; deviceName = 'PC-0001'; userPrincipalName = 'm.schulz@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.ToString('o') }
-        @{ deviceId = 'md-4'; deviceName = 'PC-0002'; userPrincipalName = 'shared@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.AddDays(-12).ToString('o') }
-    ) }
-}
-if ($P -like '*/deviceHealthScripts/*/deviceRunStates*') {
-    $Out = '{"f":[{"p":"7zip.install","s":"c","t":"11:50","a":"upgrade","e":1,"c":"Download blocked by the Chocolatey rate limit","v":"23.1","g":"26.6.0"}],"o":[]}'
-    return @{ value = @(@{ detectionState = 'success'; lastStateUpdateDateTime = $Now.ToString('o'); preRemediationDetectionScriptOutput = $Out; managedDevice = @{ id = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test' } }) }
-}
-if ($P -like '*/deviceHealthScripts/*/assign') { return @{} }
-if ($P -like '*/deviceHealthScripts*') {
-    if ($Method -eq 'POST') { Set-Content (Join-Path $Dir 'fake-health.json') '{"id":"hs-1"}'; return @{ id = 'hs-1' } }
-    if (Test-Path (Join-Path $Dir 'fake-nolicense.txt')) { throw 'Graph GET failed (403): forbidden, the tenant has no license for this (fake)' }
-    if ($P -like '*top=1*') { return @{ value = @() } }
-    if (Test-Path (Join-Path $Dir 'fake-health.json')) { return @{ value = @(@{ id = 'hs-1'; displayName = 'IntuneChocoDeployment status' }) } }
-    return @{ value = @() }
-}
-if ($P -like '*mobileApps/*' -and $Method -eq 'PATCH') { Add-Content (Join-Path $Dir 'fake-patches.log') $P; return @{} }
-if ($P -like '*/mobileApps?*') {
-    if ($P -like '*winGetApp*') { return @{ value = @() } }
-    return @{ value = @(
-        [pscustomobject]@{ id = 'i1'; displayName = 'Zoom Workplace'; notes = ''; installCommandLine = 'winget install --id Zoom.Zoom -e --silent'; createdDateTime = '2026-01-01T10:00:00Z'; displayVersion = '' }
-        [pscustomobject]@{ id = 'i2'; displayName = 'Own VPN'; notes = ''; installCommandLine = 'msiexec /i OwnVpn.msi /qn'; createdDateTime = '2026-01-02T10:00:00Z'; displayVersion = '' }
-        [pscustomobject]@{ id = 'i3'; displayName = 'Greenshot'; notes = ''; installCommandLine = 'choco install greenshot -y --version 1.3.290'; createdDateTime = '2026-01-03T10:00:00Z'; displayVersion = '' }
-        [pscustomobject]@{ id = 'i4'; displayName = 'Sample managed'; notes = 'PoweredByChocolatey;package=sample.pkg;version=latest;update=Startup;grace=48;source=;delay=5-60'; installCommandLine = ''; createdDateTime = '2026-01-04T10:00:00Z'; displayVersion = '' }
-    ) }
-}
-throw "Fake Graph: $Method $P"
-'@
+$script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
 
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {

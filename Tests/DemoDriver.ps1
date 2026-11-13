@@ -74,7 +74,7 @@ function Get-RowElement($Grid, $Item) {
 $script:Frames = New-Object System.Collections.ArrayList
 $script:FrameWatch = [Diagnostics.Stopwatch]::StartNew()
 $script:LastFrame = $null
-function Save-Frame {
+function Save-Frame([int]$Cap = 0) {
     $window.UpdateLayout()
     $w = [int]$window.Content.ActualWidth; $h = [int]$window.Content.ActualHeight
     $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
@@ -85,8 +85,8 @@ function Save-Frame {
     $fs = [IO.File]::Create((Join-Path $script:DemoOut $name))
     try { $enc.Save($fs) } finally { $fs.Dispose() }
     $now = $script:FrameWatch.ElapsedMilliseconds
-    if ($script:LastFrame) { $script:LastFrame.ms = [int]($now - $script:LastFrame.at) }
-    $script:LastFrame = [ordered]@{ file = $name; at = $now; ms = 100 }
+    if ($script:LastFrame) { $script:LastFrame.ms = [int]($now - $script:LastFrame.at); if ($script:LastFrame.cap) { $script:LastFrame.ms = [Math]::Min($script:LastFrame.ms, $script:LastFrame.cap) } }
+    $script:LastFrame = [ordered]@{ file = $name; at = $now; ms = 100; cap = $Cap }
     [void]$script:Frames.Add($script:LastFrame)
 }
 
@@ -96,35 +96,48 @@ function Save-Frame {
 
 function Show-Caption([string]$Number, [string]$Text) { $script:CaptionTarget = @{ Number = $Number; Text = $Text } }
 function Find-AppRow([string]$Key) { @($script:SourceRows | Where-Object { (Get-AppKey $_) -eq $Key })[0] }
-function Use-Chocolatey { foreach ($entry in $script:DeployCombos) { $entry.Combo.SelectedIndex = [array]::IndexOf($entry.Sources, 'Chocolatey') } }
+function Get-ListCenter($Element) { $c = Get-Center $Element; @{ X = [Math]::Min($c.X, 420); Y = $c.Y } }
+function Select-ByName([string]$Name) { Set-AppSelected (@($script:SourceRows | Where-Object { $_.Name -eq $Name })[0]) $true }
 
 # Each step: optional Caption, Target (element or point to move to), Click (runs after the pointer arrived),
-# Until (wait for background work), Hold (ms to stay afterwards)
+# Until (wait for background work: frames are then taken in fast forward), Hold (ms to stay afterwards)
 $script:Tour = [System.Collections.ArrayList]@(
     @{ Do = {
         $cfg = Get-IntuneChocoSettings; $cfg.ClientID = ''; [void](Save-IntuneChocoSettings -Settings $cfg); $script:Settings = Get-IntuneChocoSettings
+        $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'InsightFake.txt') -Raw
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DemoClient = New-Object System.Net.WebClient; [void]$global:DemoClient.DownloadStringTaskAsync([uri]$Url)' }
-        Show-Page 'Start' }; Hold = 600 }
-    @{ Caption = @('1', 'Set up once: module, app registration with consent, sign-in, dependency apps'); Hold = 1800 }
+        Show-Page 'Start'; Start-CatalogPrefetch }; Hold = 500 }
+    @{ Caption = @('1', 'Set up once: module, app registration, sign-in, dependency apps'); Hold = 2200 }
     @{ Target = { Get-Center $ui.BtnSetupAll }; Click = { & $script:ClickActions[$ui.BtnSetupAll] }
-       Until = { -not $script:SetupRunning -and (Test-DemoIdle) }; Hold = 1800 }
+       Until = { -not $script:SetupRunning -and (Test-DemoIdle) }; Hold = 2200 }
+    @{ Do = { Start-StatusScriptSetup }; Until = { Test-DemoIdle }; Hold = 1800 }
     @{ Caption = @('2', 'Pick apps from one list with winget and Chocolatey'); Target = { Get-Center $ui.NavApps }; Click = { Show-Page 'Apps' }
-       Until = { Test-DemoIdle 'meta' }; Hold = 900 }
-    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Focus() | Out-Null }; Hold = 200 }
-    @{ Type = 'firefox'; Hold = 500 }
+       Until = { Test-DemoIdle 'meta' }; Hold = 700 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Focus() | Out-Null }; Hold = 150 }
+    @{ Type = 'zip'; Hold = 400 }
+    @{ Target = { Get-Center ($ui.CardList.ItemContainerGenerator.ContainerFromIndex(0)) }; Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 900 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 100 }
+    @{ Type = 'notepad'; Hold = 400 }
+    @{ Target = { Get-Center ($ui.CardList.ItemContainerGenerator.ContainerFromIndex(0)) }; Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 900 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 100 }
+    @{ Type = 'vlc'; Hold = 400 }
     @{ Target = { Get-Center ($ui.CardList.ItemContainerGenerator.ContainerFromIndex(0)) }; Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 600 }
-    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 150 }
-    @{ Type = '7-zip'; Hold = 400 }
-    @{ Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 500 }
-    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 150 }
-    @{ Caption = @('3', 'Review: source per app, assignment and updates, then deploy'); Target = { Get-Center $ui.BtnReview }; Click = { $ui.RbRequired.IsChecked = $true; Show-DeployDialog; Use-Chocolatey }; Hold = 2200 }
-    @{ Target = { Get-Center $ui.BtnDeployGo }; Click = { Start-Deploy }; Hold = 300 }
-    @{ Caption = @('4', 'Package, upload, dependency and assignment run in the background'); Until = { Test-DemoIdle }; Hold = 1500 }
-    @{ Caption = @('5', 'Your apps in Intune: version, update mode, release new versions'); Target = { Get-Center $ui.NavTenant }; Click = { Show-Page 'Tenant' }
+    @{ Click = { $ui.TxtFilter.Text = ''; Show-AppDetails (Find-AppRow '7zip.install') }; Hold = 2400 }
+    @{ Target = { Get-Center $ui.BtnDetailClose }; Click = { $script:DetailRow = $null; $ui.PanelDetails.Visibility = 'Collapsed'; Update-SelectionBar }; Hold = 300 }
+    @{ Caption = @('3', 'Review: choose the source per app, then deploy'); Target = { Get-Center $ui.BtnReview }; Click = { Show-DeployDialog }; Hold = 2200 }
+    @{ Target = { Get-Center $script:DeployCombos[1].Combo }; Click = { $c = $script:DeployCombos[1]; $c.Combo.SelectedIndex = ($c.Combo.SelectedIndex + 1) % $c.Sources.Count }; Hold = 2200 }
+    @{ Target = { Get-Center $ui.BtnDeployGo }; Click = { Start-Deploy }; Hold = 200 }
+    @{ Caption = @('4', 'Deployments run in the background, with progress'); Until = { Test-DemoIdle }; Hold = 1800 }
+    @{ Caption = @('5', 'In tenant: version, update mode, schedule per app'); Target = { Get-Center $ui.NavTenant }; Click = { Show-Page 'Tenant' }
        Until = { Test-DemoIdle }; Hold = 900 }
-    @{ Click = { $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' })[0] }; Hold = 2600 }
-    @{ Do = { Close-Dialog }; Caption = @('', ''); Hold = 400 }
+    @{ Target = { Get-ListCenter ($ui.LstTenant.ItemContainerGenerator.ContainerFromItem(@($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0])) }
+       Click = { $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0] }; Hold = 1600 }
+    @{ Target = { Get-Center $ui.BtnTenantSchedule }; Click = { & $script:ClickActions[$ui.BtnTenantSchedule] }; Hold = 3200 }
+    @{ Target = { Get-Center $ui.BtnScheduleCancel }; Click = { Close-Dialog }; Hold = 500 }
+    @{ Caption = @('6', 'Install status per device, with the cause of a failure'); Target = { Get-ListCenter ($ui.LstTenant.ItemContainerGenerator.ContainerFromItem(@($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0])) }
+       Click = { Show-AppStatus (@($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]).Data }; Until = { Test-DemoIdle }; Hold = 3800 }
+    @{ Target = { Get-Center $ui.NavApps }; Click = { Show-Page 'Apps' }; Caption = @('', ''); Hold = 1800 }
 )
 
 function Test-DemoIdle([string]$Kind) { -not @($script:Tasks | Where-Object { if ($Kind) { $_.Job.Kind -eq $Kind } else { $_.Job.Kind -ne 'icons' } }).Count }
@@ -136,14 +149,14 @@ $script:DemoTimer.Add_Tick({
     try {
         # Caption fades out, swaps text, fades in
         if ($script:CaptionTarget) {
-            if ($demoCaption.Opacity -gt 0 -and $demoCaptionText.Text -ne $script:CaptionTarget.Text) { $demoCaption.Opacity = [Math]::Max(0, $demoCaption.Opacity - 0.34) }
+            if ($demoCaption.Opacity -gt 0 -and $demoCaptionText.Text -ne $script:CaptionTarget.Text) { $demoCaption.Opacity = [Math]::Max(0.0, $demoCaption.Opacity - 0.34) }
             else {
                 $demoCaptionText.Text = $script:CaptionTarget.Text; $demoBadgeText.Text = $script:CaptionTarget.Number
                 $demoBadge.Visibility = if ($script:CaptionTarget.Number) { 'Visible' } else { 'Collapsed' }
                 $demoCaption.UpdateLayout()
                 [System.Windows.Controls.Canvas]::SetLeft($demoCaption, ($demoRoot.ActualWidth - $demoCaption.ActualWidth) / 2)
                 [System.Windows.Controls.Canvas]::SetTop($demoCaption, $demoRoot.ActualHeight - 150)
-                if ($script:CaptionTarget.Text) { $demoCaption.Opacity = [Math]::Min(1, $demoCaption.Opacity + 0.34) }
+                if ($script:CaptionTarget.Text) { $demoCaption.Opacity = [Math]::Min(1.0, $demoCaption.Opacity + 0.34) }
                 if ($demoCaption.Opacity -ge 1 -or -not $script:CaptionTarget.Text) { $script:CaptionTarget = $null }
             }
         }
@@ -177,8 +190,9 @@ $script:DemoTimer.Add_Tick({
                 $s.Typed = 0; $s.Since = $null
             }
             'move' {
+                $script:FastFrame = 70
                 $s.N++
-                $k = [Math]::Min(1, $s.N / 11); $e = 1 - [Math]::Pow(1 - $k, 3)
+                $k = [Math]::Min(1, $s.N / 8); $e = 1 - [Math]::Pow(1 - $k, 3)
                 Set-PointerAt ($s.From.X + ($s.To.X - $s.From.X) * $e) ($s.From.Y + ($s.To.Y - $s.From.Y) * $e)
                 if ($k -ge 1) {
                     $s.Phase = 'wait'
@@ -186,17 +200,19 @@ $script:DemoTimer.Add_Tick({
                 }
             }
             'type' {
+                $script:FastFrame = 90
                 $s.Typed++
                 $ui.TxtFilter.Text = $s.Type.Substring(0, [Math]::Min($s.Typed, $s.Type.Length))
                 if ($s.Typed -ge $s.Type.Length) { $s.Phase = 'wait' }
             }
             'wait' {
-                if ($s.Until -and -not (& $s.Until)) { break }
+                if ($s.Until -and -not (& $s.Until)) { $s.Skip++; if ($s.Skip % 6 -ne 1) { $script:NoFrame = $true } else { $script:FastFrame = 200 }; break }
                 if (-not $s.Since) { $s.Since = $script:FrameWatch.ElapsedMilliseconds }
-                if ($script:FrameWatch.ElapsedMilliseconds - $s.Since -ge [int]$s.Hold) { $script:Step = $null }
+                if ($script:FrameWatch.ElapsedMilliseconds - $s.Since -ge ([int]$s.Hold * 0.38)) { $script:Step = $null }
             }
         }
-        Save-Frame
+        if (-not $script:NoFrame) { Save-Frame ([int]$script:FastFrame) }
+        $script:NoFrame = $false; $script:FastFrame = 0
     }
     catch {
         "FAIL demo: $($_.Exception.Message) at $($_.InvocationInfo.ScriptLineNumber)" | Set-Content (Join-Path $script:DemoOut 'error.txt')

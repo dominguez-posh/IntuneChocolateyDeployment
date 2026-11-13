@@ -733,7 +733,7 @@
                         <TextBlock x:Name="TxtDeployTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
                         <TextBlock Style="{StaticResource Subtitle}" Margin="0,6,0,0" Text="Each app becomes a Win32 app with install script, detection and update routine. Choose per app how it installs."/>
                     </StackPanel>
-                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="440">
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="500">
                         <StackPanel Margin="28,4,28,8">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
