@@ -65,12 +65,35 @@ Test-Check 'import: foreign file rejected' ($(try { Read-InsightExportFile -Path
 
 # ---- recreate through the deploy functions (replaced by fakes)
 $deployed = New-Object System.Collections.ArrayList
+$feeds = @{}
 Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker } -ConvertFromNotes ${function:ConvertFrom-ChocoAppNotes} -ConvertToNotes ${function:ConvertTo-ChocoAppNotes} -NewPolicy ${function:New-ChocoAppPolicy} `
-    -NewChocoApp { param($ChocoName, $Assignment, $UpdateMode, $GraceHours, $Version, $PackageSource, $NoIconPrompt) [void]$deployed.Add("choco:$ChocoName`:$Version`:$UpdateMode") }.GetNewClosure() `
+    -NewChocoApp { param($ChocoName, $Assignment, $UpdateMode, $GraceHours, $Version, $PackageSource, $NoIconPrompt) [void]$deployed.Add("choco:$ChocoName`:$Version`:$UpdateMode"); $feeds[$ChocoName] = $PSBoundParameters.ContainsKey('PackageSource') }.GetNewClosure() `
     -NewWingetApp { param($WingetId, $Assignment, $UpdateMode, $GraceHours, $Version, $NoIconPrompt) [void]$deployed.Add("winget:$WingetId`:$Version`:$UpdateMode") }.GetNewClosure()
 $rc = @(New-InsightRecreatedApps -Candidates $cand -ExistingApps @((Get-C a1)))
 Test-Check 'recreate: deploy functions called, managed package skipped' ($deployed.Count -eq 3 -and ($rc | Where-Object Package -eq 'git').Done -eq $false -and ($rc | Where-Object Package -eq 'git').Message -like 'already*')
 Test-Check 'recreate: pinned version and mode passed' (($deployed -contains 'choco:7zip:23.01:Off') -and ($deployed -contains 'winget:VideoLAN.VLC:latest:Custom'))
+
+# ---- import: the package source of a file or another tenant is shown, checked and only used after a yes per app
+Test-Check 'feed url: only https without user info, query or fragment' ((Test-InsightFeedUrl 'https://feed.example/nuget/') -and -not (Test-InsightFeedUrl 'http://feed.example/nuget') -and -not (Test-InsightFeedUrl '\\attacker\share') -and -not (Test-InsightFeedUrl 'file:///C:/feed') -and -not (Test-InsightFeedUrl 'https://u:p@feed.example/nuget') -and -not (Test-InsightFeedUrl 'https://feed.example/nuget?key=1') -and -not (Test-InsightFeedUrl ''))
+$feedFile = Join-Path $temp 'feeds.json'
+@{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = '2026-11-13'; apps = @(
+        @{ displayName = 'Good feed'; source = 'Chocolatey'; package = 'goodfeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = 'https://feed.example/nuget/' }
+        @{ displayName = 'UNC feed'; source = 'Chocolatey'; package = 'uncfeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '\\attacker\share' }
+        @{ displayName = 'No feed'; source = 'Chocolatey'; package = 'nofeed'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '' }) } | ConvertTo-Json -Depth 5 | Set-Content $feedFile
+$feedCand = @(Read-InsightExportFile -Path $feedFile)
+Test-Check 'import: offered source is kept for display, not marked for use' ($feedCand.Count -eq 3 -and ($feedCand | Where-Object Package -eq 'uncfeed').PackageSource -eq '\\attacker\share' -and @($feedCand | Where-Object { $_.UseOfferedSource }).Count -eq 0)
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $feedCand)
+Test-Check 'import without a yes: every app gets the own package source' (@($fr | Where-Object Done).Count -eq 3 -and $feeds['goodfeed'] -eq $false -and $feeds['uncfeed'] -eq $false -and $feeds['nofeed'] -eq $false) ($feeds | ConvertTo-Json -Compress)
+foreach ($cand in $feedCand) { $cand.UseOfferedSource = $true }
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $feedCand)
+Test-Check 'import with a yes: https source used, UNC source refused, app not created' ($feeds['goodfeed'] -eq $true -and -not $feeds.ContainsKey('uncfeed') -and ($fr | Where-Object Package -eq 'uncfeed').Done -eq $false -and ($fr | Where-Object Package -eq 'uncfeed').Message -like '*refused*' -and $feeds['nofeed'] -eq $false) ($fr | ConvertTo-Json -Compress)
+$foreign = Get-InsightClassification -RawApps @([pscustomobject]@{ id = 'f1'; displayName = 'Foreign'; notes = 'PoweredByChocolatey;package=evil;version=latest;update=Startup;grace=48;source=https%3A%2F%2Fu%3Ap%40feed.example%2Fx%3Fk%3D1;delay=5-60'; createdDateTime = '2026-01-01T10:00:00Z'; AppType = 'Win32' })
+$foreign[0].ProposedAction = 'Recreate'; $foreign[0].UseOfferedSource = $true
+$feeds.Clear()
+$fr = @(New-InsightRecreatedApps -Candidates $foreign)
+Test-Check 'import from another tenant: a source with user info and query in the notes is refused' (-not $feeds.ContainsKey('evil') -and $fr[0].Done -eq $false) ($fr | ConvertTo-Json -Compress)
 
 # ---- error codes
 Test-Check 'error 1618' ((Get-InsightErrorCause 1618) -like '*another installation*')
@@ -124,6 +147,28 @@ Test-Check 'status output below 2048 chars with 40 apps' ($out.Length -gt 0 -and
 Test-Check 'status output is JSON, failed apps first, overflow counted' ($parsed -and $parsed.n -eq 40 -and @($parsed.f).Count -eq 8 -and ($parsed.x -gt 0) -and @($parsed.o).Count + @($parsed.f).Count + $parsed.x -eq 40) $out
 $none = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot (Join-Path $temp 'none') -WingetRoot (Join-Path $temp 'none2')
 Test-Check 'status script tolerates missing folders' (($none | Out-String) -match '"n":0')
+
+# ---- the status script reads what the device scripts write (Save-LastResult of Get-DeviceScriptCommon)
+$commonAst = [Management.Automation.Language.Parser]::ParseInput((Get-DeviceScriptCommon), [ref]$null, [ref]$null)
+$saveFn = $commonAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Save-LastResult' }, $true)
+. ([scriptblock]::Create($saveFn.Extent.Text))
+function Write-ProtectedFile([string]$Path, [string]$Text) { Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII }   # stand-in, the real one only writes under %ProgramFiles%
+$schemaRoot = Join-Path $temp 'schema'
+foreach ($case in @(@('fails.pkg', 'upgrade', 'failed', 1603, 'failed: exit code 1603', '1.0', '2.0'), @('fine.pkg', 'install', 'ok', 0, 'ok', '3.1', '3.1'), @('waits.pkg', 'upgrade', 'skipped', 0, 'waiting: on battery', '4.0', '4.1'))) {
+    $dir = Join-Path $schemaRoot $case[0]; New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $LogId = $case[0]; $ResultFile = Join-Path $dir 'last-result.json'
+    Save-LastResult $case[1] $case[2] $case[3] $case[4] $case[5] $case[6]
+}
+$written = Get-Content (Join-Path $schemaRoot 'fails.pkg\last-result.json') -Raw | ConvertFrom-Json
+Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion') (@($written.PSObject.Properties.Name) -join ',')
+$schemaOut = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot $schemaRoot -WingetRoot (Join-Path $temp 'none')
+$schema = ($schemaOut | Out-String).Trim() | ConvertFrom-Json
+$f = @($schema.f)[0]
+Test-Check 'status script reads every field Save-LastResult writes' ($schema.n -eq 3 -and @($schema.f).Count -eq 1 -and $f.p -eq 'fails.pkg' -and $f.t -match '^\d{4}-\d\d-\d\dT\d\d:\d\d$' -and $f.a -eq 'upgrade' -and $f.e -eq 1603 -and $f.c -eq 'failed: exit code 1603' -and $f.v -eq '1.0' -and $f.g -eq '2.0' -and (@($schema.o) -contains 'fine.pkg=3.1') -and (@($schema.o) -contains 'waits.pkg=4.0')) ($schemaOut | Out-String)
+$statusFields = @([regex]::Matches($scriptText, '\$R\.(\w+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+$missing = @($statusFields | Where-Object { $_ -notin @($written.PSObject.Properties.Name) })
+Test-Check 'status script reads no field the devices do not write' ($statusFields.Count -ge 5 -and $missing.Count -eq 0) ($missing -join ',')
+Test-Check 'status script looks under %ProgramFiles%\IntuneChocoDeployment' ($scriptText -match "ProgramW6432" -and $scriptText -match "'IntuneChocoDeployment\\Chocolatey'" -and $scriptText -match "'IntuneChocoDeployment\\Winget'" -and $scriptText -notmatch 'ProgramData')
 
 # ---- health script create/update and licence degrade
 $calls = New-Object System.Collections.ArrayList

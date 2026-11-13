@@ -2220,6 +2220,14 @@ function Show-ImportDialog {
     Update-ImportRows
 }
 $script:ImportApps = $null
+function Get-ImportFeedText($App) {
+    # How the package source of an imported Chocolatey app is shown in its row
+    $src = [string]$App.PackageSource
+    if ($src -eq [string]$script:Settings.PackageSource) { return "package source $src (same as yours)" }
+    if ($App.ProposedAction -ne 'Recreate') { return "package source $src" }
+    if (Test-InsightFeedUrl $src) { return "offers package source $src (asked before it is used, otherwise yours)" }
+    return "offered package source $src refused (only https without user, password or query), yours is used"
+}
 function Update-ImportRows {
     $apps = @($script:ImportApps | Where-Object { $_ -and -not $_.Infrastructure })
     $rows = foreach ($a in $apps) {
@@ -2227,6 +2235,8 @@ function Update-ImportRows {
         $kind = $script:KindLabels[[string]$a.Kind]; if (-not $kind) { $kind = [string]$a.Kind }
         $kc = switch ($a.Kind) { 'ToolCreated' { 'info' } 'ChocolateyWin32' { 'gray' } 'WingetWin32' { 'ok' } 'StoreApp' { 'ok' } default { 'gray' } }
         $settings = if ($a.Package -and $a.ProposedAction -ne 'CannotManage') { "$(if ($a.Version) { "Version $($a.Version) pinned" } else { 'Latest' }), $(Format-UpdateText $a.UpdateMode $a.GraceHours)" } else { $a.Reason }
+        # The package source an import offers is shown, never taken silently (asked per app when creating)
+        if ($a.Source -eq 'Chocolatey' -and $a.PackageSource -and $a.ProposedAction -ne 'CannotManage') { $settings += "; $(Get-ImportFeedText $a)" }
         New-Row @{ Data = $a; Title = $a.DisplayName; Sub = $(if ($a.Kind -eq 'Export') { 'From the export file' } else { $a.Reason }); Kind = $kind; KindBg = $script:PillColors[$kc][0]; KindFg = $script:PillColors[$kc][1]
             Found = $(if ($a.Package) { "$($a.Source): $($a.Package)" } else { '' }); Settings = $settings; Action = $(if ($script:ActionLabels[[string]$a.ProposedAction]) { $script:ActionLabels[[string]$a.ProposedAction] } else { $a.ProposedAction })
             Checked = $pick; CanPick = $pick; Opacity = $(if ($pick -or $a.ProposedAction -eq 'Managed') { 1 } else { 0.6 }) }
@@ -2340,6 +2350,20 @@ Set-InsightAppTakeOver -Context $Ctx -Apps $Apps
         })
     }
     else {
+        # A package source from the import (export file, notes of another tenant) is used only after a yes per app;
+        # otherwise, and when it is not a plain https URL, the app gets the package source of these settings
+        $own = if ($script:Settings.PackageSource) { [string]$script:Settings.PackageSource } else { 'the Chocolatey community repository' }
+        foreach ($a in $picked) {
+            $use = $false
+            $src = [string]$a.PackageSource
+            if ($a.Source -eq 'Chocolatey' -and $src -and $src -ne [string]$script:Settings.PackageSource) {
+                if (Test-InsightFeedUrl $src) {
+                    $use = Confirm-Action "'$($a.DisplayName)' comes with its own Chocolatey package source:`n`n$src`n`nDevices would install it from there. Your package source: $own.`n`nUse the package source of the import for this app? (No = your package source)" 'Package source of the import'
+                }
+                else { Write-UiLog "$($a.DisplayName): the offered package source is refused (only https without user, password or query), your package source is used." 'Warning' }
+            }
+            $a | Add-Member -NotePropertyName UseOfferedSource -NotePropertyValue $use -Force
+        }
         $work = 'param($Candidates, $Existing) New-InsightRecreatedApps -Candidates $Candidates -ExistingApps $Existing'
         [void](Start-UiTask -Kind 'takeover' -Title "Creating $($picked.Count) app(s) from the import" -Display 'Import: create apps' -NeedsAuth -Arguments @{ Candidates = $picked; Existing = @($script:ImportExisting) } -Work $work -OnDone {
             param($Result, $Job)

@@ -10,11 +10,13 @@
 #   beta  GET/POST/PATCH /deviceManagement/deviceHealthScripts (+ /assign, /deviceRunStates)   Remediations
 #   v1.0  GET   /oauth2PermissionGrants                                      consent check (admin sign-in)
 
-# Where the device scripts write the last result of one app (feature/schedule). One place to align later.
-# {0} = package folder name. Chocolatey: package id, winget: id with every character outside A-Za-z0-9._- replaced by _.
+# Where the device scripts write the last result of one app (Save-LastResult in Get-DeviceScriptCommon of the core
+# script), relative to %ProgramFiles%. {0} = package folder name. Chocolatey: package id, winget: id with every
+# character outside A-Za-z0-9._- replaced by _. Fields: lastAttempt, action, status, exitCode, cause, installedVersion,
+# targetVersion (Tests\Check-Insight.ps1 checks that the status script reads what Save-LastResult writes).
 $script:LastResultFile = @{
-    Chocolatey = 'IntuneChocoUpdates\{0}\last-result.json'
-    Winget     = 'IntuneWingetDeployment\{0}\last-result.json'
+    Chocolatey = 'IntuneChocoDeployment\Chocolatey\{0}\last-result.json'
+    Winget     = 'IntuneChocoDeployment\Winget\{0}\last-result.json'
 }
 $script:StatusScriptName = 'IntuneChocoDeployment status'
 $script:Hooks = @{}
@@ -173,7 +175,7 @@ function ConvertTo-InsightApp {
     $Notes = [string]$Raw.notes
     $Result = [ordered]@{
         Id = [string]$Raw.id; DisplayName = [string]$Raw.displayName; Kind = 'Other'; Source = ''; Package = $null; Version = ''
-        UpdateMode = $DefaultUpdateMode; GraceHours = $DefaultGraceHours; PackageSource = ''; HasPolicy = $false
+        UpdateMode = $DefaultUpdateMode; GraceHours = $DefaultGraceHours; PackageSource = ''; UseOfferedSource = $false; HasPolicy = $false
         Infrastructure = $false; Managed = $false; Created = $Raw.createdDateTime; AppVersion = $Raw.displayVersion
         Duplicate = $false; DuplicateOf = $null; ProposedAction = 'CannotManage'; Reason = ''
     }
@@ -258,6 +260,16 @@ function Set-InsightAppTakeOver {
     }
 }
 
+function Test-InsightFeedUrl {
+    <#
+        A package source offered by an import (export file, notes of another tenant) is only ever used as an absolute
+        https URL without user info, query or fragment: no attacker feed with credentials, no UNC or file path.
+    #>
+    param([string]$Url)
+    $Uri = $null
+    return ([uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$Uri) -and $Uri.Scheme -eq 'https' -and -not $Uri.UserInfo -and -not $Uri.Query -and -not $Uri.Fragment)
+}
+
 function Remove-InsightUserInfo([string]$Url) {
     # No credentials or tokens in an export: drop user info, query and fragment of a feed URL
     if (-not $Url) { return '' }
@@ -278,7 +290,10 @@ function Export-InsightManagedApps {
 }
 
 function Read-InsightExportFile {
-    <# Reads an export file into candidates (ProposedAction Recreate). #>
+    <#
+        Reads an export file into candidates (ProposedAction Recreate). PackageSource is what the file offers; it is
+        only used when UseOfferedSource is set after an explicit confirmation per app (see New-InsightRecreatedApps).
+    #>
     param([Parameter(Mandatory)][string]$Path)
     $Document = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
     if ($Document.format -ne 'IntuneChocoDeployment.Export' -or [int]$Document.version -gt 1) { throw 'This is not an export file of this tool (or from a newer version).' }
@@ -286,7 +301,7 @@ function Read-InsightExportFile {
         if ($Item.source -notin 'Chocolatey', 'Winget' -or $Item.package -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') { throw "Invalid entry in the export file: $($Item.package)" }
         [pscustomobject]@{ Id = $null; DisplayName = [string]$Item.displayName; Kind = 'Export'; Source = [string]$Item.source; Package = [string]$Item.package
             Version = [string]$Item.version; UpdateMode = [string]$Item.updateMode; GraceHours = [int]$Item.graceHours; PackageSource = [string]$Item.packageSource
-            Managed = $false; Infrastructure = $false; Duplicate = $false; ProposedAction = 'Recreate'; Reason = 'from export file' }
+            UseOfferedSource = $false; Managed = $false; Infrastructure = $false; Duplicate = $false; ProposedAction = 'Recreate'; Reason = 'from export file' }
     }
 }
 
@@ -303,15 +318,23 @@ function New-InsightRecreatedApps {
     <#
         Recreates selected apps (from another tenant or an export file) in the current tenant through the tool's
         deploy functions. Apps already managed here (same package) are skipped. Assignment defaults to None.
+        Chocolatey apps use the package source of this tool's settings. The source the import offers (PackageSource)
+        is used only when the caller set UseOfferedSource after asking for this app, and only when it is an https URL
+        without user info and query (Test-InsightFeedUrl); otherwise the app is not created.
     #>
     param([Parameter(Mandatory)][object[]]$Candidates, [object[]]$ExistingApps = @(), [ValidateSet('Available', 'Required', 'None')][string]$Assignment = 'None')
     foreach ($App in $Candidates) {
         $Exists = @($ExistingApps | Where-Object { $_.Managed -and $_.Package -and $_.Package -eq $App.Package -and $_.Source -eq $App.Source }).Count -gt 0
         if ($Exists) { [pscustomobject]@{ Package = $App.Package; Done = $false; Message = 'already managed in this tenant' }; continue }
+        $UseOffered = $App.Source -eq 'Chocolatey' -and [string]$App.PackageSource -and $App.PSObject.Properties['UseOfferedSource'] -and $App.UseOfferedSource -eq $true
+        if ($UseOffered -and -not (Test-InsightFeedUrl ([string]$App.PackageSource))) {
+            [pscustomobject]@{ Package = $App.Package; Done = $false; Message = 'package source refused: only https URLs without user name, password or query are taken from an import' }; continue
+        }
         try {
             $Args = @{ Assignment = $Assignment; UpdateMode = $App.UpdateMode; GraceHours = $App.GraceHours; Version = $(if ($App.Version) { $App.Version } else { 'latest' }); NoIconPrompt = $true }
             if ($App.Source -eq 'Winget') { & $script:Hooks.NewWingetApp -WingetId $App.Package @Args | Out-Null }
-            else { & $script:Hooks.NewChocoApp -ChocoName $App.Package -PackageSource $App.PackageSource @Args | Out-Null }
+            elseif ($UseOffered) { & $script:Hooks.NewChocoApp -ChocoName $App.Package -PackageSource ([string]$App.PackageSource) @Args | Out-Null }
+            else { & $script:Hooks.NewChocoApp -ChocoName $App.Package @Args | Out-Null }
             [pscustomobject]@{ Package = $App.Package; Done = $true; Message = 'created' }
         }
         catch { [pscustomobject]@{ Package = $App.Package; Done = $false; Message = $_.Exception.Message } }
@@ -420,13 +443,13 @@ function Get-InsightStatusScriptText {
         a margin (1,900); failed apps come first with details, the others as "package=version", the rest is counted
         in x. Always exit 0 (a detection that only reports). Plain ASCII, Windows PowerShell 5.1.
     #>
-    $Choco = ($script:LastResultFile.Chocolatey -split '\\')[0]
-    $Winget = ($script:LastResultFile.Winget -split '\\')[0]
+    $Choco = $script:LastResultFile.Chocolatey -replace '\\\{0\}\\last-result\.json$', ''
+    $Winget = $script:LastResultFile.Winget -replace '\\\{0\}\\last-result\.json$', ''
     $Text = @'
 # IntuneChocoDeployment status: detection only, reports the last result of every managed app (runs as SYSTEM).
 param(
-    [string]$ChocoRoot = (Join-Path $env:ProgramData '__CHOCO__'),
-    [string]$WingetRoot = (Join-Path $env:ProgramData '__WINGET__'),
+    [string]$ChocoRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__CHOCO__'),
+    [string]$WingetRoot = (Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) '__WINGET__'),
     [int]$Limit = 1900
 )
 $ErrorActionPreference = 'SilentlyContinue'
@@ -435,7 +458,7 @@ $Good = New-Object System.Collections.ArrayList
 $Count = 0
 foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot))) {
     if (-not (Test-Path $Entry[1])) { continue }
-    foreach ($Dir in @(Get-ChildItem $Entry[1] -Directory)) {
+    foreach ($Dir in @(Get-ChildItem -LiteralPath $Entry[1] -Directory | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
         $File = Join-Path $Dir.FullName 'last-result.json'
         if (-not (Test-Path $File)) { continue }
         $Count++
@@ -448,7 +471,7 @@ foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot))) {
         if ($Cause.Length -gt 48) { $Cause = $Cause.Substring(0, 48) }
         $Code = 0
         try { $Code = [int]$R.exitCode } catch { }
-        if ($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) { [void]$Good.Add(('{0}={1}' -f $Dir.Name, $R.installedVersion)) }
+        if (($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) -and [string]$R.status -ne 'failed') { [void]$Good.Add(('{0}={1}' -f $Dir.Name, $R.installedVersion)) }
         else { [void]$Failed.Add([ordered]@{ p = $Dir.Name; s = $Entry[0]; t = $Time; a = [string]$R.action; e = $Code; c = $Cause; v = [string]$R.installedVersion; g = [string]$R.targetVersion }) }
     }
 }
@@ -606,6 +629,6 @@ function Expand-InsightLogs {
 
 Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, Invoke-InsightGraph, Get-InsightRequiredScopes, Get-InsightScopeSet,
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
-Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
+Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Test-InsightFeedUrl, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
 Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
 Set-InsightStatusScript, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs

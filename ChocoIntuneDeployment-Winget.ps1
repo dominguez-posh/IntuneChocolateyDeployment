@@ -147,16 +147,16 @@ function New-WingetPackageScripts {
     # Plain ASCII on purpose: Windows PowerShell reads BOM-less files as ANSI
     $GetWinget = @'
 function Get-Winget {
-    # winget.exe is not in the path of SYSTEM: take the newest App Installer for this processor
+    # winget.exe is not in the path of SYSTEM: take the newest App Installer for this processor. Only from the
+    # WindowsApps folder (TrustedInstaller); never from PATH, where a user could have put another winget.exe.
     $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-    $Folders = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
+    $Apps = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) "WindowsApps"
+    $Folders = @(Get-ChildItem -Path $Apps -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName "winget.exe") })
     $Preferred = @($Folders | Where-Object { $_.Name -like "*_$($Arch)__*" })
     if ($Preferred.Count -gt 0) { $Folders = $Preferred }
     $Newest = $Folders | Sort-Object { try { [version](($_.Name -split "_")[1]) } catch { [version]"0.0" } } -Descending | Select-Object -First 1
     if ($Newest) { return Join-Path $Newest.FullName "winget.exe" }
-    $InPath = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($InPath) { return $InPath.Source }
     return $null
 }
 '@
@@ -185,9 +185,7 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
     exit $LASTEXITCODE
 }
 
-$Root = Join-Path $env:ProgramData "IntuneWingetDeployment"
 $SafeId = $Id -replace '[^A-Za-z0-9._-]', '_'
-$AppRoot = Join-Path $Root $SafeId
 $LogId = $SafeId
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 $ResultFile = ""
@@ -195,8 +193,15 @@ $Sched = $ScheduleJson | ConvertFrom-Json
 
 __COMMON__
 
+# The helpers of this app: %ProgramFiles%\IntuneChocoDeployment\Winget\<id> (see $ToolRoot). The tasks of older
+# versions (same names, helpers under %ProgramData%\IntuneWingetDeployment) are replaced below; that old folder is not
+# touched.
+$Root = Join-Path $ToolRoot "Winget"
+$AppRoot = Join-Path $Root $SafeId
+
 # The update helpers run as SYSTEM: their folders must not be writable for users
 try {
+    Protect-Folder $ToolRoot
     Protect-Folder $Root
     Protect-Folder (Join-Path $Root "Logs")
 }
@@ -234,8 +239,6 @@ $TaskNames = @("Update $SafeId on startup", "Update $SafeId now", "Check $SafeId
 function Remove-UpdateTasks {
     foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 }
-# The update script of older versions of this tool
-Remove-Item -Path (Join-Path $Root "$SafeId.ps1") -Force -ErrorAction SilentlyContinue
 
 if ($Uninstall) {
     if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit 1618 }
@@ -405,16 +408,17 @@ $Id = '__ID__'
 $Policy = '__POLICY__'
 # Installed with the update policy that is set in Intune (otherwise Intune runs install.ps1 again to apply it)
 $SafeId = $Id -replace '[^A-Za-z0-9._-]', '_'
-$Marker = Join-Path $env:ProgramData "IntuneWingetDeployment\$SafeId\policy.txt"
+$ProgramFilesDir = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+$Marker = Join-Path $ProgramFilesDir "IntuneChocoDeployment\Winget\$SafeId\policy.txt"
 if (-not (Test-Path $Marker) -or (Get-Content -Path $Marker -Raw).Trim() -ne $Policy) { exit 1 }
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-$Folders = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
+$Folders = @(Get-ChildItem -Path (Join-Path $ProgramFilesDir "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue |
     Where-Object { Test-Path (Join-Path $_.FullName "winget.exe") })
 $Preferred = @($Folders | Where-Object { $_.Name -like "*_$($Arch)__*" })
 if ($Preferred.Count -gt 0) { $Folders = $Preferred }
 $Newest = $Folders | Sort-Object { try { [version](($_.Name -split "_")[1]) } catch { [version]"0.0" } } -Descending | Select-Object -First 1
-# WindowsApps is readable for SYSTEM (Intune); a signed-in user finds winget through its app alias
-$Winget = if ($Newest) { Join-Path $Newest.FullName "winget.exe" } else { (Get-Command winget.exe -ErrorAction SilentlyContinue).Source }
+# WindowsApps is readable for SYSTEM (Intune runs this detection as SYSTEM); never winget.exe from PATH
+$Winget = if ($Newest) { Join-Path $Newest.FullName "winget.exe" } else { $null }
 if (-not $Winget) { exit 1 }
 # The exit code tells whether it is installed; the table output cuts long ids ("...")
 & $Winget list --id $Id --exact --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-Null
