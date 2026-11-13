@@ -369,8 +369,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $zip = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
                 $consistent = @($script:TenantRowList | Where-Object { $_.Data.Package } | ForEach-Object { $want = Get-PackageIcon $_.Data.Package $_.Data.Source; if ($want) { $_['Icon'] -eq $want -and $_['MonoVis'] -eq 'Collapsed' } else { $_['MonoVis'] -eq 'Visible' } })
                 Test-Smoke 'rows show the package icon (feed cache) where there is one, the letter tile otherwise' ($consistent.Count -ge 1 -and $consistent -notcontains $false) ($consistent -join ',')
-                $choco = @($script:TenantRowList | Where-Object { $_.Data.IsChocolatey })[0]
-                Test-Smoke 'Chocolatey dependency uses the Chocolatey icon' ($choco['Icon'] -eq (Get-IconFromMeta 'chocolatey' 'Chocolatey')) $choco['Icon']
+                $rt = @($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' })[0]
+                Test-Smoke 'PackTune Runtime is the dependency row (icon of its Intune app or the letter tile)' ($rt -and $rt.Data.IsDependency -and ($rt['Icon'] -or $rt['MonoVis'] -eq 'Visible'))
                 # Scratch: no icon in the feed data, but the Intune app holds one (the fake Graph returns it on the single-app read)
                 $scratch = @($script:TenantApps | Where-Object { $_.Package -eq 'scratch' })[0]
                 $script:Shared.Meta['scratch'].IconUrl = ''
@@ -527,7 +527,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if ($s.Phase -eq 0) {
             if (-not (Test-Idle)) { return $false }
             Show-Page 'Tenant'; Update-TenantRows -Force
-            Test-Smoke 'banner offers the missing winget runtime dependency' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '*VLC*') $ui.TxtBannerRuntime.Text
+            Test-Smoke 'banner offers to switch the app without the runtime dependency' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '1 app still uses*') $ui.TxtBannerRuntime.Text
             $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'VideoLAN.VLC' })[0]
             Test-Smoke 'panel of the app mentions it too' ($ui.TxtDependencyNote.Visibility -eq 'Visible')
             Save-SmokeShot '09-tenant-runtime-banner'
@@ -539,6 +539,81 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $vlc = Get-StoreApps | Where-Object { $_.notes -like 'PoweredByWinget*' }
         Test-Smoke 'dependency added, banner gone' (@($vlc.dependencies).Count -eq 1 -and $ui.BannerRuntime.Visibility -eq 'Collapsed') "$(@($vlc.dependencies).Count) / $($ui.BannerRuntime.Visibility)"
         $true } }
+    @{ Name = 'PackTune Runtime states: Ready, Migrate, Missing'; Phase = 0; Do = {
+        param($s)
+        function Write-Store($Apps) { ConvertTo-Json -InputObject @($Apps) -Depth 6 | Set-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') }
+        function Get-DepsItem { Get-ReadinessItems | Where-Object Key -in 'deps', 'tenant' | Select-Object -First 1 }
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'; Start-DependencyCheck
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Test-Smoke 'Ready: one dependency item, green, no banners' ($script:RuntimeInfo.State -eq 'Ready' -and $item.Title -eq 'Dependency app (PackTune Runtime)' -and $item.State -eq 'ok' -and $ui.BannerRuntime.Visibility -eq 'Collapsed' -and $ui.BannerOldDeps.Visibility -eq 'Collapsed') "$($script:RuntimeInfo.State) $($item.State)"
+                # Migrate: two old dependency apps in the tenant, 7-Zip still depends on the old Chocolatey app
+                $all = @(Get-StoreApps)
+                $mk = { param($id, $name, $notes) [pscustomobject]@{ id = $id; displayName = $name; notes = $notes; createdDateTime = (Get-Date).ToString('o'); dependencies = @(); supersedence = @(); assignments = @() } }
+                $putty = @($all | Where-Object { $_.notes -like '*package=7zip.install;*' })[0]
+                $putty.dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' })
+                Write-Store (@($all) + (& $mk 'old-choco' 'Chocolatey' 'FiredWithPowershell') + (& $mk 'old-winget' 'winget runtime' 'WingetRuntimeApp'))
+                Start-DependencyCheck
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Test-Smoke 'Migrate: state found, item offers Switch (optional, not part of the set up)' ($script:RuntimeInfo.State -eq 'Migrate' -and $item.Fix -eq 'Switch' -and $item.Optional -and $item.State -eq 'warn') "$($script:RuntimeInfo.State) $($item.Fix)"
+                Update-TenantRows -Force
+                Test-Smoke 'banner: apps still use the old dependency apps, Switch to PackTune Runtime' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '1 app still uses the old dependency apps*' -and $ui.BtnBannerRuntime.Content -eq 'Switch to PackTune Runtime') $ui.TxtBannerRuntime.Text
+                Test-Smoke 'the old dependency apps are listed as old, next to PackTune Runtime' ((@($script:TenantRowList | Where-Object { $_['Title'] -like '*(old)' }).Count -eq 2) -and (@($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' }).Count -eq 1)) (($script:TenantRowList | ForEach-Object { $_['Title'] }) -join ', ')
+                Test-Smoke 'old dependency app nothing uses is offered for removal, never automatic' ($ui.BannerOldDeps.Visibility -eq 'Visible' -and $ui.TxtBannerOldDeps.Text -like '*winget runtime*' -and @(Get-StoreApps | Where-Object { $_.id -eq 'old-winget' }).Count -eq 1) $ui.TxtBannerOldDeps.Text
+                Test-Smoke 'set up everything does not switch the apps' (@(Get-ReadinessItems | Where-Object { $_.Key -eq 'deps' -and $_.Optional }).Count -eq 1)
+                Save-SmokeShot '27-tenant-migrate'
+                & $script:ClickActions[$ui.BtnBannerRuntime]
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                $putty = @(Get-StoreApps | Where-Object { $_.notes -like '*package=7zip.install;*' })[0]
+                $runtime = @(Get-StoreApps | Where-Object { $_.displayName -eq 'PackTune Runtime' })[0]
+                Test-Smoke 'switch (confirmed, as a job): the app depends on PackTune Runtime only' (@($putty.dependencies).Count -eq 1 -and @($putty.dependencies)[0].targetId -eq $runtime.id) (($putty.dependencies | ConvertTo-Json -Compress))
+                Test-Smoke 'state is Ready, banner gone, both old apps unused now and offered for removal' ($script:RuntimeInfo.State -eq 'Ready' -and $ui.BannerRuntime.Visibility -eq 'Collapsed' -and $ui.BannerOldDeps.Visibility -eq 'Visible' -and $ui.TxtBannerOldDeps.Text -like '2 old dependency apps*') $ui.TxtBannerOldDeps.Text
+                Save-SmokeShot '28-tenant-old-deps'
+                & $script:ClickActions[$ui.BtnBannerOldDeps]
+                $s.Phase = 4; return $false
+            }
+            4 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'old dependency apps removed on request, banner gone' (@(Get-StoreApps | Where-Object { $_.id -in 'old-choco', 'old-winget' }).Count -eq 0 -and $ui.BannerOldDeps.Visibility -eq 'Collapsed' -and -not @($script:TenantRowList | Where-Object { $_['Title'] -like '*(old)' }).Count)
+                # Missing: the runtime app is gone from the tenant
+                Write-Store @(Get-StoreApps | Where-Object { $_.displayName -ne 'PackTune Runtime' })
+                Start-DependencyCheck
+                $s.Phase = 5; return $false
+            }
+            5 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Show-Page 'Start'
+                Test-Smoke 'Missing: red item with Create, Set up everything offered' ($script:RuntimeInfo.State -eq 'Missing' -and $item.State -eq 'bad' -and $item.Fix -eq 'Create' -and $ui.BtnSetupAll.Visibility -eq 'Visible') "$($script:RuntimeInfo.State) $($item.State)"
+                Save-SmokeShot '29-start-runtime-missing'
+                Start-SetupAll
+                $s.Phase = 6; return $false
+            }
+            6 {
+                if ($script:SetupRunning -or -not (Test-Idle)) { return $false }
+                Test-Smoke 'Set up everything creates PackTune Runtime' (@(Get-StoreApps | Where-Object { $_.displayName -eq 'PackTune Runtime' }).Count -eq 1 -and $script:RuntimeInfo.State -in 'Migrate', 'Ready') $script:RuntimeInfo.State
+                if ($script:RuntimeInfo.State -eq 'Migrate') { Show-Page 'Tenant'; Update-TenantRows -Force; & $script:ClickActions[$ui.BtnBannerRuntime] }
+                $s.Phase = 7; return $false
+            }
+            7 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'all apps depend on the new runtime: Ready again' ($script:RuntimeInfo.State -eq 'Ready') $script:RuntimeInfo.State
+                $true
+            }
+        } } }
     @{ Name = 'update settings and schedule'; Phase = 0; Do = {
         param($s)
         switch ($s.Phase) {
