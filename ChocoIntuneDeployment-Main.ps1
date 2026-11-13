@@ -599,7 +599,9 @@ function New-IntuneChocoAppRegistration {
         [scriptblock]$UrlHandler,
         [scriptblock]$ShouldCancel,
         # Graph endpoint (tests point it to a stand-in)
-        [string]$GraphUrl = "https://graph.microsoft.com"
+        [string]$GraphUrl = "https://graph.microsoft.com",
+        # A token of the setup sign-in (the GUI signs in with its embedded window); empty = sign in here, in the browser
+        [object]$Token
     )
     # Signs in once with Microsoft's own "Microsoft Graph Command Line Tools" app (the one Connect-MgGraph uses) to
     # create the app registration this tool signs in with, and grants the admin consent for it. Needs an account that
@@ -609,8 +611,8 @@ function New-IntuneChocoAppRegistration {
     $Graph = $GraphUrl.TrimEnd("/")
     $SignInTenant = if ($TenantID) { $TenantID } else { "organizations" }
     $SetupScopes = (@("Application.ReadWrite.All", "DelegatedPermissionGrant.ReadWrite.All", "User.Read") | ForEach-Object { "https://graph.microsoft.com/$_" }) -join " "
-    Write-Host "Setup: sign in with an administrator account in your browser (creates the app registration and grants the consent)"
-    $Token = Invoke-IntuneChocoPkceSignIn -TenantID $SignInTenant -ClientID $SetupClient -Scope $SetupScopes -Authority $Authority -UrlHandler $UrlHandler -ShouldCancel $ShouldCancel
+    if (-not $Token) { Write-Host "Setup: sign in with an administrator account in your browser (creates the app registration and grants the consent)" }
+    if (-not $Token) { $Token = Invoke-IntuneChocoPkceSignIn -TenantID $SignInTenant -ClientID $SetupClient -Scope $SetupScopes -Authority $Authority -UrlHandler $UrlHandler -ShouldCancel $ShouldCancel }
     $Claims = Get-IntuneChocoTokenClaims $Token.access_token
     $Headers = @{ Authorization = "Bearer $($Token.access_token)"; "Content-Type" = "application/json" }
     $Call = {
@@ -2490,6 +2492,7 @@ function Get-IntuneChocoTenantApps {
             Source       = $(if ($IsWinget) { "Winget" } else { "Chocolatey" })
             IsChocolatey = $IsChocolatey
             Created      = $App.createdDateTime
+            Modified     = $App.lastModifiedDateTime
             AppVersion   = $App.displayVersion
             # Update policy ("" = always the latest version); apps from older versions: latest, update at startup
             Version      = $Policy.Version

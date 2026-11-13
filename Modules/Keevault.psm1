@@ -58,7 +58,7 @@ function Connect-KeevaultMcp {
         [void](Invoke-KeevaultMcpRequest -Client $client -Method 'initialize' -TimeoutSeconds 20 -OnWait $OnWait -Params @{
             protocolVersion = '2025-06-18'
             capabilities    = @{}
-            clientInfo      = @{ name = 'Intune Chocolatey Deployment'; version = '2.1.0' }
+            clientInfo      = @{ name = 'PackTune'; version = '2.1.0' }
         })
         Send-KeevaultMcpMessage -Client $client -Message @{ jsonrpc = '2.0'; method = 'notifications/initialized' }
     }
@@ -341,24 +341,36 @@ function Invoke-IntuneChocoBrowserSignIn {
     if ($LoginHint) { $query.login_hint = $LoginHint }
     $url = "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/authorize?" + (($query.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, [Uri]::EscapeDataString($_.Value) }) -join '&')
 
-    # Window in the shared look: slate header with the hint, browser below
+    # Window in the Windows 11 look of the tool: hint on top, browser in the middle, Cancel below; modal to the owner
+    $brush = New-Object System.Windows.Media.BrushConverter
     $win = New-Object System.Windows.Window
     $win.Title = $Title
     $win.Width = 500; $win.Height = 700
+    $win.Background = $brush.ConvertFrom('#F3F3F3')
+    $win.FontFamily = New-Object System.Windows.Media.FontFamily('Segoe UI Variable Text, Segoe UI')
     $win.ResizeMode = 'CanResize'
     $win.ShowInTaskbar = $true
     if ($Owner) { $win.Owner = $Owner; $win.WindowStartupLocation = 'CenterOwner' } else { $win.WindowStartupLocation = 'CenterScreen' }
     $grid = New-Object System.Windows.Controls.DockPanel
-    $head = New-Object System.Windows.Controls.Border
-    $head.Background = (New-Object System.Windows.Media.BrushConverter).ConvertFrom('#0F172A')
-    $head.Padding = '16,10'
-    [System.Windows.Controls.DockPanel]::SetDock($head, 'Top')
-    $text = New-Object System.Windows.Controls.TextBlock
-    $text.Text = if ($Hint) { $Hint } else { 'Sign in with your Microsoft account.' }
-    $text.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFrom('#CBD5E1')
-    $text.TextWrapping = 'Wrap'; $text.FontFamily = 'Segoe UI'; $text.FontSize = 12
-    $head.Child = $text
-    [void]$grid.Children.Add($head)
+    if ($Hint) {
+        $head = New-Object System.Windows.Controls.Border
+        $head.Padding = '16,10'
+        [System.Windows.Controls.DockPanel]::SetDock($head, 'Top')
+        $text = New-Object System.Windows.Controls.TextBlock
+        $text.Text = $Hint
+        $text.Foreground = $brush.ConvertFrom('#5F5F5F')
+        $text.TextWrapping = 'Wrap'; $text.FontSize = 12
+        $head.Child = $text
+        [void]$grid.Children.Add($head)
+    }
+    $foot = New-Object System.Windows.Controls.Border
+    $foot.Padding = '16,10'; $foot.Background = $brush.ConvertFrom('#F7F7F7'); $foot.BorderBrush = $brush.ConvertFrom('#E5E5E5'); $foot.BorderThickness = '0,1,0,0'
+    [System.Windows.Controls.DockPanel]::SetDock($foot, 'Bottom')
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = 'Cancel'; $cancel.HorizontalAlignment = 'Right'; $cancel.Padding = '18,6'; $cancel.IsCancel = $true
+    $cancel.Add_Click({ $win.Close() })
+    $foot.Child = $cancel
+    [void]$grid.Children.Add($foot)
 
     $userData = Join-Path ([IO.Path]::GetTempPath()) ('IntuneChocoSignIn-' + [guid]::NewGuid().ToString('N'))
     $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
@@ -490,7 +502,7 @@ function Connect-IntuneChocoWithKeevault {
     )
     $client = Connect-KeevaultMcp -OnWait $OnWait
     try {
-        $request = @{ purpose = "Intune Chocolatey Deployment: sign in to Microsoft Intune (Graph), tenant $TenantID" }
+        $request = @{ purpose = "PackTune: sign in to Microsoft Intune (Graph), tenant $TenantID" }
         # Keevault lists the accounts of this tenant first (older versions show only those)
         if ($TenantID -match '\.' -and $TenantID -notmatch '^[0-9a-f-]{36}$') { $request.tenant = $TenantID }
         Write-SignInLog 'Keevault: choose the Microsoft account in Keevault ...'

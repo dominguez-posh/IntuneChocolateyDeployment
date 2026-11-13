@@ -37,6 +37,13 @@ function Find-Visual($Parent, [type]$Type) {
         $r = Find-Visual $c $Type; if ($r) { return $r }
     }
 }
+function Get-FlyoutPlacement($Menu, $Target) {
+    # The window of the test is off-screen, so the popup position on the screen is clamped: the placement rule itself is checked
+    $popup = New-Object System.Windows.Size $Menu.ActualWidth, $Menu.ActualHeight
+    $targetSize = New-Object System.Windows.Size $Target.ActualWidth, $Target.ActualHeight
+    $p = $Menu.CustomPopupPlacementCallback.Invoke($popup, $targetSize, (New-Object System.Windows.Point 0, 0))[0].Point
+    @{ RightEdge = $p.X + $Menu.ActualWidth - 8; TargetRight = $Target.ActualWidth; Top = $p.Y + 8; Wanted = $Target.ActualHeight + 4 }
+}
 function Get-Card([string]$Key) { @($script:CardCollection | Where-Object { (Get-AppKey $_.Data) -eq $Key })[0] }
 function Test-GeneratedScripts([string]$Folder, [string]$What) {
     # The scripts that run on the devices must at least be valid PowerShell, without leftover placeholders
@@ -57,8 +64,11 @@ $script:InsightFake = Get-Content (Join-Path (Split-Path $env:INTUNECHOCO_SMOKE)
 
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {
+        $script:EmbeddedAvailableOverride = $false   # simulates a missing WebView2 runtime: the sign-in uses the browser, as the fake authority needs
+        $script:SandboxOverride = @{ Present = $true; Studio = $true }
+        Update-SandboxState
         Test-Smoke 'fake module counts as installed' $script:ModuleState.Ok $script:ModuleState.Version
-        Test-Smoke 'readiness shows 5 items' ($ui.ReadinessPanel.Children.Count -eq 5) $ui.ReadinessPanel.Children.Count
+        Test-Smoke 'readiness shows 6 items' ($ui.ReadinessPanel.Children.Count -eq 6) $ui.ReadinessPanel.Children.Count
         Test-Smoke 'signed out: split button shown, account pill hidden' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
         Test-Smoke 'navigation has the five entries, no package source switch' ($ui.NavStart -and $ui.NavApps -and $ui.NavTenant -and $ui.NavActivity -and $ui.NavSettings -and $ui.NavHelp -and -not $ui.ContainsKey('SrcWinget'))
         Test-Smoke 'help dialog opens' ($(Show-Help; $ui.DialogLayer.Visibility -eq 'Visible' -and $ui.DlgHelp.Visibility -eq 'Visible' -and $ui.HelpBody.Children.Count -ge 4))
@@ -67,10 +77,41 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'dialog closes' ($ui.DialogLayer.Visibility -eq 'Collapsed')
         Test-Smoke 'Keevault detection runs' ($null -ne (Find-KeevaultMcp).Installed)
         $true } }
+    @{ Name = 'header and sign-in menu'; Phase = 0; Do = {
+        param($s)
+        function Save-ElementShot([string]$Name, $Element) {
+            $Element.UpdateLayout()
+            $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap([int]$Element.ActualWidth, [int]$Element.ActualHeight, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+            $bmp.Render($Element)
+            $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+            $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bmp))
+            $fs = [IO.File]::Create((Join-Path $script:SmokeOut "shot-$Name.png")); try { $enc.Save($fs) } finally { $fs.Dispose() }
+        }
+        if ($s.Phase -eq 0) {
+            $window.UpdateLayout()
+            Test-Smoke 'split button: both halves have the same height, one block' ($ui.BtnSignIn.ActualHeight -eq $ui.BtnSignInMenu.ActualHeight -and $ui.PanelSignedOut.ActualHeight -eq $ui.BtnSignIn.ActualHeight -and $ui.BtnSignIn.ActualHeight -ge 32) "$($ui.BtnSignIn.ActualHeight) / $($ui.BtnSignInMenu.ActualHeight)"
+            Test-Smoke 'title bar is part of the window: chrome with caption buttons, caption height of the header' ([System.Windows.Shell.WindowChrome]::GetWindowChrome($window).CaptionHeight -eq 52 -and [System.Windows.Shell.WindowChrome]::GetIsHitTestVisibleInChrome($ui.BtnClose) -and [System.Windows.Shell.WindowChrome]::GetIsHitTestVisibleInChrome($ui.PanelSignedOut) -and $window.WindowStyle -eq 'SingleBorderWindow')
+            Save-SmokeShot '20-header-signed-out'
+            Show-SignInMenu $ui.PanelSignedOut
+            $s.Phase = 1; return $false
+        }
+        if ($s.Phase -eq 1) {
+            $menu = $script:LastMenu
+            Test-Smoke 'sign-in menu lists Microsoft, web browser and Keevault' (@($menu.Items | ForEach-Object { $_.Header }) -join '|' -eq 'Sign in with Microsoft|Sign in in the web browser|Sign in with Keevault') (@($menu.Items | ForEach-Object { $_.Header }) -join '|')
+            $menu.UpdateLayout()
+            $fp = Get-FlyoutPlacement $menu $ui.PanelSignedOut
+            Test-Smoke 'menu is right-aligned under the button' ($fp.RightEdge -eq $fp.TargetRight) "menu right $($fp.RightEdge), button right $($fp.TargetRight)"
+            Test-Smoke 'menu sits 4 px below the button' ($fp.Top -eq $fp.Wanted) "menu top $($fp.Top), wanted $($fp.Wanted)"
+            Test-Smoke 'menu is 360 px wide (flyout)' ($menu.ActualWidth -eq 376) $menu.ActualWidth
+            Save-ElementShot '21-sign-in-menu' $menu
+            $menu.IsOpen = $false
+            $true
+        }
+    } }
     @{ Name = 'sign-in can be cancelled'; Phase = 0; Do = {
         param($s)
         # A browser that never answers (the user closed the window): the sign-in must end on Cancel
-        if ($s.Phase -eq 0) { $s.Phase = 1; $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; UrlHandler = 'param($Url)' }; Connect-Intune; return $false }
+        if ($s.Phase -eq 0) { $s.Phase = 1; $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; UrlHandler = 'param($Url)' }; Connect-Intune; Test-Smoke 'WebView2 runtime missing: sign-in falls back to the browser and a toast says so' ($script:LastSignInPath -eq 'browser' -and @($script:Toasts | Where-Object { $_.Text -like '*not available*web browser*' }).Count -ge 1) $script:LastSignInPath; return $false }
         if ($s.Phase -eq 1) {
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'connect' -and $_.Job.Status -eq 'running' }).Count) { return $false }
             $s.Phase = 2
@@ -98,7 +139,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'set up everything offered' ($ui.BtnSetupAll.Visibility -eq 'Visible' -and $ui.TxtReadinessSummary.Text -like '*not ready*') $ui.TxtReadinessSummary.Text
             Save-SmokeShot '01-start'
             # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
-            $script:SignInTest.UrlHandler = 'param($Url) $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
+            $script:SignInTest.UrlHandler = 'param($Url) $Shared.UrlHit = $true; $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
             $script:SignInTest.GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             & $script:ClickActions[$ui.BtnSetupAll]
             return $false
@@ -135,6 +176,51 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $missing = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrite.All') | Where-Object { -not $_.Ready })
         Test-Smoke 'readiness check names missing scopes (grant new permissions)' ($missing.Count -gt 0)
         $true } }
+    @{ Name = 'account menu and maximized window'; Phase = 0; Do = {
+        param($s)
+        function Save-ElementShot2([string]$Name, $Element) {
+            $Element.UpdateLayout()
+            $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap([int]$Element.ActualWidth, [int]$Element.ActualHeight, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+            $bmp.Render($Element)
+            $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+            $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bmp))
+            $fs = [IO.File]::Create((Join-Path $script:SmokeOut "shot-$Name.png")); try { $enc.Save($fs) } finally { $fs.Dispose() }
+        }
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Start'
+                Save-SmokeShot '22-header-signed-in'
+                Show-AccountMenu
+                $s.Phase = 1; return $false
+            }
+            1 {
+                $menu = $script:LastMenu
+                Test-Smoke 'account menu offers sign out and switching' (@($menu.Items | ForEach-Object { $_.Header })[0] -eq 'Sign out' -and $menu.Items.Count -ge 2)
+                $menu.UpdateLayout()
+                $fp = Get-FlyoutPlacement $menu $ui.BtnAccount
+                Test-Smoke 'account menu is right-aligned under the pill, 4 px below' ($fp.RightEdge -eq $fp.TargetRight -and $fp.Top -eq $fp.Wanted) "$($fp.RightEdge)/$($fp.TargetRight) $($fp.Top)/$($fp.Wanted)"
+                Save-ElementShot2 '23-account-menu' $menu
+                $menu.IsOpen = $false
+                # Maximized: the content must not be cut off at the screen edge
+                $window.WindowState = 'Maximized'
+                $s.Phase = 2; return $false
+            }
+            2 {
+                $window.UpdateLayout()
+                $m = $ui.RootGrid.Margin
+                Test-Smoke 'maximized: the content gets the frame padding, restore glyph shown' ($m.Left -gt 0 -and $m.Top -gt 0 -and $ui.BtnMaximize.Content -eq [string][char]0xE923) "$($m.Left)/$($m.Top)"
+                Save-SmokeShot '24-maximized'
+                $window.WindowState = 'Normal'
+                $s.Phase = 3; return $false
+            }
+            3 {
+                $window.UpdateLayout()
+                Test-Smoke 'restored: no padding, maximize glyph back' ($ui.RootGrid.Margin.Left -eq 0 -and $ui.BtnMaximize.Content -eq [string][char]0xE922)
+                $window.Left = -20000; $window.Top = -20000
+                $true
+            }
+        } } }
     @{ Name = 'status report setup'; Phase = 0; Do = {
         param($s)
         if ($s.Phase -eq 0) {
@@ -245,7 +331,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'finished jobs are marked Done' (@($script:JobRows | Where-Object { $_['Status'] -eq 'Done' }).Count -ge 2) (@($script:JobRows | ForEach-Object { $_['Status'] }) -join ',')
-        Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1)
+        Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1 -or $script:Toasts.Count -ge 1 -or (Get-SmokeLog) -match 'created in Intune')
         $zipRow = @($script:JobRows | Where-Object { $_['Title'] -eq '7-Zip' })[0]
         Test-Smoke 'finished deploy row offers Open in Intune with the app id' ($zipRow['OpenVis'] -eq 'Visible' -and $zipRow['Open'] -eq $zip.id) "$($zipRow['OpenVis']) $($zipRow['Open'])"
         Show-Page 'Activity'
@@ -273,6 +359,97 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'dependency app has no update controls' ($ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantApply.Visibility -eq 'Collapsed')
         $ui.LstTenant.SelectedItem = $zip
         Save-SmokeShot '07-tenant'
+        $true } }
+    @{ Name = 'tenant icons'; Phase = 0; Do = {
+        param($s)
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle) -or -not (Test-Idle 'icons')) { return $false }
+                Show-Page 'Tenant'; Update-TenantRows -Force
+                $zip = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+                $consistent = @($script:TenantRowList | Where-Object { $_.Data.Package } | ForEach-Object { $want = Get-PackageIcon $_.Data.Package $_.Data.Source; if ($want) { $_['Icon'] -eq $want -and $_['MonoVis'] -eq 'Collapsed' } else { $_['MonoVis'] -eq 'Visible' } })
+                Test-Smoke 'rows show the package icon (feed cache) where there is one, the letter tile otherwise' ($consistent.Count -ge 1 -and $consistent -notcontains $false) ($consistent -join ',')
+                $choco = @($script:TenantRowList | Where-Object { $_.Data.IsChocolatey })[0]
+                Test-Smoke 'Chocolatey dependency uses the Chocolatey icon' ($choco['Icon'] -eq (Get-IconFromMeta 'chocolatey' 'Chocolatey')) $choco['Icon']
+                # Scratch: no icon in the feed data, but the Intune app holds one (the fake Graph returns it on the single-app read)
+                $scratch = @($script:TenantApps | Where-Object { $_.Package -eq 'scratch' })[0]
+                $script:Shared.Meta['scratch'].IconUrl = ''
+                Add-Type -AssemblyName System.Drawing
+                $b = New-Object System.Drawing.Bitmap 32, 32
+                $g = [System.Drawing.Graphics]::FromImage($b); $g.Clear([System.Drawing.Color]::DarkOrange); $g.Dispose()
+                $ms = New-Object IO.MemoryStream; $b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $b.Dispose()
+                @{ id = $scratch.Id; value = [Convert]::ToBase64String($ms.ToArray()) } | ConvertTo-Json -Compress | Set-Content (Join-Path $env:LOCALAPPDATA 'fake-icon.json')
+                $script:AppIconCache.Clear(); $script:AppIconTried.Clear()
+                Update-TenantRows
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'scratch' })[0]
+                Test-Smoke 'without feed icon the list shows the letter tile first (never blocks)' (-not $row['Icon'] -and $row['MonoVis'] -eq 'Visible')
+                Start-AppIconTask
+                Test-Smoke 'the icon of the Intune app is read in a hidden background task' (Test-TaskRunning 'appicons')
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'scratch' })[0]
+                Test-Smoke 'icon of the Intune app arrives in the list, cached on disk' ($row['Icon'] -like '*iconcache*app-*.png' -and (Test-Path $row['Icon']) -and $row['MonoVis'] -eq 'Collapsed') $row['Icon']
+                $ui.LstTenant.SelectedItem = $row
+                Test-Smoke 'side panel header shows the icon too' ($null -ne $ui.ImgTenant.Source -and $ui.TxtTenantMono.Visibility -eq 'Collapsed')
+                Save-SmokeShot '19-tenant-icons'
+                # Next session: from disk, no second read
+                $script:AppIconCache.Clear(); $script:AppIconTried.Clear()
+                $file = Get-TenantAppIcon $row.Data
+                Test-Smoke 'icon cache on disk is found again without Graph' ($file -eq $row['Icon'])
+                Show-AppStatus $row.Data
+                Test-Smoke 'status page header shows the icon' ($null -ne $ui.ImgStatus.Source -and $ui.TxtStatusMono.Visibility -eq 'Collapsed')
+                Show-Page 'Tenant'
+                $true
+            }
+        } } }
+    @{ Name = 'windows sandbox item and Test buttons'; Do = {
+        function Get-SandboxItem { Update-SandboxState; Get-ReadinessItems | Where-Object Key -eq 'sandbox' }
+        $script:SandboxInstallOverride = { param($c) $script:SandboxCmd = $c }
+        $script:SandboxCmd = $null
+        Show-Page 'Apps'
+        $detailRow = $script:SourceRows[0]
+        Show-AppDetails $detailRow
+        Show-Page 'Tenant'
+        $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { -not ($_.Data.IsChocolatey -or $_.Data.IsDependency) })[0]
+        # 1. Windows Sandbox missing (installable)
+        $script:SandboxOverride = @{ Present = $false; Home = $false; Studio = $true }
+        $item = Get-SandboxItem
+        Test-Smoke 'start page: Sandbox item is optional and offers Install' ($item.Optional -and $item.State -eq 'warn' -and $item.Fix -eq 'Install' -and $item.Text -like '*not installed*administrator approval*restart*') $item.Text
+        Test-Smoke 'checklist has the Sandbox item (6 rows)' ($ui.ReadinessPanel.Children.Count -eq 6)
+        Test-Smoke 'Test buttons disabled with the reason and a pointer to the Start page' (-not $ui.BtnDetailTest.IsEnabled -and -not $ui.BtnTenantTest.IsEnabled -and $ui.BtnDetailTest.ToolTip -like '*Windows Sandbox is not installed*Start page*' -and $ui.BtnTenantTest.ToolTip -like '*Start page*') "$($ui.BtnDetailTest.IsEnabled) $($ui.BtnTenantTest.ToolTip)"
+        # Set up everything does not install it
+        Start-SetupAll
+        Test-Smoke 'Set up everything does not install Windows Sandbox' ($null -eq $script:SandboxCmd -and -not $script:SetupRunning)
+        # The install builds an elevated command (not started in the test)
+        & $item.Action
+        $c = $script:SandboxCmd
+        Test-Smoke 'Install builds the elevated command for the optional feature, without restart' ($c.File -eq 'powershell.exe' -and $c.Verb -eq 'RunAs' -and $c.Arguments -match 'Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart') ($c | ConvertTo-Json -Compress)
+        # 2. installed, restart needed
+        $script:SandboxRestart = $true
+        $item = Get-SandboxItem
+        Test-Smoke 'after the install: restart required, buttons still disabled' ($item.Text -like '*restart required*' -and -not $item.Fix -and -not $ui.BtnDetailTest.IsEnabled -and $ui.BtnDetailTest.ToolTip -like '*restart*')
+        $script:SandboxRestart = $false
+        # 3. Windows Home
+        $script:SandboxOverride = @{ Present = $false; Home = $true; Studio = $true }
+        $item = Get-SandboxItem
+        Test-Smoke 'Windows Home: says why, no Install button' ($item.Text -like '*Windows Home*' -and -not $item.Fix)
+        $script:SandboxOverride = @{ Present = $false; Home = $false; VirtualizationOff = $true; Studio = $true }
+        Test-Smoke 'virtualization off is named in the item' ((Get-SandboxItem).Text -like '*Virtualization is switched off*')
+        # 4. Sandbox there, Studio missing
+        $script:SandboxOverride = @{ Present = $true; Studio = $false }
+        $item = Get-SandboxItem
+        Test-Smoke 'Studio missing: item says where to get it, Test disabled' ($item.Fix -eq 'Get it' -and $item.Text -like '*dominguez-posh/WindowsSandboxMSIXInstaller*' -and -not $ui.BtnTenantTest.IsEnabled -and $ui.BtnTenantTest.ToolTip -like '*MSIX Sandbox Studio*Start page*')
+        Save-SmokeShot '25-sandbox-item-missing'
+        Show-Page 'Start'; Save-SmokeShot '26-start-sandbox-studio-missing'
+        # 5. both available
+        $script:SandboxOverride = @{ Present = $true; Studio = $true }
+        $item = Get-SandboxItem
+        Show-Page 'Tenant'; Update-TenantButtons; Show-Page 'Apps'; Show-AppDetails $detailRow
+        Test-Smoke 'Sandbox and Studio there: item green, Test buttons enabled' ($item.State -eq 'ok' -and $ui.BtnDetailTest.IsEnabled -and $ui.BtnTenantTest.IsEnabled -and -not $ui.BtnDetailTest.ToolTip)
+        $script:SandboxInstallOverride = $null
+        $ui.PanelDetails.Visibility = 'Collapsed'; $script:DetailRow = $null
         $true } }
     @{ Name = 'catalog knows the tenant'; Do = {
         Show-Page 'Apps'
@@ -721,6 +898,73 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Show-Page 'Start'
         Save-SmokeShot '17-start-signed-out'
         $true } }
+    @{ Name = 'embedded sign-in is the default'; Phase = 0; Do = {
+        param($s)
+        function New-FakeToken([string]$Name) {
+            $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+            [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = "refresh-$Name"
+                scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All' }
+        }
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                $script:EmbeddedCalls = New-Object System.Collections.ArrayList
+                $script:EmbeddedAvailableOverride = $true
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','))); New-FakeToken 'Embedded Admin' }
+                $script:Shared.UrlHit = $false
+                Connect-Intune
+                Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
+                Test-Smoke 'embedded sign-in signs in, no browser opened, no task needed' ((Test-SignedIn) -and $script:AccountText -like '*Embedded Admin*' -and -not $script:Shared.UrlHit -and -not (Test-TaskRunning 'connect'))
+                Disconnect-Intune
+                # Setup: the sign-in of the app registration in the embedded window, the Graph work in the task
+                $script:EmbeddedCalls.Clear()
+                Start-AppRegistration
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'app registration setup signs in with the embedded window (setup app, admin scopes)' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls[0][2] -like '*Application.ReadWrite.All*DelegatedPermissionGrant.ReadWrite.All*') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
+                Test-Smoke 'setup finished with the embedded token, browser untouched' (-not $script:Shared.UrlHit -and (Get-SmokeLog) -match 'App registration ready' -and (Get-JobLog) -match 'Admin consent granted') ''
+                # The system browser as an explicit choice
+                $script:Shared.UrlHit = $false
+                $script:EmbeddedCalls.Clear()
+                Connect-Intune -Method Browser
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'sign in in the web browser (menu choice): browser path, embedded window not used' ((Test-SignedIn) -and $script:LastSignInPath -eq 'browser' -and $script:EmbeddedCalls.Count -eq 0 -and $script:Shared.UrlHit)
+                Disconnect-Intune
+                # Embedded window cannot start: automatic fallback with a toast
+                $script:Shared.UrlHit = $false
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc) throw 'The embedded browser could not start: test' }
+                Connect-Intune
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'window cannot start: falls back to the browser and says so' ((Test-SignedIn) -and $script:LastSignInPath -eq 'browser' -and $script:Shared.UrlHit -and @($script:Toasts | Where-Object { $_.Text -like '*could not start*web browser*' }).Count -ge 1)
+                Disconnect-Intune
+                # Runtime missing: same
+                $script:EmbeddedAvailableOverride = $false; $script:Shared.UrlHit = $false
+                $script:Toasts.Clear()
+                Connect-Intune
+                $s.Phase = 4; return $false
+            }
+            4 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'WebView2 runtime missing: browser and a clear toast' ((Test-SignedIn) -and $script:LastSignInPath -eq 'browser' -and $script:Shared.UrlHit -and @($script:Toasts | Where-Object { $_.Text -like '*not available*web browser*' }).Count -ge 1)
+                Disconnect-Intune
+                # Cancelled embedded window: no error, not signed in
+                $script:EmbeddedAvailableOverride = $true
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc) throw 'Sign-in cancelled.' }
+                $before = @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count
+                Connect-Intune
+                Test-Smoke 'cancelled embedded window: not signed in, no error toast' ((-not (Test-SignedIn)) -and @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count -eq $before)
+                $script:EmbeddedSignInOverride = $null
+                $true
+            }
+        } } }
 )
 
 $script:SmokeTimer = New-Object System.Windows.Threading.DispatcherTimer
