@@ -95,7 +95,8 @@ function Save-Frame {
 #region Tour
 
 function Show-Caption([string]$Number, [string]$Text) { $script:CaptionTarget = @{ Number = $Number; Text = $Text } }
-function Find-CatalogRow([string]$Key) { @($ui.DgCatalog.ItemsSource | Where-Object { $_.Key -eq $Key -or $_.Id -eq $Key })[0] }
+function Find-AppRow([string]$Key) { @($script:SourceRows | Where-Object { (Get-AppKey $_) -eq $Key })[0] }
+function Use-Chocolatey { foreach ($entry in $script:DeployCombos) { $entry.Combo.SelectedIndex = [array]::IndexOf($entry.Sources, 'Chocolatey') } }
 
 # Each step: optional Caption, Target (element or point to move to), Click (runs after the pointer arrived),
 # Until (wait for background work), Hold (ms to stay afterwards)
@@ -105,31 +106,25 @@ $script:Tour = [System.Collections.ArrayList]@(
         $script:SignInTest = @{ Authority = $env:INTUNECHOCO_SMOKE_AUTHORITY; GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DemoClient = New-Object System.Net.WebClient; [void]$global:DemoClient.DownloadStringTaskAsync([uri]$Url)' }
         Show-Page 'Start' }; Hold = 600 }
-    @{ Caption = @('1', 'Set up once: module, app registration with consent, sign-in, Chocolatey in Intune'); Hold = 1800 }
+    @{ Caption = @('1', 'Set up once: module, app registration with consent, sign-in, dependency apps'); Hold = 1800 }
     @{ Target = { Get-Center $ui.BtnSetupAll }; Click = { & $script:ClickActions[$ui.BtnSetupAll] }
        Until = { -not $script:SetupRunning -and (Test-DemoIdle) }; Hold = 1800 }
-    @{ Caption = @('2', 'Pick apps from the curated catalog or search the whole repository'); Target = { Get-Center $ui.NavCatalog }; Click = { Show-Page 'Catalog' }
+    @{ Caption = @('2', 'Pick apps from one list with winget and Chocolatey'); Target = { Get-Center $ui.NavApps }; Click = { Show-Page 'Apps' }
        Until = { Test-DemoIdle 'meta' }; Hold = 900 }
-    @{ Target = { Get-Center $ui.TxtCatalogFilter }; Click = { $ui.TxtCatalogFilter.Focus() | Out-Null }; Hold = 200 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Focus() | Out-Null }; Hold = 200 }
     @{ Type = 'firefox'; Hold = 500 }
-    @{ Target = { Get-RowElement $ui.DgCatalog (Find-CatalogRow 'firefox') }; Click = { [void]$ui.DgCatalog.SelectedItems.Add((Find-CatalogRow 'firefox')) }; Hold = 600 }
-    @{ Target = { Get-Center $ui.TxtCatalogFilter }; Click = { $ui.TxtCatalogFilter.Text = '' }; Hold = 150 }
+    @{ Target = { Get-Center ($ui.CardList.ItemContainerGenerator.ContainerFromIndex(0)) }; Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 600 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 150 }
     @{ Type = '7-zip'; Hold = 400 }
-    @{ Target = { Get-RowElement $ui.DgCatalog (Find-CatalogRow '7zip.install') }; Click = { [void]$ui.DgCatalog.SelectedItems.Add((Find-CatalogRow '7zip.install')) }; Hold = 500 }
-    @{ Target = { Get-Center $ui.TxtCatalogFilter }; Click = { $ui.TxtCatalogFilter.Text = '' }; Hold = 150 }
-    @{ Type = 'notepad'; Hold = 400 }
-    @{ Target = { Get-RowElement $ui.DgCatalog (Find-CatalogRow 'notepadplusplus') }; Click = { [void]$ui.DgCatalog.SelectedItems.Add((Find-CatalogRow 'notepadplusplus')) }; Hold = 700 }
-    @{ Caption = @('3', 'Choose assignment and updates, then deploy them as Win32 apps'); Target = { Get-Center $ui.RbRequired }; Click = { $ui.RbRequired.IsChecked = $true }; Hold = 600 }
-    @{ Target = { Get-Center $ui.CmbDeployUpdate }; Click = { $ui.CmbDeployUpdate.SelectedIndex = 2 }; Hold = 1300 }
-    @{ Target = { Get-Center $ui.BtnDeploy }; Click = { Start-Deploy }; Hold = 300 }
+    @{ Click = { Set-AppSelected $script:CardCollection[0].Data $true }; Hold = 500 }
+    @{ Target = { Get-Center $ui.TxtFilter }; Click = { $ui.TxtFilter.Text = '' }; Hold = 150 }
+    @{ Caption = @('3', 'Review: source per app, assignment and updates, then deploy'); Target = { Get-Center $ui.BtnReview }; Click = { $ui.RbRequired.IsChecked = $true; Show-DeployDialog; Use-Chocolatey }; Hold = 2200 }
+    @{ Target = { Get-Center $ui.BtnDeployGo }; Click = { Start-Deploy }; Hold = 300 }
     @{ Caption = @('4', 'Package, upload, dependency and assignment run in the background'); Until = { Test-DemoIdle }; Hold = 1500 }
-    @{ Caption = @('5', 'Your apps in Intune: version, update mode, release new versions'); Target = { Get-Center $ui.NavTenant }; Click = { Show-Page 'Tenant'; if (Test-DemoIdle 'tenant') { Start-TenantRefresh } }
-       Until = { Test-DemoIdle 'tenant' }; Hold = 900 }
-    @{ Target = { Get-RowElement $ui.DgTenant (@($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq '7zip.install' })[0]) }
-       Click = { $ui.DgTenant.SelectedItem = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq '7zip.install' })[0] }; Hold = 2600 }
-    @{ Caption = @('6', 'Chocolatey or winget, switch the package source with one click'); Target = { Get-Center $ui.SrcWinget }; Click = { & $script:ClickActions[$ui.SrcWinget]; Show-Page 'Catalog' }
-       Until = { Test-DemoIdle 'meta' }; Hold = 2800 }
-    @{ Do = { & $script:ClickActions[$ui.SrcChocolatey] }; Caption = @('', ''); Hold = 400 }
+    @{ Caption = @('5', 'Your apps in Intune: version, update mode, release new versions'); Target = { Get-Center $ui.NavTenant }; Click = { Show-Page 'Tenant' }
+       Until = { Test-DemoIdle }; Hold = 900 }
+    @{ Click = { $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' })[0] }; Hold = 2600 }
+    @{ Do = { Close-Dialog }; Caption = @('', ''); Hold = 400 }
 )
 
 function Test-DemoIdle([string]$Kind) { -not @($script:Tasks | Where-Object { if ($Kind) { $_.Job.Kind -eq $Kind } else { $_.Job.Kind -ne 'icons' } }).Count }
@@ -192,7 +187,7 @@ $script:DemoTimer.Add_Tick({
             }
             'type' {
                 $s.Typed++
-                $ui.TxtCatalogFilter.Text = $s.Type.Substring(0, [Math]::Min($s.Typed, $s.Type.Length))
+                $ui.TxtFilter.Text = $s.Type.Substring(0, [Math]::Min($s.Typed, $s.Type.Length))
                 if ($s.Typed -ge $s.Type.Length) { $s.Phase = 'wait' }
             }
             'wait' {

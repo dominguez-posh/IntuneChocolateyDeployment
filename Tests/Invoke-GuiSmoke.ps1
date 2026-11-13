@@ -45,7 +45,7 @@ $authority = [powershell]::Create()
     $token = {
         param($Name)
         $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        "{`"token_type`":`"Bearer`",`"scope`":`"https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All`",`"expires_in`":3600,`"access_token`":`"x.$claims.y`",`"refresh_token`":`"refresh-$Name`"}"
+        "{`"token_type`":`"Bearer`",`"scope`":`"https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All`",`"expires_in`":3600,`"access_token`":`"x.$claims.y`",`"refresh_token`":`"refresh-$Name`"}"
     }
     while ($listener.IsListening) {
         try { $context = $listener.GetContext() } catch { break }

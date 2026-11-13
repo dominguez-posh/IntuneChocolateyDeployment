@@ -190,10 +190,10 @@ function Show-Toast([string]$Text, [string]$Kind = 'info') {
     $icon = New-Object System.Windows.Controls.TextBlock
     $icon.Text = [string]$glyph; $icon.FontFamily = $window.FindResource('IconFont'); $icon.FontSize = 15; $icon.Margin = '0,1,10,0'; $icon.VerticalAlignment = 'Top'
     $icon.Foreground = ConvertTo-Brush $pill[1]
-    $text = New-Object System.Windows.Controls.TextBlock
-    $text.Text = $Text; $text.TextWrapping = 'Wrap'; $text.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
-    [System.Windows.Controls.Grid]::SetColumn($text, 1)
-    [void]$grid.Children.Add($icon); [void]$grid.Children.Add($text)
+    $label = New-Object System.Windows.Controls.TextBlock
+    $label.Text = $Text; $label.TextWrapping = 'Wrap'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
+    [System.Windows.Controls.Grid]::SetColumn($label, 1)
+    [void]$grid.Children.Add($icon); [void]$grid.Children.Add($label)
     $border.Child = $grid
     [void]$ui.ToastHost.Children.Add($border)
     [void]$script:Toasts.Add(@{ Element = $border; Expires = (Get-Date).AddSeconds($(if ($Kind -in 'bad', 'warn') { 12 } else { 6 })); Text = $Text; Kind = $Kind })
@@ -649,12 +649,10 @@ function Get-AccountInfo {
 
 function Update-ConnectionStatus {
     $info = Get-AccountInfo
-    $template = $ui.BtnAccount.Template
     if ($info) {
-        [void]$ui.BtnAccount.ApplyTemplate()
-        $template.FindName('TxtInitials', $ui.BtnAccount).Text = $info.Initials
-        $template.FindName('TxtAccountName', $ui.BtnAccount).Text = $info.Name
-        $template.FindName('TxtAccountTenant', $ui.BtnAccount).Text = $info.Tenant
+        $ui.TxtInitials.Text = $info.Initials
+        $ui.TxtAccountName.Text = $info.Name
+        $ui.TxtAccountTenant.Text = $info.Tenant
         $ui.BtnAccount.ToolTip = "$($info.Account), $($info.Tenant)"
         $script:AccountText = "$($info.Name) $($info.Account) $($info.Tenant)"
     }
@@ -1192,8 +1190,8 @@ $ui.CardList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEv
         $b = $e.OriginalSource
         if ($b -isnot [System.Windows.Controls.Button] -or $b.DataContext -isnot [IntuneChoco.Row]) { return }
         $src = $b.DataContext.Data
-        if ($b.Tag -eq 'details') { Show-AppDetails $src }
-        elseif ($b.Tag -eq 'card') { Set-AppSelected $src (-not $script:Selected.Contains((Get-AppKey $src))) }
+        if ($b.Uid -eq 'details') { Show-AppDetails $src }
+        elseif ($b.Uid -eq 'card') { Set-AppSelected $src (-not $script:Selected.Contains((Get-AppKey $src))) }
     }
     catch { Show-Error $_.Exception.Message }
 })
@@ -1837,7 +1835,7 @@ function Update-TenantRows {
         [void]$ui.TxtBannerRelease.Inlines.Add($b)
         [void]$ui.TxtBannerRelease.Inlines.Add((New-Object System.Windows.Documents.Run " The app is pinned to $($u.Version). Release it when you are ready.$(if ($updates.Count -gt 1) { " $($updates.Count - 1) more app(s) have updates." })"))
         $ui.BtnBannerRelease.Content = "Release $($u.LatestVersion)"
-        $ui.BtnBannerRelease.Tag = $u.Id
+        $ui.BtnBannerRelease.Uid = $u.Id
     }
     else { $ui.BannerRelease.Visibility = 'Collapsed' }
     $noRuntime = @($script:WingetNoRuntime)
@@ -1965,7 +1963,7 @@ $ui.LstTenant.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickE
     param($s, $e)
     try {
         $b = $e.OriginalSource
-        if ($b -is [System.Windows.Controls.Button] -and $b.Tag -eq 'devices' -and $b.DataContext -is [IntuneChoco.Row]) {
+        if ($b -is [System.Windows.Controls.Button] -and $b.Uid -eq 'devices' -and $b.DataContext -is [IntuneChoco.Row]) {
             $app = $b.DataContext.Data
             if (-not ($app.IsChocolatey -or $app.IsDependency)) { Show-AppStatus $app }
         }
@@ -2011,7 +2009,7 @@ function Start-ReleaseApp($App) {
     Start-AppApply -App $App -Version $App.LatestVersion -Policy @{ UpdateMode = $App.UpdateMode; GraceHours = $App.GraceHours }
 }
 Add-Click $ui.BtnTenantRelease { Start-ReleaseApp (Get-SelectedTenantApp) }
-Add-Click $ui.BtnBannerRelease { $id = $ui.BtnBannerRelease.Tag; Start-ReleaseApp @($script:TenantApps | Where-Object { $_.Id -eq $id })[0] }
+Add-Click $ui.BtnBannerRelease { $id = $ui.BtnBannerRelease.Uid; Start-ReleaseApp @($script:TenantApps | Where-Object { $_.Id -eq $id })[0] }
 Add-Click $ui.BtnTenantSchedule {
     $app = Get-SelectedTenantApp
     if (-not $app) { return }
@@ -2310,8 +2308,8 @@ $ui.LstJobs.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEve
         $b = $e.OriginalSource
         if ($b -isnot [System.Windows.Controls.Button] -or $b.DataContext -isnot [IntuneChoco.Row]) { return }
         $job = $b.DataContext.Data
-        if ($b.Tag -eq 'log') { $job.LogOpen = -not $job.LogOpen; Update-JobRow $job }
-        elseif ($b.Tag -eq 'retry') { Restart-Job $job }
+        if ($b.Uid -eq 'log') { $job.LogOpen = -not $job.LogOpen; Update-JobRow $job }
+        elseif ($b.Uid -eq 'retry') { Restart-Job $job }
     }
     catch { Show-Error $_.Exception.Message }
 })

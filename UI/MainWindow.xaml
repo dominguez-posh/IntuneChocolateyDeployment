@@ -16,7 +16,7 @@
         </Style>
         <!-- Card of the app list: the whole card toggles the selection, the info button opens the details -->
         <DataTemplate x:Key="AppCardTemplate">
-            <Button Tag="card" Margin="0,0,12,12" Padding="0" HorizontalContentAlignment="Stretch" ToolTip="{Binding [Title]}" AutomationProperties.Name="{Binding [Title]}">
+            <Button Uid="card" Margin="0,0,12,12" Padding="0" HorizontalContentAlignment="Stretch" ToolTip="{Binding [Title]}" AutomationProperties.Name="{Binding [Title]}">
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Bd" Background="White" BorderBrush="{StaticResource CardBorder}" BorderThickness="1" CornerRadius="8" Padding="12,12,6,12" SnapsToDevicePixels="True">
@@ -42,7 +42,7 @@
                                         <TextBlock Text="{Binding [Badge]}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding [BadgeFg]}"/>
                                     </Border>
                                 </StackPanel>
-                                <Button Grid.Column="3" Tag="details" Style="{StaticResource IconButton}" Content="&#xE946;" VerticalAlignment="Center" ToolTip="Details" AutomationProperties.Name="Details"/>
+                                <Button Grid.Column="3" Uid="details" Style="{StaticResource IconButton}" Content="&#xE946;" VerticalAlignment="Center" ToolTip="Details" AutomationProperties.Name="Details"/>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -86,7 +86,7 @@
                 <TextBlock Grid.Column="2" Text="{Binding [Updates]}" Foreground="{StaticResource Text2}" VerticalAlignment="Center" Margin="12,0" TextWrapping="Wrap"/>
                 <TextBlock Grid.Column="3" Text="{Binding [Assigned]}" Foreground="{StaticResource Text2}" VerticalAlignment="Center" Margin="12,0" TextWrapping="Wrap"/>
                 <StackPanel Grid.Column="4" VerticalAlignment="Center" Margin="12,0">
-                    <Button Tag="devices" Style="{StaticResource LinkButton}" Content="{Binding [Ok]}" FontSize="13" Foreground="{StaticResource Text}"/>
+                    <Button Uid="devices" Style="{StaticResource LinkButton}" Content="{Binding [Ok]}" FontSize="13" Foreground="{StaticResource Text}"/>
                     <TextBlock Text="{Binding [Bad]}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource Danger}" Visibility="{Binding [BadVis]}"/>
                 </StackPanel>
             </Grid>
@@ -106,8 +106,8 @@
                             <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                             <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{Binding [SubFg]}" TextWrapping="Wrap"/>
                         </StackPanel>
-                        <Button Grid.Column="2" Tag="log" Style="{StaticResource LinkButton}" Content="{Binding [LogToggle]}" FontSize="13" Margin="8,0" VerticalAlignment="Center"/>
-                        <Button Grid.Column="3" Tag="retry" Style="{StaticResource SmallButton}" Content="Retry" Margin="4,0,12,0" Visibility="{Binding [RetryVis]}"/>
+                        <Button Grid.Column="2" Uid="log" Style="{StaticResource LinkButton}" Content="{Binding [LogToggle]}" FontSize="13" Margin="8,0" VerticalAlignment="Center"/>
+                        <Button Grid.Column="3" Uid="retry" Style="{StaticResource SmallButton}" Content="Retry" Margin="4,0,12,0" Visibility="{Binding [RetryVis]}"/>
                         <Border Grid.Column="4" Style="{StaticResource Pill}" Background="{Binding [StatusBg]}" VerticalAlignment="Center" Padding="10,2">
                             <TextBlock Text="{Binding [Status]}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding [StatusFg]}"/>
                         </Border>
@@ -125,7 +125,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="30"/><ColumnDefinition Width="230"/><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/>
                 </Grid.ColumnDefinitions>
-                <CheckBox Tag="pick" IsChecked="{Binding [Checked], Mode=OneWay}" IsEnabled="{Binding [CanPick]}" AutomationProperties.Name="Select app" VerticalAlignment="Top" Margin="0,2,0,0"/>
+                <CheckBox Uid="pick" IsChecked="{Binding [Checked], Mode=OneWay}" IsEnabled="{Binding [CanPick]}" AutomationProperties.Name="Select app" VerticalAlignment="Top" Margin="0,2,0,0"/>
                 <StackPanel Grid.Column="1" Margin="0,0,12,0">
                     <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextTrimming="CharacterEllipsis"/>
@@ -186,16 +186,7 @@
                     <Button.Template>
                         <ControlTemplate TargetType="Button">
                             <Border x:Name="Bd" Background="White" BorderBrush="{StaticResource CardBorder}" BorderThickness="1" CornerRadius="20" Padding="4,4,12,4">
-                                <StackPanel Orientation="Horizontal">
-                                    <Border Width="28" Height="28" CornerRadius="14" Background="{StaticResource Primary}">
-                                        <TextBlock x:Name="TxtInitials" Foreground="White" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Border>
-                                    <StackPanel Margin="10,0,10,0" VerticalAlignment="Center">
-                                        <TextBlock x:Name="TxtAccountName" FontSize="13" FontWeight="SemiBold"/>
-                                        <TextBlock x:Name="TxtAccountTenant" FontSize="12" Foreground="{StaticResource MutedText}"/>
-                                    </StackPanel>
-                                    <Ellipse Width="8" Height="8" Fill="{StaticResource SuccessDot}" VerticalAlignment="Center"/>
-                                </StackPanel>
+                                <ContentPresenter/>
                             </Border>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="#F5F5F5"/></Trigger>
@@ -203,9 +194,18 @@
                             </ControlTemplate.Triggers>
                         </ControlTemplate>
                     </Button.Template>
+                    <StackPanel Orientation="Horizontal">
+                        <Border Width="28" Height="28" CornerRadius="14" Background="{StaticResource Primary}">
+                            <TextBlock x:Name="TxtInitials" Foreground="White" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel Margin="10,0,10,0" VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtAccountName" FontSize="13" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="TxtAccountTenant" FontSize="12" Foreground="{StaticResource MutedText}"/>
+                        </StackPanel>
+                        <Ellipse Width="8" Height="8" Fill="{StaticResource SuccessDot}" VerticalAlignment="Center"/>
+                    </StackPanel>
                 </Button>
             </Grid>
-
             <Grid Grid.Row="1">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="212"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 

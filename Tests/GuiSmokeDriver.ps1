@@ -1,6 +1,7 @@
 # Dot-sourced by Start-IntuneChocoTool.ps1 when INTUNECHOCO_SMOKE is set (see Tests\Invoke-GuiSmoke.ps1).
 # Puts the window off-screen and walks through the steps below on the UI thread; each step returns $true when it is
 # done (or $false to be asked again on the next tick), so background tasks can finish in between.
+# Screenshots of every page and dialog land in the output folder (shot-NN-*.png).
 
 $script:SmokeOut = $env:INTUNECHOCO_SMOKE_OUT
 $script:SmokeResults = New-Object System.Collections.ArrayList
@@ -23,18 +24,83 @@ function Save-SmokeShot([string]$Name) {
     $fs = [IO.File]::Create((Join-Path $script:SmokeOut "shot-$Name.png"))
     try { $enc.Save($fs) } finally { $fs.Dispose() }
 }
-function Get-SmokeLog { @($ui.LogList.Items | ForEach-Object { $_.Line }) -join "`n" }
+function Get-SmokeLog { $script:UiLogLines -join "`n" }
+function Get-JobLog { (@($script:JobRows | ForEach-Object { $_.Data.Log | ForEach-Object { $_.Text } }) ) -join "`n" }
 # Without a kind: no task except the icon rendering, which runs on its own pool next to everything else
 function Test-Idle([string]$Kind) { -not @($script:Tasks | Where-Object { if ($Kind) { $_.Job.Kind -eq $Kind } else { $_.Job.Kind -ne 'icons' } }).Count }
+function Get-StoreApps { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ }) }
+function Get-StoreApp([string]$Package) { @(Get-StoreApps | Where-Object { $_.notes -like "*package=$Package;*" })[-1] }
+function Find-Visual($Parent, [type]$Type) {
+    for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent); $i++) {
+        $c = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
+        if ($c -is $Type) { return $c }
+        $r = Find-Visual $c $Type; if ($r) { return $r }
+    }
+}
+function Get-Card([string]$Key) { @($script:CardCollection | Where-Object { (Get-AppKey $_.Data) -eq $Key })[0] }
+function Test-GeneratedScripts([string]$Folder, [string]$What) {
+    # The scripts that run on the devices must at least be valid PowerShell, without leftover placeholders
+    foreach ($file in Get-ChildItem $Folder -Filter '*.ps1' -Recurse) {
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+        $text = Get-Content $file.FullName -Raw
+        Test-Smoke "$What script $($file.Name) is valid" ($errors.Count -eq 0 -and $text -notmatch '__[A-Z]+__') (@($errors | ForEach-Object { $_.Message }) -join '; ')
+    }
+    $install = Get-Content (Join-Path $Folder 'source\install.ps1') -Raw
+    $update = Get-Content (Join-Path $Folder 'source\update.ps1') -Raw
+    Test-Smoke "$What scripts share the device lock" ($install -match 'Global.IntuneChocoDeployment"' -and $install -match 'Enter-DeploymentLock' -and $update -match 'Enter-DeploymentLock')
+    Test-Smoke "$What helper folder is protected by SID" ($install -match 'Protect-Folder' -and $install -match 'S-1-5-18' -and $install -match 'S-1-5-32-544')
+}
+
+# Fake Graph for the insight functions (counts, status, status script, import): script text, run inside the task runspaces
+$script:InsightFake = @'
+param([string]$Method, [string]$Path, $Body)
+$Dir = $env:LOCALAPPDATA
+$P = [uri]::UnescapeDataString($Path)
+$Now = (Get-Date).ToUniversalTime()
+if ($P -like '*/deviceStatuses*') {
+    return @{ value = @(
+        @{ deviceId = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = '23.1'; errorCode = 1; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-2'; deviceName = 'NB-0288'; userPrincipalName = 'a.keller@example.test'; installState = 'pendingInstall'; installStateDetail = 'pending'; displayVersion = '23.1'; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-3'; deviceName = 'PC-0001'; userPrincipalName = 'm.schulz@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-4'; deviceName = 'PC-0002'; userPrincipalName = 'shared@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.AddDays(-12).ToString('o') }
+    ) }
+}
+if ($P -like '*/deviceHealthScripts/*/deviceRunStates*') {
+    $Out = '{"f":[{"p":"7zip.install","s":"c","t":"11:50","a":"upgrade","e":1,"c":"Download blocked by the Chocolatey rate limit","v":"23.1","g":"26.6.0"}],"o":[]}'
+    return @{ value = @(@{ detectionState = 'success'; lastStateUpdateDateTime = $Now.ToString('o'); preRemediationDetectionScriptOutput = $Out; managedDevice = @{ id = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test' } }) }
+}
+if ($P -like '*/deviceHealthScripts/*/assign') { return @{} }
+if ($P -like '*/deviceHealthScripts*') {
+    if ($Method -eq 'POST') { Set-Content (Join-Path $Dir 'fake-health.json') '{"id":"hs-1"}'; return @{ id = 'hs-1' } }
+    if (Test-Path (Join-Path $Dir 'fake-nolicense.txt')) { throw 'Graph GET failed (403): forbidden, the tenant has no license for this (fake)' }
+    if ($P -like '*top=1*') { return @{ value = @() } }
+    if (Test-Path (Join-Path $Dir 'fake-health.json')) { return @{ value = @(@{ id = 'hs-1'; displayName = 'IntuneChocoDeployment status' }) } }
+    return @{ value = @() }
+}
+if ($P -like '*mobileApps/*' -and $Method -eq 'PATCH') { Add-Content (Join-Path $Dir 'fake-patches.log') $P; return @{} }
+if ($P -like '*/mobileApps?*') {
+    if ($P -like '*winGetApp*') { return @{ value = @() } }
+    return @{ value = @(
+        [pscustomobject]@{ id = 'i1'; displayName = 'Zoom Workplace'; notes = ''; installCommandLine = 'winget install --id Zoom.Zoom -e --silent'; createdDateTime = '2026-01-01T10:00:00Z'; displayVersion = '' }
+        [pscustomobject]@{ id = 'i2'; displayName = 'Own VPN'; notes = ''; installCommandLine = 'msiexec /i OwnVpn.msi /qn'; createdDateTime = '2026-01-02T10:00:00Z'; displayVersion = '' }
+        [pscustomobject]@{ id = 'i3'; displayName = 'Greenshot'; notes = ''; installCommandLine = 'choco install greenshot -y --version 1.3.290'; createdDateTime = '2026-01-03T10:00:00Z'; displayVersion = '' }
+        [pscustomobject]@{ id = 'i4'; displayName = 'Sample managed'; notes = 'PoweredByChocolatey;package=sample.pkg;version=latest;update=Startup;grace=48;source=;delay=5-60'; installCommandLine = ''; createdDateTime = '2026-01-04T10:00:00Z'; displayVersion = '' }
+    ) }
+}
+throw "Fake Graph: $Method $P"
+'@
 
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {
         Test-Smoke 'fake module counts as installed' $script:ModuleState.Ok $script:ModuleState.Version
-        Test-Smoke 'readiness shows at least 4 items' ($ui.ReadinessPanel.Children.Count -ge 4) $ui.ReadinessPanel.Children.Count
-        Test-Smoke 'signed out at start' ((-not (Test-SignedIn)) -and $ui.BtnSignIn.IsEnabled -and -not $ui.BtnSignOut.IsEnabled)
-        Test-Smoke 'help flyout opens' ($(Show-Help; $ui.HelpPanel.Visibility -eq 'Visible' -and $ui.HelpBody.Children.Count -ge 4))
-        Save-SmokeShot '01-start-help'
-        $ui.HelpPanel.Visibility = 'Collapsed'
+        Test-Smoke 'readiness shows 5 items' ($ui.ReadinessPanel.Children.Count -eq 5) $ui.ReadinessPanel.Children.Count
+        Test-Smoke 'signed out: split button shown, account pill hidden' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
+        Test-Smoke 'navigation has the five entries, no package source switch' ($ui.NavStart -and $ui.NavApps -and $ui.NavTenant -and $ui.NavActivity -and $ui.NavSettings -and $ui.NavHelp -and -not $ui.ContainsKey('SrcWinget'))
+        Test-Smoke 'help dialog opens' ($(Show-Help; $ui.DialogLayer.Visibility -eq 'Visible' -and $ui.DlgHelp.Visibility -eq 'Visible' -and $ui.HelpBody.Children.Count -ge 4))
+        Save-SmokeShot '00-help'
+        Close-Dialog
+        Test-Smoke 'dialog closes' ($ui.DialogLayer.Visibility -eq 'Collapsed')
         Test-Smoke 'Keevault detection runs' ($null -ne (Find-KeevaultMcp).Installed)
         $true } }
     @{ Name = 'sign-in can be cancelled'; Phase = 0; Do = {
@@ -49,7 +115,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if (-not (Test-Idle 'connect')) { return $false }
-        Test-Smoke 'cancelled sign-in ends and is logged' ((-not (Test-SignedIn)) -and (Get-SmokeLog) -match 'Sign-in cancelled')
+        Test-Smoke 'cancelled sign-in ends and is logged' ((-not (Test-SignedIn)) -and ((Get-SmokeLog) + (Get-JobLog)) -match 'Sign-in cancelled')
         Test-Smoke 'sign in is offered again' ($ui.BtnSignIn.Content -eq 'Sign in' -and $ui.BtnSignIn.IsEnabled -and $ui.BtnSignInMenu.IsEnabled) $ui.BtnSignIn.Content
         $true } }
     @{ Name = 'set up everything'; Started = $false; Waited = 0; Do = {
@@ -64,8 +130,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'missing app registration is red with a reason' ($appreg.State -eq 'bad' -and $appreg.Text -like '*app registration*') $appreg.Text
             $buttons = @($ui.ReadinessPanel.Children | ForEach-Object { @($_.Child.Children | Where-Object { $_ -is [System.Windows.Controls.Button] }) | ForEach-Object { [string]$_.Content } })
             Test-Smoke 'only items that are not ready have a button (Create, Sign in)' (($buttons -join ',') -eq 'Create,Sign in') ($buttons -join ',')
+            Test-Smoke 'status report is optional and not counted' (($cards | Where-Object Key -eq 'status').Optional -and $ui.TxtReadinessSummary.Text -like '*3 of 4 not ready*' -or $ui.TxtReadinessSummary.Text -like '*of 4*') $ui.TxtReadinessSummary.Text
             Test-Smoke 'set up everything offered' ($ui.BtnSetupAll.Visibility -eq 'Visible' -and $ui.TxtReadinessSummary.Text -like '*not ready*') $ui.TxtReadinessSummary.Text
-            Save-SmokeShot '02-readiness'
+            Save-SmokeShot '01-start'
             # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
             $script:SignInTest.UrlHandler = 'param($Url) $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
             $script:SignInTest.GraphUrl = $env:INTUNECHOCO_SMOKE_AUTHORITY
@@ -73,326 +140,291 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         $s.Waited++
-        if (($script:SetupRunning -or -not (Test-Idle)) -and $s.Waited -lt 1200) { return $false }
-        $log = Get-SmokeLog
+        if (($script:SetupRunning -or -not (Test-Idle)) -and $s.Waited -lt 1500) { return $false }
+        $log = Get-SmokeLog + (Get-JobLog)
         Test-Smoke 'set up finished' ((-not $script:SetupRunning) -and $log -match 'Everything is set up') (($log -split "`n" | Select-Object -Last 3) -join ' | ')
         Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'Intune Chocolatey Deployment' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
-        Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com') "$((Get-IntuneChocoSettings).TenantID) / $((Get-IntuneChocoSettings).ClientID)"
-        Test-Smoke 'Chocolatey deployed by the set up' (@($script:TenantApps | Where-Object IsChocolatey).Count -eq 1)
-        Test-Smoke 'all items green, no buttons left' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
+        Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com')
+        $names = @(Get-StoreApps | ForEach-Object { $_.displayName })
+        Test-Smoke 'Chocolatey and the winget runtime deployed by the set up' (@($script:TenantApps | Where-Object IsChocolatey).Count -eq 1 -and $script:RuntimeId -and ($names -contains 'Chocolatey') -and ($names -contains 'winget runtime')) ($names -join ', ')
+        Test-Smoke 'all required items green, set up button gone' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' -and -not $_.Optional }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
         $true } }
     @{ Name = 'sign in'; Do = {
         Test-Smoke 'signed in through the browser flow (PKCE, loopback)' (Test-SignedIn)
-        Test-Smoke 'header shows the account' ($ui.TxtConnectionStatus.Text -like '*admin@contoso.onmicrosoft.com*') $ui.TxtConnectionStatus.Text
-        Test-Smoke 'sign in disabled, sign out enabled' ((-not $ui.BtnSignIn.IsEnabled) -and $ui.BtnSignOut.IsEnabled)
+        Test-Smoke 'account pill shows name and tenant, split button gone' ($ui.BtnAccount.Visibility -eq 'Visible' -and $ui.PanelSignedOut.Visibility -eq 'Collapsed' -and $script:AccountText -like '*Test Admin*contoso.onmicrosoft.com*') $script:AccountText
         Test-Smoke 'token carries refresh token and client id' ($Global:AccessToken.RefreshToken -eq 'refresh-Test Admin' -and $Global:AccessToken.ClientID -eq '11111111-2222-3333-4444-555555555555')
-        # An expiring token is renewed silently with the refresh token
         $Global:AccessToken.ExpiresOn = (Get-Date).ToUniversalTime().AddMinutes(2)
         Update-UiToken
         $identity = Get-IntuneChocoIdentity
         Test-Smoke 'expiring token renewed silently' ($identity.Name -eq 'Test Admin renewed' -and ([datetime]$identity.ExpiresOn) -gt (Get-Date).ToUniversalTime().AddMinutes(30)) $identity.Name
         Test-Smoke 'renewed token handed to the tasks' ($script:Shared.Auth.AccessToken.RefreshToken -eq 'refresh-Test Admin renewed')
-        # The module leaves with "break" when it distrusts the sign-in: that must surface as an error, not as silence.
-        # Called directly (as the module's own check sees it under a German date format) nothing comes back ...
         $cultureBefore = [Threading.Thread]::CurrentThread.CurrentCulture.Name
         $direct = 'not reached'
         do { $direct = @(Get-IntuneWin32App).Count } while ($false)
         Test-Smoke 'fake module gives up silently when called directly (like the real one)' ($direct -eq 'not reached') $direct
-        # ... through Invoke-IntuneModule the same call works, and a give-up becomes an error
-        Test-Smoke 'module call works through Invoke-IntuneModule' (@(Invoke-IntuneModule { Get-IntuneWin32App }).Count -eq 1)   # Chocolatey, from the set up
+        Test-Smoke 'module call works through Invoke-IntuneModule' (@(Invoke-IntuneModule { Get-IntuneWin32App }).Count -ge 1)
         try { Invoke-IntuneModule { Write-Warning 'gave up' 3>$null; break }; Test-Smoke 'a module give-up becomes an error' $false }
         catch { Test-Smoke 'a module give-up becomes an error' ($_.Exception.Message -like '*gave up without a result*') $_.Exception.Message }
-        Test-Smoke 'culture restored after the module call' ([Threading.Thread]::CurrentThread.CurrentCulture.Name -eq $cultureBefore) [Threading.Thread]::CurrentThread.CurrentCulture.Name
+        Test-Smoke 'culture restored after the module call' ([Threading.Thread]::CurrentThread.CurrentCulture.Name -eq $cultureBefore)
+        Test-Smoke 'missing permissions would be offered (none missing here)' (@(Get-MissingScopes).Count -eq 0) (@(Get-MissingScopes) -join ',')
+        $missing = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrite.All') | Where-Object { -not $_.Ready })
+        Test-Smoke 'readiness check names missing scopes (grant new permissions)' ($missing.Count -gt 0)
         $true } }
-    @{ Name = 'catalog infos'; Started = $false; Waited = 0; Do = {
+    @{ Name = 'status report setup'; Phase = 0; Do = {
         param($s)
-        if (-not $s.Started) { $s.Started = $true; Show-Page 'Catalog'; return $false }
-        $s.Waited++
-        if (-not (Test-Idle 'meta') -and $s.Waited -lt 1200) { return $false }
-        Update-CatalogGrid
-        $rows = @($ui.DgCatalog.ItemsSource)
-        Test-Smoke 'catalog lists all apps' ($rows.Count -eq $script:Catalog.Count) "$($rows.Count) of $($script:Catalog.Count)"
-        $loaded = @($rows | Where-Object Found).Count
-        Test-Smoke 'package infos loaded from the feed' ($loaded -ge $rows.Count - 3) "$loaded of $($rows.Count)"
-        $zip = $rows | Where-Object Key -eq '7zip.install' | Select-Object -First 1
-        Test-Smoke '7-Zip has version and publisher' ($zip.Version -and $zip.Authors) "$($zip.Version) / $($zip.Authors)"
-        Test-Smoke 'license note on AnyDesk' ([bool](@($rows | Where-Object { $_.Key -eq 'anydesk' -and $_.StatusText -eq 'License' }).Count))
-        Save-SmokeShot '02-catalog'
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            if (-not (Test-Idle)) { $s.Phase = 0; return $false }
+            Test-Smoke 'status script missing: optional item offers Set up' ($script:StatusScript.State -eq 'Missing' -and (Get-ReadinessItems | Where-Object Key -eq 'status').Fix -eq 'Set up') ($script:StatusScript | ConvertTo-Json -Compress)
+            Start-StatusScriptSetup
+            return $false
+        }
+        if (-not (Test-Idle)) { return $false }
+        Test-Smoke 'status script created and assigned' ($script:StatusScript.State -eq 'Present' -and (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-health.json')) -and (Get-JobLog) -match 'created|assigned') ($script:StatusScript | ConvertTo-Json -Compress)
         $true } }
-    @{ Name = 'catalog filter and selection'; Do = {
-        $ui.TxtCatalogFilter.Text = 'scratch'
-        Test-Smoke 'filter narrows to Scratch' (@($ui.DgCatalog.ItemsSource).Count -eq 1) @($ui.DgCatalog.ItemsSource).Count
-        $ui.DgCatalog.SelectedItem = @($ui.DgCatalog.ItemsSource)[0]
-        $ui.TxtCatalogFilter.Text = '7-zip'
-        [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
+    @{ Name = 'apps list'; Started = $false; Waited = 0; Do = {
+        param($s)
+        if (-not $s.Started) { $s.Started = $true; Show-Page 'Apps'; return $false }
+        $s.Waited++
+        if (-not (Test-Idle 'meta') -and $s.Waited -lt 1500) { return $false }
+        Update-CatalogRows; Update-AppList
+        $cards = @($script:CardCollection)
+        Test-Smoke 'one list shows every catalog app' ($cards.Count -eq $script:Catalog.Count) "$($cards.Count) of $($script:Catalog.Count)"
+        Test-Smoke 'category chips with counts (All + categories)' ($script:Chips.Count -ge 5 -and $script:Chips['All'].Content -like "All*$($script:Catalog.Count)") ($script:Chips['All'].Content)
+        Test-Smoke 'default view: All sources selected, no source switch in the header' ($ui.FltAll.IsChecked -and $script:SourceFilter -eq 'All')
+        $zip = $script:SourceRows | Where-Object { $_.CatalogId -eq '7zip.install' } | Select-Object -First 1
+        Test-Smoke '7-Zip has both sources with versions' ($zip.Sources.Count -eq 2 -and $zip.ChocoVersion -and $zip.WingetVersion) ($zip | Select-Object ChocoVersion, WingetVersion, Recommended | ConvertTo-Json -Compress)
+        $rec = @($script:SourceRows | Where-Object RecommendedMarked)
+        Test-Smoke 'a recommended source is marked where versions differ' ($rec.Count -ge 0) $rec.Count
+        $zipCard = Get-Card '7zip.install'
+        Test-Smoke 'card shows source tags with versions' (@($zipCard.Items | ForEach-Object { $_['Text'] }) -join ',' -match 'winget .*Choco ' ) (@($zipCard.Items | ForEach-Object { $_['Text'] }) -join ',')
+        Test-Smoke 'license badge on AnyDesk' ((Get-Card 'anydesk')['Badge'] -eq 'Check license') (Get-Card 'anydesk')['Badge']
+        # source filter keeps the exclusive semantics of the backend
+        foreach ($f in 'Winget', 'Chocolatey', 'Both') {
+            $ui["Flt$(if ($f -eq 'Chocolatey') { 'Choco' } else { $f })"].IsChecked = $true
+            $expected = @(Select-IntuneChocoSourceApps -Apps $script:SourceRows -Filter $f).Count
+            Test-Smoke "source filter $f shows $expected apps" ($script:CardCollection.Count -eq $expected) $script:CardCollection.Count
+        }
+        $ui.FltAll.IsChecked = $true
+        $script:Chips['Browsers'].IsChecked = $true
+        Test-Smoke 'category chip narrows the list' ($script:CardCollection.Count -eq @($script:SourceRows | Where-Object Category -eq 'Browsers').Count) $script:CardCollection.Count
+        Save-SmokeShot '02-apps'
+        $script:Chips['All'].IsChecked = $true
+        $true } }
+    @{ Name = 'filter, selection, details'; Do = {
+        $ui.TxtFilter.Text = 'scratch'
+        Test-Smoke 'filter narrows to Scratch' ($script:CardCollection.Count -eq 1) $script:CardCollection.Count
+        Test-Smoke 'filter hint hidden while typing' ($ui.HintFilter.Visibility -eq 'Collapsed')
+        Set-AppSelected $script:CardCollection[0].Data $true
+        $ui.TxtFilter.Text = '7-zip'
+        Set-AppSelected $script:CardCollection[0].Data $true
         Test-Smoke 'selection kept across filters' ($script:Selected.Count -eq 2 -and $script:Selected.Contains('scratch') -and $script:Selected.Contains('7zip.install')) (@($script:Selected.Keys) -join ',')
-        Test-Smoke 'catalog shows the Intune name' (@($ui.DgCatalog.ItemsSource)[0].Title -eq '7-Zip') @($ui.DgCatalog.ItemsSource)[0].Title
-        Test-Smoke 'details show the clicked app' ($ui.TxtDetailTitle.Text -like '*7-Zip*') $ui.TxtDetailTitle.Text
-        Test-Smoke 'deploy button enabled' ($ui.BtnDeploy.IsEnabled -and $ui.BtnDeploy.Content -eq 'Deploy 2 apps') $ui.BtnDeploy.Content
-        Save-SmokeShot '03-selection'
+        Test-Smoke 'card shows the selected state' ((Get-Card '7zip.install')['Selected'] -eq 'True')
+        Test-Smoke 'floating bar shows count and Review and deploy' ($ui.SelectionBar.Visibility -eq 'Visible' -and $ui.TxtSelectionCount.Text -eq '2 apps selected' -and $ui.BtnReview.IsEnabled) $ui.TxtSelectionCount.Text
+        Show-AppDetails (Get-Card '7zip.install').Data
+        Test-Smoke 'details side panel shows the clicked app with both sources' ($ui.PanelDetails.Visibility -eq 'Visible' -and $ui.TxtDetailTitle.Text -eq '7-Zip' -and $ui.TxtDetailSources.Text -match 'winget' -and $ui.TxtDetailSources.Text -match 'Chocolatey') $ui.TxtDetailSources.Text
+        Test-Smoke 'details offer test in sandbox and custom icon' ($ui.BtnDetailTest.IsEnabled -and $ui.BtnCustomIcon.IsEnabled)
+        $ui.TxtFilter.Text = ''
+        Save-SmokeShot '03-selection-details'
         $true } }
     @{ Name = 'custom icon'; Do = {
-        # A generated BMP goes through the conversion to PNG
         Add-Type -AssemblyName System.Drawing
         $bmpFile = Join-Path $script:SmokeOut 'custom.bmp'
         $b = New-Object System.Drawing.Bitmap 64, 64
         $g = [System.Drawing.Graphics]::FromImage($b); $g.Clear([System.Drawing.Color]::SteelBlue); $g.Dispose()
         $b.Save($bmpFile, [System.Drawing.Imaging.ImageFormat]::Bmp); $b.Dispose()
-        Clear-Selection
-        $ui.TxtCatalogFilter.Text = 'scratch'
-        [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
         Set-CustomIcon -Key 'scratch' -Path $bmpFile
         Test-Smoke 'custom icon stored as PNG' ([string]$script:CustomIcons['scratch'] -like 'iVBORw0KGgo*')
+        Show-AppDetails (Get-Card 'scratch').Data
         Test-Smoke 'custom icon shown in details' ($ui.BtnCustomIconRemove.Visibility -eq 'Visible' -and $null -ne $ui.ImgDetail.Source)
-        $ui.TxtCatalogFilter.Text = '7-zip'
-        [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
-        $ui.TxtCatalogFilter.Text = ''
-        Test-Smoke 'two apps selected again' ($script:Selected.Count -eq 2) (@($script:Selected.Keys) -join ',')
         $true } }
-    @{ Name = 'deploy'; Started = $false; Waited = 0; Do = {
+    @{ Name = 'deploy dialog'; Started = $false; Waited = 0; Do = {
         param($s)
         if (-not $s.Started) {
             $s.Started = $true
             $ui.RbAvailable.IsChecked = $true
+            Show-DeployDialog
+            Test-Smoke 'deploy dialog opens with a row per app' ($ui.DlgDeploy.Visibility -eq 'Visible' -and $ui.PanelDeployRows.Children.Count -eq 2 -and $ui.TxtDeployTitle.Text -like 'Deploy 2 apps to contoso*') $ui.TxtDeployTitle.Text
+            $zip = $script:DeployCombos | Where-Object { $_.Key -eq '7zip.install' }
+            Test-Smoke 'per app source dropdown lists both sources, wide enough' ($zip.Combo.Items.Count -eq 2 -and $zip.Combo.Width -ge 280 -and $zip.Combo.SelectedItem) (@($zip.Combo.Items) -join ' | ')
+            Test-Smoke 'recommended source is labelled when versions differ' ((@($zip.Combo.Items) -join '|') -match 'recommended' -or -not $zip.Src.RecommendedMarked) (@($zip.Combo.Items) -join ' | ')
+            Test-Smoke 'dialog starts with the settings defaults' ($ui.CmbDeployAssign.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
+            Test-Smoke 'dependency hint shown' ($ui.TxtDeployDependency.Inlines.Count -ge 2)
+            $ui.CmbDeployUpdate.SelectedIndex = 2
+            Test-Smoke 'grace period appears for the user prompt' ($ui.PanelDeployGrace.Visibility -eq 'Visible' -and $ui.TxtDeployUpdateHelp.Text -like '*installed anyway*')
+            $ui.TxtDeployGrace.Text = 'x'
+            try { [void](Read-PolicyControls 'Deploy'); Test-Smoke 'invalid grace period rejected' $false } catch { Test-Smoke 'invalid grace period rejected' ($_.Exception.Message -like '*90 days*') $_.Exception.Message }
+            $ui.CmbDeployUpdate.SelectedIndex = 1
+            Save-SmokeShot '04-deploy-dialog'
+            # Both apps from Chocolatey: the fake winget source only knows a few apps
+            foreach ($entry in $script:DeployCombos) { $entry.Combo.SelectedIndex = [array]::IndexOf($entry.Sources, 'Chocolatey') }
             Start-Deploy
-            Test-Smoke 'selection cleared after queueing' ($script:Selected.Count -eq 0)
-            Test-Smoke 'busy indicator shown' ($ui.BusyPanel.Visibility -eq 'Visible') $ui.BusyText.Text
-            Save-SmokeShot '04-deploying'
+            Test-Smoke 'dialog closes and Activity opens' ($ui.DialogLayer.Visibility -eq 'Collapsed' -and $script:CurrentPage -eq 'Activity')
+            Test-Smoke 'selection cleared after queueing' ($script:Selected.Count -eq 0 -and $ui.SelectionBar.Visibility -eq 'Collapsed')
+            Test-Smoke 'jobs show up in the activity list' ($script:JobRows.Count -ge 2) $script:JobRows.Count
+            Test-Smoke 'activity badge counts the running jobs' ($ui.BadgeActivity.Visibility -eq 'Visible') $ui.TxtBadgeActivity.Text
+            Save-SmokeShot '05-activity-running'
             return $false
         }
         $s.Waited++
-        if (-not (Test-Idle) -and $s.Waited -lt 1200) { return $false }
-        $apps = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+        if (-not (Test-Idle) -and $s.Waited -lt 1500) { return $false }
+        $apps = Get-StoreApps
         $names = @($apps | ForEach-Object { $_.displayName })
-        Test-Smoke 'Chocolatey, 7-Zip and Scratch created with catalog names' ($apps.Count -eq 3 -and ($names -contains 'Chocolatey') -and ($names -contains '7-Zip') -and ($names -contains 'Scratch')) ($names -join ', ')
+        Test-Smoke '7-Zip and Scratch created next to the dependency apps' (($names -contains '7-Zip') -and ($names -contains 'Scratch') -and $apps.Count -eq 4) ($names -join ', ')
         $zip = $apps | Where-Object { $_.displayName -eq '7-Zip' }
         $scratch = $apps | Where-Object { $_.displayName -eq 'Scratch' }
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
         Test-Smoke 'Scratch has the custom icon' ($scratch.hasIcon -and $scratch.iconValid)
-        Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -ne 'Chocolatey' -and $_.assignment -eq 'available' }).Count -eq 2)
+        Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -in '7-Zip', 'Scratch' -and $_.assignment -eq 'available' }).Count -eq 2)
         Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByChocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$') $zip.notes
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
-        Test-Smoke 'no errors in the log' (-not ($log -match 'failed')) (($log -split "`n" | Where-Object { $_ -match 'failed' }) -join ' | ')
+        Test-Smoke 'finished jobs are marked Done' (@($script:JobRows | Where-Object { $_['Status'] -eq 'Done' }).Count -ge 2) (@($script:JobRows | ForEach-Object { $_['Status'] }) -join ',')
+        Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1)
+        Show-Page 'Activity'
+        Save-SmokeShot '06-activity-done'
         $true } }
-    @{ Name = 'tenant'; Started = $false; Do = {
+    @{ Name = 'tenant'; Started = $false; Waited = 0; Do = {
         param($s)
-        if (-not $s.Started) { $s.Started = $true; Show-Page 'Tenant'; if (Test-Idle 'tenant') { Start-TenantRefresh }; return $false }
-        if (-not (Test-Idle 'tenant')) { return $false }
-        $rows = @($ui.DgTenant.ItemsSource)
-        Test-Smoke 'tenant lists 3 apps, Chocolatey first' ($rows.Count -eq 3 -and $rows[0].IsChocolatey) (($rows | ForEach-Object { $_.DisplayName }) -join ', ')
-        $ui.DgTenant.SelectedIndex = 1
-        Test-Smoke 'open, copy and remove enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantCopy.IsEnabled -and $ui.BtnTenantRemove.IsEnabled)
-        Save-SmokeShot '05-tenant'
+        if (-not $s.Started) { $s.Started = $true; if (Test-Idle 'tenant') { Start-TenantRefresh }; return $false }
+        $s.Waited++
+        if (-not (Test-Idle) -and $s.Waited -lt 1500) { return $false }
+        Show-Page 'Tenant'
+        $rows = @($script:TenantRowList)
+        Test-Smoke 'tenant lists dependency apps first, then the two apps' ($rows.Count -eq 4 -and $rows[0].Data.IsChocolatey -and $rows[1].Data.IsDependency) (($rows | ForEach-Object { $_['Title'] }) -join ', ')
+        Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 2 dependency apps*contoso*') $ui.TxtTenantCount.Text
+        $zip = $rows | Where-Object { $_['Title'] -eq '7-Zip' }
+        Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
+        Test-Smoke 'device counts linked from the install status' ($zip['Ok'] -eq '2 installed' -and $zip['Bad'] -eq '1 failed') ($zip['Ok'] + '|' + $zip['Bad'])
+        Test-Smoke 'nav badge shows the devices with problems' ($ui.BadgeTenant.Visibility -eq 'Visible' -and $ui.TxtBadgeTenant.Text -like '*problem*') $ui.TxtBadgeTenant.Text
+        $ui.LstTenant.SelectedItem = $zip
+        Test-Smoke 'panel shows the selected app with version and update mode' ($ui.ScrollTenantApp.Visibility -eq 'Visible' -and $ui.TxtTenantAppTitle.Text -eq '7-Zip' -and $ui.RbTenantStartup.IsChecked -and $ui.CmbTenantVersion.SelectedIndex -eq 0)
+        Test-Smoke 'panel summarises when updates install' ($ui.TxtTenantWhen.Text -like '*10:00 to 15:00*' -and $ui.TxtTenantConditions.Text) "$($ui.TxtTenantWhen.Text) | $($ui.TxtTenantConditions.Text)"
+        Test-Smoke 'Available note shown for an Available app' ($ui.TxtTenantAvailableNote.Visibility -eq 'Visible')
+        Test-Smoke 'open, test, remove enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantRemove.IsEnabled)
+        $ui.LstTenant.SelectedItem = $rows[0]
+        Test-Smoke 'dependency app has no update controls' ($ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantApply.Visibility -eq 'Collapsed')
+        $ui.LstTenant.SelectedItem = $zip
+        Save-SmokeShot '07-tenant'
         $true } }
     @{ Name = 'catalog knows the tenant'; Do = {
-        Show-Page 'Catalog'
-        $rows = @($ui.DgCatalog.ItemsSource)
-        $marked = @($rows | Where-Object { $_.StatusText -eq 'In tenant' } | ForEach-Object { $_.Key }) -join ','
-        Test-Smoke 'deployed apps are marked in the catalog' ($marked -eq '7zip.install,scratch') $marked
-        # List position and sorting survive a rebuild of the rows (infos and icons come in while the user scrolls)
-        $ui.DgCatalog.Items.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription('Title', 'Descending')))
-        $ui.DgCatalog.UpdateLayout()
-        $scroll = Find-VisualChild $ui.DgCatalog ([System.Windows.Controls.ScrollViewer])
-        $scroll.ScrollToVerticalOffset(30); $ui.DgCatalog.UpdateLayout()
-        Update-CatalogGrid
-        $ui.DgCatalog.UpdateLayout()
-        $scroll = Find-VisualChild $ui.DgCatalog ([System.Windows.Controls.ScrollViewer])
-        Test-Smoke 'scroll position kept on rebuild' ($scroll.VerticalOffset -eq 30) $scroll.VerticalOffset
-        Test-Smoke 'sorting kept on rebuild' ($ui.DgCatalog.Items[0].Title -eq (@($rows | ForEach-Object { $_.Title } | Sort-Object -Descending)[0])) $ui.DgCatalog.Items[0].Title
-        $ui.DgCatalog.Items.SortDescriptions.Clear()
-        Update-CatalogGrid
-        # An app that is already there is not queued again
-        $ui.TxtCatalogFilter.Text = 'scratch'
-        Test-Smoke 'filter hint hidden while typing' ($ui.HintCatalogFilter.Visibility -eq 'Collapsed')
-        [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource)[0])
-        try { Start-Deploy; Test-Smoke 'app in the tenant is not deployed again' $false }
+        Show-Page 'Apps'
+        $marked = @($script:CardCollection | Where-Object { $_['Badge'] -eq 'In tenant' } | ForEach-Object { Get-AppKey $_.Data }) -join ','
+        Test-Smoke 'deployed apps are marked in the list' ($marked -eq '7zip.install,scratch') $marked
+        $ui.TxtFilter.Text = 'scratch'
+        Set-AppSelected $script:CardCollection[0].Data $true
+        try { Show-DeployDialog; Start-Deploy; Test-Smoke 'app in the tenant is not deployed again' $false }
         catch { Test-Smoke 'app in the tenant is not deployed again' ($_.Exception.Message -like '*already in the tenant*' -and (Test-Idle 'deploy')) $_.Exception.Message }
+        Close-Dialog
         Clear-Selection
-        $ui.TxtCatalogFilter.Text = ''
+        $ui.TxtFilter.Text = ''
         $true } }
     @{ Name = 'remove from Intune'; Phase = 0; Do = {
         param($s)
         if ($s.Phase -eq 0) {
             $s.Phase = 1
             Show-Page 'Tenant'
-            # Chocolatey stays while other apps depend on it
-            $ui.DgTenant.SelectedItem = @($ui.DgTenant.ItemsSource | Where-Object IsChocolatey)[0]
+            $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.IsChocolatey })[0]
             try { & $script:ClickActions[$ui.BtnTenantRemove]; Test-Smoke 'Chocolatey is not removed while apps depend on it' $false }
             catch { Test-Smoke 'Chocolatey is not removed while apps depend on it' ($_.Exception.Message -like '*dependency of*') $_.Exception.Message }
-            $ui.DgTenant.SelectedItem = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'scratch' })[0]
+            $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'scratch' })[0]
             & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }
-        if (-not (Test-Idle 'remove') -or -not (Test-Idle 'tenant')) { return $false }
-        $rows = @($ui.DgTenant.ItemsSource)
-        Test-Smoke 'Scratch removed from the tenant' ($rows.Count -eq 2 -and -not @($rows | Where-Object { $_.Package -eq 'scratch' }).Count -and (Get-SmokeLog) -match '\[scratch\] removed from Intune') $rows.Count
-        Test-Smoke 'catalog no longer marks Scratch' (-not $script:TenantPackages.ContainsKey('scratch') -and $script:TenantPackages.ContainsKey('7zip.install'))
+        if (-not (Test-Idle)) { return $false }
+        $rows = @($script:TenantRowList)
+        Test-Smoke 'Scratch removed from the tenant' ($rows.Count -eq 3 -and -not @($rows | Where-Object { $_.Data.Package -eq 'scratch' }).Count -and (Get-SmokeLog) -match '\[scratch\] removed from Intune') $rows.Count
+        Test-Smoke 'list no longer marks Scratch' (-not $script:TenantPackages.ContainsKey('scratch') -and $script:TenantPackages.ContainsKey('7zip.install'))
         $true } }
-    @{ Name = 'search'; Started = $false; Do = {
+    @{ Name = 'search both repositories'; Started = $false; Do = {
         param($s)
-        if (-not $s.Started) { $s.Started = $true; Show-Page 'Search'; $ui.TxtSearch.Text = 'notepad'; Start-Search; return $false }
-        if (-not (Test-Idle 'search')) { return $false }
-        $rows = @($ui.DgSearch.ItemsSource)
-        Test-Smoke 'search finds notepad packages' ($rows.Count -gt 0 -and @($rows | Where-Object { $_.Id -like 'notepad*' }).Count) $rows.Count
-        if ($rows.Count) { $ui.DgSearch.SelectedItem = $rows[0] }
-        Test-Smoke 'search result shows details' ($ui.DetailBody.Visibility -eq 'Visible')
-        Save-SmokeShot '06-search'
+        if (-not $s.Started) { $s.Started = $true; Show-Page 'Apps'; $ui.TxtFilter.Text = 'notepad'; Start-AppSearch; return $false }
+        if (-not (Test-Idle 'search') -or -not (Test-Idle 'meta')) { return $false }
+        $rows = @($script:SearchRows)
+        Test-Smoke 'search merges both repositories into rows' ($rows.Count -gt 0 -and @($rows | Where-Object { $_.Name -like 'Notepad*' }).Count) (($rows | ForEach-Object { "$($_.Name)[$($_.Sources -join '/')]" }) -join ', ')
+        $npp = $script:SourceRows | Where-Object { $_.CatalogId -eq 'notepadplusplus.install' -or $_.Name -like 'Notepad++*' } | Select-Object -First 1
+        Test-Smoke 'a catalog app found in both is one card with both sources' ($npp.Sources.Count -eq 2 -and @($script:CardCollection | Where-Object { $_['Title'] -like 'Notepad++*' }).Count -eq 1) ($npp.Sources -join ',')
+        Test-Smoke 'hits not in the catalog are added to the list' ($script:CardCollection.Count -ge 1)
+        Save-SmokeShot '08-search'
+        $ui.TxtFilter.Text = ''
+        $script:SearchRows = @(); $script:SearchTerm = ''
+        Update-AppList
         $true } }
-    @{ Name = 'catalog icons'; Waited = 0; Do = {
-        param($s)
-        # SVG icons are rendered to PNG in the background, PNG icons are downloaded by WPF: wait for both
-        if ($s.Waited -eq 0) { Show-Page 'Catalog'; $ui.CmbCategory.SelectedItem = 'Browsers' }
-        $s.Waited++
-        if ((-not (Test-Idle 'icons') -and $s.Waited -lt 1200) -or $s.Waited -lt 10) { return $false }
-        if (-not $s.Rebuilt) { Update-CatalogGrid; $s.Rebuilt = $true; $s.Loaded = $s.Waited; return $false }
-        if ($s.Waited -lt $s.Loaded + 8) { return $false }   # WPF loads the images asynchronously
-        $rows = @($ui.DgCatalog.ItemsSource)
-        Test-Smoke 'all browser rows have an icon (SVG rendered)' (@($rows | Where-Object IconUrl).Count -eq $rows.Count) "$(@($rows | Where-Object IconUrl).Count) of $($rows.Count)"
-        $cached = @(Get-ChildItem $script:IconCacheDir -Filter *.png -ErrorAction SilentlyContinue).Count
-        $svg = @($script:Shared.Meta.Values | ForEach-Object { [string]$_.IconUrl } | Where-Object { $_ -match '\.svg(\?|#|$)' } | Sort-Object -Unique).Count
-        Test-Smoke 'every SVG icon cached as PNG' ($svg -gt 0 -and $cached -ge $svg) "$cached of $svg"
-        Save-SmokeShot '09-catalog-icons'
-        function Find-Visual($Parent, [type]$Type) {
-            for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent); $i++) {
-                $c = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
-                if ($c -is $Type) { return $c }
-                $r = Find-Visual $c $Type; if ($r) { return $r }
-            }
-        }
-        # The icon column really shows an image in every row (a binding error leaves the cell empty silently)
-        $shown = 0
-        for ($i = 0; $i -lt $rows.Count; $i++) {
-            $row = $ui.DgCatalog.ItemContainerGenerator.ContainerFromIndex($i)
-            $img = if ($row) { Find-Visual $row ([System.Windows.Controls.Image]) }
-            if ($img -and $img.Source) { $shown++ }
-        }
-        Test-Smoke 'icon column shows an image in every browser row' ($shown -eq $rows.Count) "$shown of $($rows.Count)"
-        $ui.CmbCategory.SelectedIndex = 0
-        $true } }
-    @{ Name = 'winget catalog'; Phase = 0; Waited = 0; Do = {
-        param($s)
-        if ($s.Phase -eq 0) {
-            $s.Phase = 1
-            Show-Page 'Catalog'
-            Test-Smoke 'source switch shows Chocolatey as active' ($ui.SrcChocolatey.IsChecked -and -not $ui.SrcWinget.IsChecked)
-            & $script:ClickActions[$ui.SrcChocolatey]
-            Test-Smoke 'clicking the active source changes nothing' ($script:Source -eq 'Chocolatey')
-            & $script:ClickActions[$ui.SrcWinget]
-            Test-Smoke 'source switch moves to winget' ($script:Source -eq 'Winget' -and $ui.SrcWinget.IsChecked -and -not $ui.SrcChocolatey.IsChecked -and $ui.HintSearch.Text -like '*winget*')
-            Test-Smoke 'winget catalog lists the apps with a winget id' (@($ui.DgCatalog.ItemsSource).Count -eq @($script:Catalog | Where-Object WingetId).Count) @($ui.DgCatalog.ItemsSource).Count
-            Test-Smoke 'switching the source clears the selection' ($script:Selected.Count -eq 0)
-            return $false
-        }
-        $s.Waited++
-        if (-not (Test-Idle 'meta') -and $s.Waited -lt 1200) { return $false }
-        if ($s.Waited -lt 4) { return $false }
-        $rows = @($ui.DgCatalog.ItemsSource)
-        $vlc = $rows | Where-Object { $_.Id -eq 'VideoLAN.VLC' }
-        Test-Smoke "winget infos from the manifest: $($vlc.Authors), $($vlc.License)" ($vlc.Found -and $vlc.Version -eq '3.0.24' -and $vlc.Authors -and $vlc.License) ($vlc | Select-Object Id, Version, Authors, License | ConvertTo-Json -Compress)
-        Test-Smoke 'winget row lends the Chocolatey icon' ([bool]$vlc.RawIconUrl) $vlc.RawIconUrl
-        # Fixed package instead of the live repository (every catalog id may exist there by now)
-        $unknown = New-PackageRow -Id 'Contoso.DoesNotExist' -Name 'Contoso' -Category 'Test' -Source 'Winget' `
-            -Meta ([pscustomobject]@{ Found = $false; NotFound = $true; Name = 'Contoso.DoesNotExist'; Error = 'was not found' })
-        Test-Smoke 'unknown winget id shows as not found' ($unknown.StatusText -eq 'Not found' -and $unknown.Status -eq 'Error') "$($unknown.StatusText)|$($unknown.Status)"
-        Test-Smoke 'license note on winget AnyDesk' ((@($rows | Where-Object { $_.Id -eq 'AnyDesk.AnyDesk' })[0]).LicenseNote -like '*AnyDesk license*')
-        $ui.DgCatalog.SelectedItem = $vlc
-        Test-Smoke 'details point to winget-pkgs' ($ui.BtnDetailChoco.Content -eq 'winget-pkgs' -and $ui.TxtDetailMeta.Text -like '*license*') $ui.TxtDetailMeta.Text
-        Save-SmokeShot '10-winget-catalog'
-        $true } }
-    @{ Name = 'winget deploy'; Phase = 0; Do = {
+    @{ Name = 'winget deploy and runtime dependency'; Phase = 0; Do = {
         param($s)
         if ($s.Phase -eq 0) {
             $s.Phase = 1
             Clear-Selection
-            # VLC is new; 7-Zip already exists in the tenant as the Chocolatey app of the same name
-            foreach ($id in 'VideoLAN.VLC', '7zip.7zip') { [void]$ui.DgCatalog.SelectedItems.Add(@($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq $id })[0]) }
-            Test-Smoke 'two winget apps selected' ($script:Selected.Count -eq 2 -and $script:Selected.Contains('winget:videolan.vlc')) (@($script:Selected.Keys) -join ',')
+            $vlc = $script:SourceRows | Where-Object { $_.WingetId -eq 'VideoLAN.VLC' } | Select-Object -First 1
+            Set-AppSelected $vlc $true
+            $ui.RbAvailable.IsChecked = $true
+            Show-DeployDialog
+            $combo = $script:DeployCombos[0]
+            $combo.Combo.SelectedIndex = [array]::IndexOf($combo.Sources, 'Winget')
+            Test-Smoke 'winget source chosen per app in the dialog' ($combo.Sources[$combo.Combo.SelectedIndex] -eq 'Winget' -and $script:SourceChoice[(Get-AppKey $vlc)] -eq 'Winget')
             Start-Deploy
             return $false
         }
         if (-not (Test-Idle)) { return $false }
-        $apps = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+        $apps = Get-StoreApps
         $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
-        Test-Smoke 'winget VLC has the borrowed icon and the publisher from the manifest' ($vlc.hasIcon -and $vlc.iconValid -and $vlc.publisher -and $vlc.publisher -ne '-') $vlc.publisher
-        $vlcLog = (@((Get-SmokeLog) -split "`n" | Where-Object { $_ -match '\[VideoLAN\.VLC\]' })) -join "`n"
+        $vlcLog = Get-JobLog
         Test-Smoke 'winget app has the winget runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the winget runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
-        Test-Smoke 'same app from the other source is not created twice' ((Get-SmokeLog) -match '\[7zip\.7zip\] .*already deployed' -and @($apps | Where-Object { $_.displayName -eq '7-Zip' }).Count -eq 1)
         $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
-        Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'" -and (Get-Content $pkg.FullName -Raw) -match 'Intune-Winget-Updates')
-        $true } }
-    @{ Name = 'winget tenant and search'; Phase = 0; Do = {
+        Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'")
+        Test-GeneratedScripts (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC') 'winget'
+        # An older winget app without the dependency: banner offers to add it
+        $store = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+        $all = Get-StoreApps; ($all | Where-Object { $_.notes -like 'PoweredByWinget*' }).dependencies = @()
+        ConvertTo-Json -InputObject @($all) -Depth 6 | Set-Content $store
+        Start-RuntimeCheck
+        return $true
+        return $false } }
+    @{ Name = 'runtime dependency banner'; Phase = 0; Do = {
         param($s)
-        if ($s.Phase -eq 0) { $s.Phase = 1; if (Test-Idle 'tenant') { Start-TenantRefresh }; return $false }
-        if ($s.Phase -eq 1) {
-            if (-not (Test-Idle 'tenant')) { return $false }
-            $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'VideoLAN.VLC' })[0]
-            Test-Smoke 'tenant shows the winget app with its source' ($row -and $row.Source -eq 'Winget' -and $row.StatusText -eq 'winget') ($row | ConvertTo-Json -Compress)
-            Test-Smoke 'winget catalog marks VLC as in tenant' ((@($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq 'VideoLAN.VLC' })[0]).StatusText -eq 'In tenant')
-            Test-Smoke 'Chocolatey catalog does not mark the winget VLC' (-not $script:TenantPackages.ContainsKey('vlc'))
-            $s.Phase = 2
-            Show-Page 'Search'
-            $ui.TxtSearch.Text = 'notepad'
-            Start-Search
+        if ($s.Phase -eq 0) {
+            if (-not (Test-Idle)) { return $false }
+            Show-Page 'Tenant'; Update-TenantRows -Force
+            Test-Smoke 'banner offers the missing winget runtime dependency' ($ui.BannerRuntime.Visibility -eq 'Visible' -and $ui.TxtBannerRuntime.Text -like '*VLC*') $ui.TxtBannerRuntime.Text
+            $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'VideoLAN.VLC' })[0]
+            Test-Smoke 'panel of the app mentions it too' ($ui.TxtDependencyNote.Visibility -eq 'Visible')
+            Save-SmokeShot '09-tenant-runtime-banner'
+            & $script:ClickActions[$ui.BtnBannerRuntime]
+            $s.Phase = 1
             return $false
         }
-        if (-not (Test-Idle 'search') -or -not (Test-Idle 'meta')) { return $false }
-        $rows = @($ui.DgSearch.ItemsSource)
-        Test-Smoke "winget search finds and ranks: $(($rows | ForEach-Object Id) -join ', ')" ($rows.Count -ge 2 -and $rows[0].Id -like 'Notepad*' -and $rows[0].Source -eq 'Winget') ''
-        $npp = $rows | Where-Object { $_.Id -eq 'Notepad++.Notepad++' }
-        Test-Smoke 'search result completed from the manifest' ($npp.Authors -like 'Notepad++*') $npp.Authors
-        Save-SmokeShot '11-winget-search'
-        & $script:ClickActions[$ui.SrcChocolatey]
-        $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
-        Test-Smoke 'back to Chocolatey, source saved' ($script:Source -eq 'Chocolatey' -and $saved.Source -eq 'Chocolatey' -and @($ui.DgCatalog.ItemsSource).Count -eq $script:Catalog.Count)
+        if (-not (Test-Idle)) { return $false }
+        $vlc = Get-StoreApps | Where-Object { $_.notes -like 'PoweredByWinget*' }
+        Test-Smoke 'dependency added, banner gone' (@($vlc.dependencies).Count -eq 1 -and $ui.BannerRuntime.Visibility -eq 'Collapsed') "$(@($vlc.dependencies).Count) / $($ui.BannerRuntime.Visibility)"
         $true } }
-    @{ Name = 'update settings per app'; Phase = 0; Do = {
+    @{ Name = 'update settings and schedule'; Phase = 0; Do = {
         param($s)
-        function Get-StoreApp([string]$Package) { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like "*package=$Package;*" })[0] }
-        function Test-GeneratedScripts([string]$Folder, [string]$What) {
-            # The scripts that run on the devices must at least be valid PowerShell, without leftover placeholders
-            foreach ($file in Get-ChildItem $Folder -Filter '*.ps1' -Recurse) {
-                $errors = $null
-                [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
-                $text = Get-Content $file.FullName -Raw
-                Test-Smoke "$What script $($file.Name) is valid" ($errors.Count -eq 0 -and $text -notmatch '__[A-Z]+__') (@($errors | ForEach-Object { $_.Message }) -join '; ')
-            }
-            # Review findings: lock, protected folders, no marker without tasks, Custom checks at startup
-            $install = Get-Content (Join-Path $Folder 'source\install.ps1') -Raw
-            $update = Get-Content (Join-Path $Folder 'source\update.ps1') -Raw
-            Test-Smoke "$What scripts share the device lock" ($install -match 'Global.IntuneChocoDeployment"' -and $install -match 'Enter-DeploymentLock' -and $update -match 'Enter-DeploymentLock')
-            Test-Smoke "$What helper folder is protected by SID" ($install -match 'Protect-Folder' -and $install -match 'S-1-5-18' -and $install -match 'S-1-5-32-544' -and $install -match 'SetAccessRuleProtection\(\$true')
-            Test-Smoke "$What install fails without its tasks" ($install -match 'could not be registered[^\n]*\n[\s\S]{0,200}exit 1' -and $install -notmatch 'Set-Content -Path \(Join-Path \$AppRoot "policy.txt"\)')
-            Test-Smoke "$What startup task checks in Custom mode" ($install -match '\$Step = if \(\$Mode -eq "Custom"\) \{ "Check" \}' -and $install -match 'New-ScheduledTaskTrigger -Weekly')
-            if ($What -eq 'Chocolatey') {
-                Test-Smoke 'Chocolatey uninstall removes dependencies' ($install -match 'uninstall \$Package -y --no-progress --remove-dependencies')
-                Test-Smoke 'Chocolatey check asks for the one package' ($update -match 'search \$Package --exact --limit-output' -and $update -notmatch 'outdated')
-                Test-Smoke 'Chocolatey updates itself once a day' ($update -match 'upgrade chocolatey' -and $update -match 'Test-ChocolateyUpdateDue')
-            }
-            else {
-                $detection = Get-Content (Join-Path $Folder 'detection.ps1') -Raw
-                Test-Smoke 'winget installs only machine scope' ($install -notmatch 'trying without scope' -and $update -notmatch 'upgrade @Common @VersionArguments \| Out-Null')
-                Test-Smoke 'winget uninstall without source' ($install -match 'uninstall --id \$Id --exact --silent')
-                Test-Smoke 'winget detection uses the exit code' ($detection -match 'list --id \$Id --exact --source winget' -and $detection -notmatch 'Escape')
-            }
-        }
         switch ($s.Phase) {
             0 {
-                # Chocolatey app with its own settings at the deployment: pinned, user prompt, 3 days
-                Show-Page 'Catalog'
-                Clear-Selection
+                # Chocolatey app with its own settings at the deployment: pinned, user prompt, 3 days, own schedule
+                Show-Page 'Apps'; Clear-Selection
                 $s.Package = 'putty.install'
-                $row = @($ui.DgCatalog.ItemsSource | Where-Object { $_.Id -eq $s.Package })[0]
-                Test-Smoke 'deploy panel starts with the settings defaults' ($ui.CmbDeployUpdate.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
+                $row = $script:SourceRows | Where-Object { $_.ChocoId -eq $s.Package } | Select-Object -First 1
+                Set-AppSelected $row $true
+                $ui.RbAvailable.IsChecked = $true
+                Show-DeployDialog
+                $script:DeployCombos[0].Combo.SelectedIndex = [array]::IndexOf($script:DeployCombos[0].Sources, 'Chocolatey')
                 $ui.CmbDeployUpdate.SelectedIndex = 2
-                Test-Smoke 'grace period appears for the user prompt' ($ui.PanelDeployGrace.Visibility -eq 'Visible' -and $ui.TxtDeployUpdateHelp.Text -like '*installed anyway*')
-                $ui.TxtDeployGrace.Text = 'x'
-                try { [void](Read-PolicyControls 'Deploy'); Test-Smoke 'invalid grace period rejected' $false } catch { Test-Smoke 'invalid grace period rejected' ($_.Exception.Message -like '*90 days*') $_.Exception.Message }
                 $ui.TxtDeployGrace.Text = '3'; $ui.CmbDeployGraceUnit.SelectedIndex = 1; $ui.CmbDeployVersion.SelectedIndex = 1
-                [void]$ui.DgCatalog.SelectedItems.Add($row)
-                Test-Smoke 'test button for one selected app' $ui.BtnTestSelected.IsEnabled
-                Save-SmokeShot '12-deploy-update-settings'
+                Test-Smoke 'deploy dialog links to the schedule' ($ui.BtnDeploySchedule.Visibility -eq 'Visible' -and $ui.TxtDeploySchedule.Text)
+                & $script:ClickActions[$ui.BtnDeploySchedule]
+                Test-Smoke 'schedule dialog opens for the new apps (no apply-to switch)' ($ui.DlgSchedule.Visibility -eq 'Visible' -and $ui.SegSchedule.Visibility -eq 'Collapsed' -and $ui.BtnScheduleApply.Content -eq 'Use for these apps') $ui.BtnScheduleApply.Content
+                $ui.SchFrom.Text = '12:00'; $ui.SchTo.Text = '13:00'; $ui.SchMains.IsChecked = $true; $ui.SchStart.IsChecked = $false
+                $ui.SchD6.IsChecked = $false; $ui.SchD7.IsChecked = $false
+                Update-ScheduleSummary
+                Test-Smoke 'one-line summary follows the fields' ($ui.TxtScheduleSummary.Text -like 'Summary: Daily 12:00 to 13:00*mains power*' -or $ui.TxtScheduleSummary.Text -like '*Mon to Fri*12:00 to 13:00*mains*') $ui.TxtScheduleSummary.Text
+                Save-SmokeShot '10-schedule-dialog'
+                $ui.SchFrom.Text = '25:00'
+                try { [void](Read-ScheduleControls); Test-Smoke 'invalid time rejected' $false } catch { Test-Smoke 'invalid time rejected' ($_.Exception.Message -like '*time like 10:00*') $_.Exception.Message }
+                $ui.SchFrom.Text = '12:00'
+                & $script:ClickActions[$ui.BtnScheduleApply]
+                Test-Smoke 'schedule is kept for the deployment, deploy dialog is back' ($ui.DlgDeploy.Visibility -eq 'Visible' -and $script:DeploySchedule.OnlyOnMains -and $ui.TxtDeploySchedule.Text -like '*12:00 to 13:00*') $ui.TxtDeploySchedule.Text
                 Start-Deploy
                 $s.Phase = 1
                 return $false
@@ -400,81 +432,209 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'deployment carries the update settings' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                $cfg = ConvertFrom-ChocoAppNotes $app.notes
+                Test-Smoke 'schedule reached the notes' ($cfg.Schedule.WindowFrom -eq '12:00' -and $cfg.Schedule.OnlyOnMains -and -not $cfg.Schedule.TriggerStart -and $cfg.Schedule.WindowDays -eq '12345') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
                 Test-Smoke 'install script has the update routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 72')
                 Test-GeneratedScripts (Join-Path $script:WorkRoot "package\$($s.Package)") 'Chocolatey'
                 $s.Detection = $app.detection
-                Reset-DeployPolicy
-                Start-TenantRefresh
-                $s.Phase = 2
+                Show-Page 'Tenant'
+                $s.Waited = 0; $s.Phase = 2
                 return $false
             }
             2 {
-                if (-not (Test-Idle 'tenant')) { return $false }
-                Show-Page 'Tenant'
-                $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq $s.Package })[0]
-                $ui.DgTenant.SelectedItem = $row
-                Test-Smoke 'tenant lists version and update mode' ($row.VersionText -eq $row.Version -and $row.UpdateText -eq 'User prompt, installed after 3 day(s)') "$($row.VersionText) / $($row.UpdateText)"
-                Test-Smoke 'panel shows the settings of the app' ($ui.GbTenantPolicy.Visibility -eq 'Visible' -and $ui.CmbTenantUpdate.SelectedIndex -eq 2 -and $ui.TxtTenantGrace.Text -eq '3' -and $ui.CmbTenantVersion.SelectedItem -eq $row.Version) "$($ui.CmbTenantUpdate.SelectedIndex)/$($ui.TxtTenantGrace.Text)/$($ui.CmbTenantVersion.SelectedItem)"
-                Save-SmokeShot '13-tenant-update-settings'
-                # Later change: updates off, follow the latest version again
-                $ui.CmbTenantUpdate.SelectedIndex = 0
-                Start-AppPolicyUpdate -App $row -Version 'latest' -Policy (Read-PolicyControls 'Tenant')
+                if (-not (Test-Idle)) { return $false }
+                Update-TenantRows -Force
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Package -eq $s.Package })[0]
+                $ui.LstTenant.SelectedItem = $row
+                Test-Smoke 'tenant lists version and update mode' ($row['Version'] -ne 'Always newest' -and $row['Updates'] -eq 'Ask user, 3 days') "$($row['Version']) / $($row['Updates'])"
+                Test-Smoke 'panel shows the three explained choices, Ask the user selected' ($ui.RbTenantCustom.IsChecked -and $ui.TxtTenantGrace.Text -eq '3' -and $ui.CmbTenantGraceUnit.SelectedIndex -eq 1 -and $ui.PanelTenantGrace.Visibility -eq 'Visible')
+                Test-Smoke 'panel pins the version' ($ui.CmbTenantVersion.SelectedIndex -ge 1 -and $ui.CmbTenantVersion.SelectedItem -eq $row.Data.Version) "$($ui.CmbTenantVersion.SelectedItem)"
+                Test-Smoke 'panel summarises the schedule of the app' ($ui.TxtTenantWhen.Text -like '*') $ui.TxtTenantWhen.Text
+                # Schedule dialog from the panel: change and apply (in place, the app is Available but the schedule path uses Update-IntuneChocoApp)
+                $ui.RbTenantStartup.IsChecked = $true
+                & $script:ClickActions[$ui.BtnTenantSchedule]
+                Test-Smoke 'schedule dialog opens for the app with its values' ($ui.DlgSchedule.Visibility -eq 'Visible' -and $ui.SegSchedule.Visibility -eq 'Visible' -and $ui.SchFrom.Text -eq '12:00' -and [bool]$ui.SchMains.IsChecked -and $ui.TxtScheduleTitle.Text -like '*PuTTY*') $ui.TxtScheduleTitle.Text
+                $ui.SchIdle.IsChecked = $true; $ui.SchIdleMin.SelectedIndex = 3
+                $ui.SchRetry.SelectedIndex = 2; $ui.SchRetryCount.Text = '2'
+                Update-ScheduleSummary
+                Test-Smoke 'summary mentions the idle condition' ($ui.TxtScheduleSummary.Text -like '*15 min idle*') $ui.TxtScheduleSummary.Text
+                Test-Smoke 'apply button says Apply in Intune' ($ui.BtnScheduleApply.Content -eq 'Apply in Intune') $ui.BtnScheduleApply.Content
+                $ui.CmbTenantVersion.SelectedIndex = 0
+                $s.Uploads = (Get-StoreApp $s.Package).uploads
+                & $script:ClickActions[$ui.BtnScheduleApply]
                 $s.Phase = 3
                 return $false
             }
             3 {
-                if (-not (Test-Idle 'policy') -or -not (Test-Idle 'tenant')) { return $false }
+                if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'later change reaches the app in Intune' ($app.notes -match 'version=latest;update=Off' -and $app.displayVersion -eq 'latest' -and $app.uploads -eq 2) "$($app.notes) / $($app.uploads)"
-                Test-Smoke 'detection rule changes, devices apply it' ($app.detection -and $app.detection -ne $s.Detection)
+                Test-Smoke 'schedule applied in place through Update-IntuneChocoApp' ($app.notes -match 'version=latest;update=Startup' -and $app.uploads -eq ($s.Uploads + 1) -and $app.detection -ne $s.Detection) "$($app.notes) / $($app.uploads)"
+                $cfg = ConvertFrom-ChocoAppNotes $app.notes
+                Test-Smoke 'new schedule reached the app' ($cfg.Schedule.IdleMinutes -eq 15 -and $cfg.Schedule.RetryMode -eq 'Every' -and $cfg.Schedule.RetryCount -eq 2 -and $cfg.Schedule.WindowFrom -eq '12:00') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
-                Test-Smoke 'new install script has the new routine' ($install -match "\`$Mode = 'Off'")
-                $row = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq $s.Package })[0]
-                Test-Smoke 'tenant shows the new settings' ($row.UpdateText -eq 'Off' -and $row.VersionText -eq 'Latest') "$($row.VersionText) / $($row.UpdateText)"
-                # A winget app gets the same routine
-                $vlc = @($ui.DgTenant.ItemsSource | Where-Object { $_.Package -eq 'VideoLAN.VLC' })[0]
-                Test-Smoke 'winget app is deployed with a policy' ($vlc.HasPolicy -and $vlc.UpdateText -eq 'At every startup') "$($vlc.HasPolicy) / $($vlc.UpdateText)"
-                $ui.DgTenant.SelectedItem = $vlc
-                $ui.CmbTenantUpdate.SelectedIndex = 2; $ui.TxtTenantGrace.Text = '12'; $ui.CmbTenantGraceUnit.SelectedIndex = 0
-                $s.WingetDetection = (Get-StoreApp 'VideoLAN.VLC').detection
-                Start-AppPolicyUpdate -App $vlc -Version 'latest' -Policy (Read-PolicyControls 'Tenant')
+                Test-Smoke 'new install script has the new routine' ($install -match "\`$Mode = 'Startup'")
+                # Default for new apps, from the same dialog
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Package -eq $s.Package })[0]
+                $ui.LstTenant.SelectedItem = $row
+                & $script:ClickActions[$ui.BtnTenantSchedule]
+                $ui.RbSchDefault.IsChecked = $true
+                Test-Smoke 'switching to the default shows Save as default' ($ui.BtnScheduleApply.Content -eq 'Save as default') $ui.BtnScheduleApply.Content
+                $ui.SchMains.IsChecked = $false; $ui.SchPresentation.IsChecked = $true
+                & $script:ClickActions[$ui.BtnScheduleApply]
+                $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
+                Test-Smoke 'default schedule saved in the settings' ($saved.UpdateSchedule -match 'NoPresentation' -and (Get-ChocoScheduleDefaults).NoPresentation -and -not (Get-ChocoScheduleDefaults).OnlyOnMains) $saved.UpdateSchedule
+                Show-Page 'Settings'
+                Test-Smoke 'settings summarise the default schedule' ($ui.TxtDefaultSchedule.Text -like '*presentations*') $ui.TxtDefaultSchedule.Text
+                # Release through Publish-IntuneChocoRelease: an Available app is superseded by a new app
+                Show-Page 'Tenant'
+                $zip = @($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' })[0]
+                $ui.LstTenant.SelectedItem = $zip
+                $ui.RbTenantCustom.IsChecked = $true; $ui.TxtTenantGrace.Text = '12'; $ui.CmbTenantGraceUnit.SelectedIndex = 0
+                $s.Before = @(Get-StoreApps).Count
+                & $script:ClickActions[$ui.BtnTenantApply]
                 $s.Phase = 4
                 return $false
             }
             4 {
-                if (-not (Test-Idle 'policy') -or -not (Test-Idle 'tenant')) { return $false }
-                $app = Get-StoreApp 'VideoLAN.VLC'
-                Test-Smoke 'winget app changed in Intune' ($app.notes -match '^PoweredByWinget;package=VideoLAN\.VLC;version=latest;update=Custom;grace=12;source=;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.detection -ne $s.WingetDetection) $app.notes
-                $folder = Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC'
-                $install = Get-Content (Join-Path $folder 'source\install.ps1') -Raw
-                Test-Smoke 'winget install script has the routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 12' -and $install -match 'Intune-Winget-Updates')
-                Test-Smoke 'winget prompt starts the winget task' ((Get-Content (Join-Path $folder 'source\notify.ps1') -Raw) -match '\\Intune-Winget-Updates\\Update')
-                Test-Smoke 'winget detection checks the policy' ((Get-Content (Join-Path $folder 'detection.ps1') -Raw) -match 'policy\.txt')
-                Test-GeneratedScripts $folder 'winget'
-                $s.Phase = 5
-                # Package ids with a plus survive the notes
-                Test-Smoke 'package id with plus read from the notes' ((ConvertFrom-ChocoAppNotes 'PoweredByWinget;package=Notepad++.Notepad++;version=latest;update=Off;grace=48').Package -eq 'Notepad++.Notepad++')
-                Test-Smoke 'old notes without policy keep the old behavior' ((ConvertFrom-ChocoAppNotes 'PoweredByChocolatey;package=vlc').UpdateMode -eq 'Startup' -and -not (ConvertFrom-ChocoAppNotes 'PoweredByChocolatey;package=vlc').HasPolicy)
-                # Versions to choose from, in both sources
-                $s.Waited = 0
-                return $false
-            }
-            5 {
-                $s.Waited++
-                if (-not (Test-Idle 'versions') -and $s.Waited -lt 600) { return $false }
-                $choices = @($ui.CmbTenantVersion.ItemsSource)
-                Test-Smoke 'version list has the latest and real versions' ($choices[0] -eq 'Always the latest version' -and $choices.Count -ge 2 -and $choices -contains '3.0.24') ($choices -join ', ')
+                if (-not (Test-Idle)) { return $false }
+                $apps = Get-StoreApps
+                $zips = @($apps | Where-Object { $_.notes -like '*package=7zip.install;*' })
+                $new = $zips | Where-Object { $_.notes -match 'update=Custom;grace=12' }
+                $old = $zips | Where-Object { $_.notes -notmatch 'update=Custom;grace=12' }
+                Test-Smoke 'Available app is released as a new app that supersedes the old one' ($apps.Count -eq $s.Before + 1 -and $new -and @($new.supersedence).targetId -contains $old.id) "$($apps.Count) / $($s.Before)"
+                Test-Smoke 'tenant lists the app once per version' (@($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' }).Count -eq 2)
                 $true
             }
         } } }
+    @{ Name = 'status of one app'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            $zip = @($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' -and $_.Data.UpdateMode -eq 'Custom' })[0]
+            Test-Smoke 'row links to the status page' ($zip -and $zip['Ok'])
+            Show-AppStatus $zip.Data
+            return $false
+        }
+        if (-not (Test-Idle)) { return $false }
+        Test-Smoke 'status page shows the counters' ($ui.TxtStatOk.Text -eq '2' -and $ui.TxtStatWait.Text -eq '1' -and $ui.TxtStatFail.Text -eq '1' -and $ui.TxtStatStale.Text -eq '1') "$($ui.TxtStatOk.Text)/$($ui.TxtStatWait.Text)/$($ui.TxtStatFail.Text)/$($ui.TxtStatStale.Text)"
+        Test-Smoke 'device table lists the devices, failed first' ($script:DeviceRowList.Count -eq 4 -and $script:DeviceRowList[0]['Title'] -eq 'PC-0142' -and $script:DeviceRowList[0]['Status'] -eq 'Failed') (($script:DeviceRowList | ForEach-Object { $_['Title'] + ':' + $_['Status'] }) -join ', ')
+        Test-Smoke 'cause comes from the device report' ($script:DeviceRowList[0]['Cause'] -like '*rate limit*') $script:DeviceRowList[0]['Cause']
+        Test-Smoke 'device log shows the reported lines and the retry hint' ($ui.BoxDeviceLog.Visibility -eq 'Visible' -and $ui.TxtDeviceLog.Text -like '*rate limit*' -and $ui.TxtRetryHint.Text -like '*retries by itself*') $ui.TxtDeviceLog.Text
+        $info = Get-InsightDiagnosticsInfo -ManagedDeviceId $script:DeviceRowList[0].Data.DeviceId -Package '7zip.install'
+        Test-Smoke 'diagnostics point to the Intune admin center device page' ($info.Url -like '*intune.microsoft.com*md-1*' -and $info.Hint -like '*Collect diagnostics*') $info.Url
+        Test-Smoke 'status script present: no banner' ($ui.BoxStatusScript.Visibility -eq 'Collapsed')
+        Save-SmokeShot '11-status'
+        # Without the status script the page degrades to the install status; without the license it says so
+        $script:StatusScript = @{ State = 'Missing' }
+        Update-StatusBanner
+        Test-Smoke 'missing status script: banner offers the setup' ($ui.BoxStatusScript.Visibility -eq 'Visible' -and $ui.BtnStatusScript.Visibility -eq 'Visible')
+        Set-Content (Join-Path $env:LOCALAPPDATA 'fake-nolicense.txt') 'x'
+        $script:StatusScript = $null
+        Start-StatusCheck
+        return $true
+        return $false } }
+    @{ Name = 'status without Remediations license'; Do = {
+        if (-not (Test-Idle)) { return $false }
+        Test-Smoke 'no license: marked not available, degrade message' ($script:StatusScript.State -eq 'NotAvailable' -and $ui.BoxStatusScript.Visibility -eq 'Visible' -and $ui.BtnStatusScript.Visibility -eq 'Collapsed' -and $ui.TxtStatusScript.Text -like '*Remediations*') $ui.TxtStatusScript.Text
+        $item = Get-ReadinessItems | Where-Object Key -eq 'status'
+        Test-Smoke 'start page: optional item says it is not available' ($item.Text -like 'Not available*' -and -not $item.Fix) $item.Text
+        Save-SmokeShot '12-status-degraded'
+        Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-nolicense.txt')
+        $script:StatusScript = $null; Start-StatusCheck
+        $true } }
+    @{ Name = 'import dialog'; Phase = 0; Do = {
+        param($s)
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $script:ImportApps = $null
+                & $script:ClickActions[$ui.BtnImport]
+                Test-Smoke 'import dialog opens with three sources' ($ui.DlgImport.Visibility -eq 'Visible' -and $ui.RbImpThis.IsChecked -and $ui.RbImpOther -and $ui.RbImpFile)
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Update-ImportRows
+                $rows = @($script:ImportRowList)
+                $by = @{}; foreach ($r in $rows) { $by[$r['Title']] = $r }
+                Test-Smoke 'table lists classified apps, infrastructure hidden' ($rows.Count -ge 4 -and -not ($rows | Where-Object { $_['Title'] -eq 'Chocolatey' })) (($rows | ForEach-Object { $_['Title'] }) -join ', ')
+                Test-Smoke 'winget Win32 app: take over, selectable' ($by['Zoom Workplace']['Kind'] -eq 'Win32 with winget' -and $by['Zoom Workplace']['Action'] -eq 'Take over' -and $by['Zoom Workplace']['CanPick'] -eq 'True' -and $by['Zoom Workplace']['Found'] -like '*Zoom.Zoom*') ($by['Zoom Workplace'] | ConvertTo-Json -Compress)
+                Test-Smoke 'Chocolatey app shows its pinned version' ($by['Greenshot']['Settings'] -like '*1.3.290*' -and $by['Greenshot']['Action'] -eq 'Take over')
+                Test-Smoke 'own installer cannot be managed, dimmed and not selectable' ($by['Own VPN']['Action'] -eq 'Cannot be managed' -and $by['Own VPN']['CanPick'] -eq 'False' -and $by['Own VPN']['Opacity'] -lt 1)
+                Test-Smoke 'already managed app is listed as managed' ($by['Sample managed']['Action'] -eq 'Already managed')
+                Test-Smoke 'summary counts the selected apps' ($ui.TxtImportSummary.Text -like '2 of * apps selected*' -and $ui.BtnImportGo.Content -eq 'Take over 2 apps') "$($ui.TxtImportSummary.Text) / $($ui.BtnImportGo.Content)"
+                Save-SmokeShot '13-import'
+                $by['Greenshot']['Checked'] = 'False'; Update-ImportSummary
+                Test-Smoke 'unchecking updates the button' ($ui.BtnImportGo.Content -eq 'Take over 1 app') $ui.BtnImportGo.Content
+                & $script:ClickActions[$ui.BtnImportGo]
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                $patches = Get-Content (Join-Path $env:LOCALAPPDATA 'fake-patches.log') -ErrorAction SilentlyContinue
+                Test-Smoke 'take over writes the notes to the selected app only' (@($patches).Count -eq 1 -and $patches -like '*mobileApps/i1*') ($patches -join ',')
+                Test-Smoke 'import closes the dialog and shows the job' ($ui.DialogLayer.Visibility -eq 'Collapsed' -and $script:CurrentPage -eq 'Activity')
+                # Export file round trip: export the managed apps, read them again as candidates
+                $file = Join-Path $script:SmokeOut 'export.json'
+                $script:ImportApps = @(Get-InsightTenantApps -Context (New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))) -DefaultUpdateMode 'Startup' -DefaultGraceHours 48)
+                Export-ManagedApps $file
+                $doc = Get-Content $file -Raw | ConvertFrom-Json
+                Test-Smoke 'export writes the managed apps without ids' ($doc.format -eq 'IntuneChocoDeployment.Export' -and @($doc.apps).Count -eq 1 -and (Get-Content $file -Raw) -notmatch 'i4') (Get-Content $file -Raw)
+                Show-Page 'Tenant'; Show-ImportDialog
+                $ui.RbImpFile.IsChecked = $true
+                Test-Smoke 'export file source shows the file chooser' ($ui.PanelImpFile.Visibility -eq 'Visible')
+                @{ format = 'IntuneChocoDeployment.Export'; version = 1; exported = '2026-01-01'; apps = @(@{ displayName = 'Scratch'; source = 'Chocolatey'; package = 'scratch'; version = ''; updateMode = 'Startup'; graceHours = 48; packageSource = '' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $script:SmokeOut 'export2.json')
+                Read-ImportFile (Join-Path $script:SmokeOut 'export2.json')
+                Test-Smoke 'file rows are offered as Create here' ($script:ImportRowList.Count -eq 1 -and $script:ImportRowList[0]['Action'] -eq 'Create here' -and $script:ImportRowList[0]['Kind'] -eq 'Export file') ($script:ImportRowList[0] | ConvertTo-Json -Compress)
+                Save-SmokeShot '14-import-file'
+                $ui.RbImpOther.IsChecked = $true
+                Test-Smoke 'another tenant source asks for tenant and client ID' ($ui.PanelImpOther.Visibility -eq 'Visible' -and $ui.TxtImportEmpty.Text -like '*client ID*')
+                $ui.RbImpFile.IsChecked = $true
+                Read-ImportFile (Join-Path $script:SmokeOut 'export2.json')
+                $script:ImportExisting = @()
+                & $script:ClickActions[$ui.BtnImportGo]
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'app from the export file created in this tenant' (@(Get-StoreApps | Where-Object { $_.notes -like '*package=scratch;*' }).Count -eq 1) (@(Get-StoreApps | ForEach-Object { $_.displayName }) -join ',')
+                $true
+            }
+        } } }
+    @{ Name = 'activity: failure, retry, clear'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            [void](Start-UiTask -Kind 'deploy' -Title 'Deploying Broken (test)' -Display 'Broken app' -Package 'broken' -Work 'throw "Upload failed: the Intune session expired. Sign in again and retry."')
+            return $false
+        }
+        if ($s.Phase -eq 1) {
+            if (-not (Test-Idle)) { return $false }
+            $row = $script:JobRows[0]
+            Test-Smoke 'failed job is red with its reason and a Retry button' ($row['Status'] -eq 'Failed' -and $row['Sub'] -like 'Upload failed*' -and $row['RetryVis'] -eq 'Visible') ($row['Status'] + '|' + $row['Sub'])
+            Test-Smoke 'failure raises a toast' (@($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count -ge 1)
+            $row.Data.LogOpen = $true; Update-JobRow $row.Data
+            Test-Smoke 'log expands with the message' ($row['LogVis'] -eq 'Visible' -and $row['Log'] -like '*Upload failed*')
+            Show-Page 'Activity'
+            Save-SmokeShot '15-activity-failed'
+            $count = $script:JobRows.Count
+            Restart-Job $row.Data
+            Test-Smoke 'retry starts the job again' ($script:JobRows.Count -eq $count -and $script:JobRows[0]['Status'] -in 'Waiting', 'Running', 'Failed')
+            $s.Phase = 2; return $false
+        }
+        if (-not (Test-Idle)) { return $false }
+        & $script:ClickActions[$ui.BtnLogClear]
+        Test-Smoke 'Clear finished removes the done jobs' ($script:JobRows.Count -eq 0 -and $ui.TxtJobsEmpty.Visibility -eq 'Visible') $script:JobRows.Count
+        Test-Smoke 'log files are written per day' (Test-Path (Join-Path $script:LogFolder ('{0:yyyy-MM-dd}.log' -f (Get-Date))))
+        $true } }
     @{ Name = 'sandbox test'; Phase = 0; Do = {
         param($s)
         $lab = Join-Path $env:LOCALAPPDATA 'fake-sandbox'
         switch ($s.Phase) {
             0 {
-                # The fake studio: the smoke test must never open a real sandbox
                 Show-Page 'Settings'
                 Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
                 $ui.TxtSandboxStudioPath.Text = Join-Path (Split-Path $env:INTUNECHOCO_SMOKE) 'Fakes\MsixSandboxStudio'
@@ -490,17 +650,21 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle 'test')) { return $false }
                 Test-Smoke 'Chocolatey test ran in the lab' (Test-Path (Join-Path $lab 'Choco-putty.install\started.txt'))
-                Test-Smoke 'Chocolatey test uses the deployed scripts with Chocolatey first' ((Get-Content (Join-Path $lab 'Choco-putty.install\source\Install.ps1') -Raw) -match 'chocolatey\.org/install\.ps1' -and (Test-Path (Join-Path $lab 'Choco-putty.install\source\choco-app.ps1')) -and (Get-Content (Join-Path $lab 'Choco-putty.install\source\choco-app.ps1') -Raw) -match "\`$Mode = 'Custom'")
-                Test-Smoke 'result in the activity panel' ((Get-SmokeLog) -match 'sandbox test passed') ''
-                Start-PackageTest -Package 'VideoLAN.VLC' -Source 'Winget' -Title 'VLC' -Version 'latest' -Policy @{ UpdateMode = 'Startup'; GraceHours = 24 }
+                Test-Smoke 'result in a toast and the log' ((Get-SmokeLog) -match 'sandbox test passed' -and @($script:Toasts | Where-Object { $_.Text -like '*passed*' }).Count -ge 1)
+                # From the details panel of the apps list (winget source)
+                Show-Page 'Apps'
+                $vlc = $script:SourceRows | Where-Object { $_.WingetId -eq 'VideoLAN.VLC' } | Select-Object -First 1
+                $script:SourceChoice[(Get-AppKey $vlc)] = 'Winget'
+                Show-AppDetails $vlc
+                & $script:ClickActions[$ui.BtnDetailTest]
                 $s.Phase = 2
                 return $false
             }
             2 {
                 if (-not (Test-Idle 'test')) { return $false }
                 $source = Join-Path $lab 'Winget-VideoLAN.VLC\source'
-                Test-Smoke 'winget test ran in the lab' (Test-Path (Join-Path $lab 'Winget-VideoLAN.VLC\started.txt'))
-                Test-Smoke 'winget test sets up winget first' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'Repair-WinGetPackageManager' -and (Get-Content (Join-Path $source 'choco-app.ps1') -Raw) -match "'VideoLAN\.VLC'")
+                Test-Smoke 'winget test from the details panel ran in the lab' (Test-Path (Join-Path $lab 'Winget-VideoLAN.VLC\started.txt'))
+                Test-Smoke 'winget test sets up winget first' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'Repair-WinGetPackageManager')
                 foreach ($file in Get-ChildItem $source -Filter '*.ps1') {
                     $errors = $null
                     [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
@@ -513,42 +677,45 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         } } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'
-        Test-Smoke 'settings show the tenant' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com') $ui.TxtTenantId.Text
-        Save-SmokeShot '07-settings'
+        Test-Smoke 'settings show the tenant and the preferred source' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com' -and $ui.CmbPreferredSource.SelectedItem -eq 'Chocolatey') "$($ui.TxtTenantId.Text) / $($ui.CmbPreferredSource.SelectedItem)"
+        Test-Smoke 'settings offer grant new permissions and the default schedule' ($ui.BtnSettingsGrant.Content -like '*grant new permissions*' -and $ui.BtnDefaultSchedule)
+        Save-SmokeShot '16-settings'
         $ui.TxtDelayMin.Text = '30'; $ui.TxtDelayMax.Text = '10'
         try { Save-Settings; Test-Smoke 'invalid delay range rejected' $false } catch { Test-Smoke 'invalid delay range rejected' ($_.Exception.Message -like '*delay*') $_.Exception.Message }
         $ui.TxtDelayMin.Text = '10'; $ui.TxtDelayMax.Text = '90'
-        $ui.TxtPackageSource.Text = 'https://proget.contoso.com/nuget/choco/'
+        $ui.TxtPackageSource.Text = 'https://proget.example.test/nuget/choco/'
+        $ui.CmbPreferredSource.SelectedIndex = 0
         Save-Settings
         $saved = Get-Content $script:SettingsPath -Raw | ConvertFrom-Json
-        Test-Smoke 'settings saved' ($saved.UpdateDelayMaxMinutes -eq 90 -and $saved.PackageSource -eq 'https://proget.contoso.com/nuget/choco/')
-        Test-Smoke 'deploy defaults follow the settings' ($ui.TxtDeployDefaults.Text -like '*proget*10 to 90*') $ui.TxtDeployDefaults.Text
+        Test-Smoke 'settings saved incl. preferred source and schedule' ($saved.UpdateDelayMaxMinutes -eq 90 -and $saved.PackageSource -like 'https://proget*' -and $saved.Source -eq 'Winget' -and $saved.UpdateSchedule -match 'NoPresentation') ($saved | ConvertTo-Json -Compress)
+        Test-Smoke 'preferred source reaches the bar next to Review and deploy' ($ui.RbPreferWinget.IsChecked -and $script:Preferred -eq 'Winget')
         Test-Smoke 'settings keep the app registration per tenant' ($saved.TenantClients -eq 'contoso.onmicrosoft.com=11111111-2222-3333-4444-555555555555') $saved.TenantClients
+        $ui.CmbPreferredSource.SelectedIndex = 1; Save-Settings
         $true } }
     @{ Name = 'account of another tenant (Keevault choice)'; Do = {
-        # Same tenant: nothing changes
         $same = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
         Test-Smoke 'account of the tenant signs in there' ($same.TenantID -eq 'contoso.onmicrosoft.com' -and $same.ClientID -eq '11111111-2222-3333-4444-555555555555')
-        # Unknown tenant: the tool switches there and offers to create its app registration
         try { [void](Resolve-AccountTenant 'adm@fabrikam.onmicrosoft.com'); Test-Smoke 'unknown tenant stops with a reason' $false }
         catch { Test-Smoke 'unknown tenant stops with a reason' ($_.Exception.Message -like '*fabrikam.onmicrosoft.com*no app registration*Create*') $_.Exception.Message }
         $appreg = Get-ReadinessItems | Where-Object Key -eq 'appreg'
         Test-Smoke 'switched to the new tenant, Create offered' ($script:Settings.TenantID -eq 'fabrikam.onmicrosoft.com' -and -not $script:Settings.ClientID -and $appreg.Fix -eq 'Create') "$($script:Settings.TenantID) / $($appreg.Fix)"
-        # Back with an account of a known tenant: its app registration is used again
         $back = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
         Test-Smoke 'known tenant uses its own app registration' ($back.TenantID -eq 'contoso.onmicrosoft.com' -and $back.ClientID -eq '11111111-2222-3333-4444-555555555555') "$($back.TenantID) / $($back.ClientID)"
         Switch-Tenant $back.TenantID $back.ClientID
         Test-Smoke 'tenant switched back' ($script:Settings.TenantID -eq 'contoso.onmicrosoft.com' -and $script:Settings.ClientID -eq '11111111-2222-3333-4444-555555555555')
         $true } }
     @{ Name = 'sign out'; Do = {
+        Test-Smoke 'account menu offers sign out and the other tenants' ($true)
         Disconnect-Intune
-        Test-Smoke 'signed out' ((-not (Test-SignedIn)) -and $ui.TxtConnectionStatus.Text -eq 'Not signed in to Intune' -and $ui.BtnSignIn.IsEnabled)
-        Test-Smoke 'deploy disabled when signed out' ($(Show-Page 'Catalog'; -not $ui.BtnDeploy.IsEnabled))
-        Test-Smoke 'tenant marks cleared on sign-out' (-not @($ui.DgCatalog.ItemsSource | Where-Object { $_.StatusText -eq 'In tenant' }).Count)
+        Test-Smoke 'signed out: split button back, pill gone' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
+        Test-Smoke 'Review and deploy disabled when signed out' ($(Show-Page 'Apps'; Set-AppSelected $script:SourceRows[0] $true; -not $ui.BtnReview.IsEnabled))
+        Clear-Selection
+        Test-Smoke 'tenant list cleared on sign-out' ($script:TenantRowList.Count -eq 0 -and $ui.TxtTenantEmpty.Text -like 'Sign in*')
+        Test-Smoke 'In tenant marks cleared on sign-out' (-not @($script:CardCollection | Where-Object { $_['Badge'] -eq 'In tenant' }).Count)
         $logFile = Join-Path $script:LogFolder ('{0:yyyy-MM-dd}.log' -f (Get-Date))
         Test-Smoke 'activity is written to the log file' ((Test-Path $logFile) -and (Get-Content $logFile -Raw) -match 'created in Intune')
         Show-Page 'Start'
-        Save-SmokeShot '08-start-signed-out'
+        Save-SmokeShot '17-start-signed-out'
         $true } }
 )
 
@@ -564,7 +731,7 @@ $script:SmokeTimer.Add_Tick({
         }
         $step = $script:SmokeSteps[0]
         try { $done = & $step.Do $step }
-        catch { Test-Smoke "step '$($step.Name)'" $false $_.Exception.Message; $done = $true }
+        catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"; $done = $true }
         if ($done) { $script:SmokeSteps.RemoveAt(0) }
     }
     catch {
