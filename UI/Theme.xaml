@@ -64,10 +64,13 @@
                 <ControlTemplate TargetType="ScrollViewer">
                     <Grid Background="{TemplateBinding Background}">
                         <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Margin="{TemplateBinding Padding}" CanContentScroll="{TemplateBinding CanContentScroll}"/>
-                        <ScrollBar x:Name="PART_VerticalScrollBar" Style="{StaticResource SlimScrollBar}" HorizontalAlignment="Right" Opacity="0.55"
+                        <ScrollBar x:Name="PART_VerticalScrollBar" Style="{StaticResource SlimScrollBar}" HorizontalAlignment="Right" Opacity="0"
                                    Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}"
                                    Value="{TemplateBinding VerticalOffset}" Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
                     </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="0.7"/></Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
