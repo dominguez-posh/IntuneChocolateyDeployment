@@ -343,7 +343,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $rows = @($script:SearchRows)
         Test-Smoke 'search merges both repositories into rows' ($rows.Count -gt 0 -and @($rows | Where-Object { $_.Name -like 'Notepad*' }).Count) (($rows | ForEach-Object { "$($_.Name)[$($_.Sources -join '/')]" }) -join ', ')
         $npp = $script:SourceRows | Where-Object { $_.CatalogId -eq 'notepadplusplus.install' -or $_.Name -like 'Notepad++*' } | Select-Object -First 1
-        Test-Smoke 'a catalog app found in both is one card with both sources' ($npp.Sources.Count -eq 2 -and @($script:CardCollection | Where-Object { $_['Title'] -like 'Notepad++*' }).Count -eq 1) ($npp.Sources -join ',')
+        Test-Smoke 'a catalog app found in both is one card with both sources' ($npp.Sources.Count -eq 2 -and @($script:CardCollection | Where-Object { $_['Title'] -eq $npp.Name }).Count -eq 1) (($npp.Sources -join ',') + ' ' + @($script:CardCollection | ForEach-Object { $_['Title'] }) -join ';')
         Test-Smoke 'hits not in the catalog are added to the list' ($script:CardCollection.Count -ge 1)
         Save-SmokeShot '08-search'
         $ui.TxtFilter.Text = ''
@@ -369,7 +369,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $apps = Get-StoreApps
         $vlc = $apps | Where-Object { $_.notes -like 'PoweredByWinget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
-        $vlcLog = Get-JobLog
+        $vlcLog = (@((Get-JobLog) -split "`n" | Where-Object { $_ -match 'ependenc' }) -join ' | ')
         Test-Smoke 'winget app has the winget runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the winget runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
         $pkg = Get-ChildItem (Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC\source\install.ps1') -ErrorAction SilentlyContinue
         Test-Smoke 'winget install script written' ($pkg -and (Get-Content $pkg.FullName -Raw) -match "'VideoLAN.VLC'")

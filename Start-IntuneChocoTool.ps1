@@ -1136,6 +1136,25 @@ function Start-CatalogPrefetch {
 }
 function Update-CatalogRowsAndList { Update-CatalogRows; Update-AppList }
 
+function Find-VisualChild($Parent, [type]$Type) {
+    for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent); $i++) {
+        $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
+        if ($child -is $Type) { return $child }
+        $found = Find-VisualChild $child $Type
+        if ($found) { return $found }
+    }
+}
+function Set-CardWidth {
+    # As many cards per row as fit (at least 300 px each); the cards share the width
+    $panel = Find-VisualChild $ui.CardList ([System.Windows.Controls.WrapPanel])
+    $width = $ui.AppsScroll.ActualWidth - 4
+    if (-not $panel -or $width -lt 100) { return }
+    $columns = [Math]::Max(1, [Math]::Floor($width / 300))
+    $panel.ItemWidth = [Math]::Floor($width / $columns)
+}
+$ui.AppsScroll.Add_SizeChanged({ try { Set-CardWidth } catch { } })
+$ui.CardList.Add_LayoutUpdated({ if (-not $script:CardWidthSet) { $p = Find-VisualChild $ui.CardList ([System.Windows.Controls.WrapPanel]); if ($p) { $script:CardWidthSet = $true; try { Set-CardWidth } catch { } } } })
+$script:CardWidthSet = $false
 $ui.TxtFilter.Add_TextChanged({
     $ui.HintFilter.Visibility = ConvertTo-Vis (-not $ui.TxtFilter.Text)
     try { Update-AppList } catch { Show-Error $_.Exception.Message }
@@ -1439,7 +1458,7 @@ function Show-DeployDialog {
         $tile = Get-TileStyle $src.Name
         $grid = New-Object System.Windows.Controls.Grid
         $grid.Margin = '0,0,0,0'
-        foreach ($w in @(@('Star', 1), @('Pixel', 300), @('Pixel', 170))) {
+        foreach ($w in @(@('Star', 1), @('Pixel', 330), @('Pixel', 150))) {
             $c = New-Object System.Windows.Controls.ColumnDefinition
             $c.Width = [System.Windows.GridLength]::new($w[1], $w[0]); [void]$grid.ColumnDefinitions.Add($c)
         }
@@ -1453,7 +1472,7 @@ function Show-DeployDialog {
         $label = New-Object System.Windows.Controls.TextBlock; $label.Text = $src.Name; $label.FontWeight = 'SemiBold'; $label.VerticalAlignment = 'Center'
         [void]$name.Children.Add($tileBox); [void]$name.Children.Add($label)
         $combo = New-Object System.Windows.Controls.ComboBox
-        $combo.Margin = '0,0,12,0'; $combo.VerticalAlignment = 'Center'; $combo.Width = 280
+        $combo.Margin = '0,0,12,0'; $combo.VerticalAlignment = 'Center'; $combo.Width = 316
         $combo.SetValue([System.Windows.Automation.AutomationProperties]::NameProperty, "Install $($src.Name) with")
         $sources = @($src.Sources)
         $combo.ItemsSource = @($sources | ForEach-Object { Get-SourceOptionText $src $_ })
@@ -1952,12 +1971,12 @@ function Update-TenantButtons {
     $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.Content = if ($app.UpdateAvailable) { "Release $($app.LatestVersion)" } else { 'Release update' }
-    $ui.PanelTenantGrace.Visibility = ConvertTo-Vis [bool]$ui.RbTenantCustom.IsChecked
+    $ui.PanelTenantGrace.Visibility = ConvertTo-Vis ([bool]$ui.RbTenantCustom.IsChecked)
     Show-TenantPolicy $app
 }
 $ui.LstTenant.Add_SelectionChanged({ try { Update-TenantButtons } catch { Show-Error $_.Exception.Message } })
 foreach ($n in 'RbTenantOff', 'RbTenantStartup', 'RbTenantCustom') {
-    $ui[$n].Add_Checked({ $app = Get-SelectedTenantApp; if ($app -and $script:TenantPolicyApp) { $ui.PanelTenantGrace.Visibility = ConvertTo-Vis [bool]$ui.RbTenantCustom.IsChecked; Update-TenantScheduleText $app } })
+    $ui[$n].Add_Checked({ $app = Get-SelectedTenantApp; if ($app -and $script:TenantPolicyApp) { $ui.PanelTenantGrace.Visibility = ConvertTo-Vis ([bool]$ui.RbTenantCustom.IsChecked); Update-TenantScheduleText $app } })
 }
 $ui.LstTenant.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
     param($s, $e)
@@ -2231,7 +2250,7 @@ Get-InsightTenantApps -Context $Ctx -DefaultUpdateMode $Mode -DefaultGraceHours 
     [void](Start-UiTask -Kind 'importread' -Title $(if ($TenantID) { "Reading the apps of $TenantID" } else { 'Reading the apps in the tenant for the import' }) -Display 'Import: read apps' -Pool $script:UserPool -NeedsAuth -Arguments $args2 -Work $work -Hidden -OnDone {
         param($Result, $Job)
         $script:ImportReading = $false
-        $apps = @($Result | Where-Object { $_ -and $_.PSObject.Properties['ProposedAction'] })
+        $apps = @($Result | ForEach-Object { $_ } | Where-Object { $_ -and $_.PSObject.Properties["ProposedAction"] })
         if ($Job.Spec.Arguments.OtherTenant) {
             # Apps of another tenant are recreated here: everything this tool manages or can take over becomes a candidate
             foreach ($a in $apps) { if ($a.Package -and $a.Source -in 'Chocolatey', 'Winget' -and $a.ProposedAction -in 'Managed', 'TakeOver') { $a.ProposedAction = 'Recreate' } }
@@ -2394,7 +2413,7 @@ Connect-IntuneChoco @Params | Out-Null
 Get-IntuneChocoAuthState
 '@
     $arguments = @{ TenantID = $tenant; ClientID = $clientId; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler }
-    [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
+    [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Display 'Sign-in' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
         $state = @($Result | Where-Object { $_ -is [hashtable] -and $_.AccessToken })
         if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Update-ConnectionStatus; Complete-SetupStep $false 'the sign-in'; return }   # the reason is in the activity panel

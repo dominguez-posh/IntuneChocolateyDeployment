@@ -63,20 +63,20 @@
         <DataTemplate x:Key="TenantRowTemplate">
             <Grid MinHeight="58">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/><ColumnDefinition Width="140"/><ColumnDefinition Width="150"/><ColumnDefinition Width="96"/><ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/><ColumnDefinition Width="120"/><ColumnDefinition Width="125"/><ColumnDefinition Width="90"/><ColumnDefinition Width="110"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal" Margin="16,8,8,8">
+                <Grid Margin="16,8,8,8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Border Style="{StaticResource MonoTile}" Width="32" Height="32" CornerRadius="7" Background="{Binding [TileBg]}" Margin="0,0,12,0">
                         <Grid>
                             <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" FontSize="13" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding [MonoVis]}"/>
                             <Image Source="{Binding [Icon]}" Margin="4"/>
                         </Grid>
                     </Border>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="260"/>
-                        <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextTrimming="CharacterEllipsis" MaxWidth="260"/>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextWrapping="Wrap"/>
                     </StackPanel>
-                </StackPanel>
+                </Grid>
                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0">
                     <TextBlock Text="{Binding [Version]}" TextTrimming="CharacterEllipsis"/>
                     <Border Style="{StaticResource Pill}" Background="{StaticResource WarningBg}" Margin="0,3,0,0" Visibility="{Binding [NewerVis]}">
@@ -327,7 +327,8 @@
                                     <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="12,0,0,0"/>
                                 </StackPanel>
                                 <StackPanel Grid.Row="2" Margin="0,14,0,6">
-                                    <StackPanel Orientation="Horizontal">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                         <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" VerticalAlignment="Top" AutomationProperties.Name="Available via">
                                             <StackPanel Orientation="Horizontal">
                                                 <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="All sources" IsChecked="True"/>
@@ -336,13 +337,13 @@
                                                 <RadioButton x:Name="FltBoth" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Both"/>
                                             </StackPanel>
                                         </Border>
-                                        <Border Width="1" Height="22" Background="{StaticResource Border}" Margin="0,0,12,8" VerticalAlignment="Top"/>
-                                        <WrapPanel x:Name="PanelChips" MaxWidth="640"/>
-                                    </StackPanel>
+                                        <Border Grid.Column="1" Width="1" Height="22" Background="{StaticResource Border}" Margin="0,0,12,8" VerticalAlignment="Top"/>
+                                        <WrapPanel x:Name="PanelChips" Grid.Column="2"/>
+                                    </Grid>
                                 </StackPanel>
                                 <ScrollViewer x:Name="AppsScroll" Grid.Row="3" Style="{StaticResource PageScroll}">
                                     <ItemsControl x:Name="CardList" ItemTemplate="{StaticResource AppCardTemplate}" Margin="0,0,0,130">
-                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid x:Name="CardGrid" Columns="3"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel x:Name="CardGrid" ItemWidth="320"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                                     </ItemsControl>
                                 </ScrollViewer>
                             </Grid>
@@ -451,7 +452,7 @@
                                         <StackPanel>
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*"/><ColumnDefinition Width="140"/><ColumnDefinition Width="150"/><ColumnDefinition Width="96"/><ColumnDefinition Width="120"/>
+                                                    <ColumnDefinition Width="*"/><ColumnDefinition Width="120"/><ColumnDefinition Width="125"/><ColumnDefinition Width="90"/><ColumnDefinition Width="110"/>
                                                 </Grid.ColumnDefinitions>
                                                 <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/><Setter Property="Margin" Value="12,10"/></Style></Grid.Resources>
                                                 <TextBlock Text="App" Margin="16,10"/><TextBlock Grid.Column="1" Text="Version"/><TextBlock Grid.Column="2" Text="Updates"/><TextBlock Grid.Column="3" Text="Assigned"/><TextBlock Grid.Column="4" Text="On devices"/>
@@ -724,7 +725,7 @@
             <Border Background="{StaticResource Scrim}"/>
 
             <!-- Deploy -->
-            <Border x:Name="DlgDeploy" Style="{StaticResource Dialog}" Width="780" Visibility="Collapsed">
+            <Border x:Name="DlgDeploy" Style="{StaticResource Dialog}" Width="800" Visibility="Collapsed">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <StackPanel Margin="28,24,28,8">
@@ -734,24 +735,25 @@
                     <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="440">
                         <StackPanel Margin="28,4,28,8">
                             <Grid>
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="330"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
                                 <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/><Setter Property="Margin" Value="0,8"/></Style></Grid.Resources>
                                 <TextBlock Text="App"/><TextBlock Grid.Column="1" Text="Install with"/><TextBlock Grid.Column="2" Text="Version"/>
                             </Grid>
                             <Border BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0"><StackPanel x:Name="PanelDeployRows"/></Border>
                             <Grid Margin="0,16,0,0">
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <StackPanel>
                                     <TextBlock Text="Assignment" Style="{StaticResource FieldLabel}"/>
                                     <ComboBox x:Name="CmbDeployAssign" HorizontalAlignment="Stretch" AutomationProperties.Name="Assignment"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Version on devices" Style="{StaticResource FieldLabel}"/>
-                                    <ComboBox x:Name="CmbDeployVersion" HorizontalAlignment="Stretch" AutomationProperties.Name="Version on devices"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="4">
                                     <TextBlock Text="Updates on devices" Style="{StaticResource FieldLabel}"/>
                                     <ComboBox x:Name="CmbDeployUpdate" HorizontalAlignment="Stretch" AutomationProperties.Name="Updates on devices"/>
+                                </StackPanel>
+                                <StackPanel Grid.Row="1" Margin="0,14,0,0">
+                                    <TextBlock Text="Version on devices" Style="{StaticResource FieldLabel}"/>
+                                    <ComboBox x:Name="CmbDeployVersion" HorizontalAlignment="Stretch" AutomationProperties.Name="Version on devices"/>
                                 </StackPanel>
                             </Grid>
                             <Grid Margin="0,8,0,0">
