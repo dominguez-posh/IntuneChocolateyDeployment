@@ -33,7 +33,7 @@
    Install-PackTuneComponents
    ```
 3. Start the graphical interface with **Start.cmd** and follow the *Start* page (see below). It creates the app registration for you. By hand, the registration is:
-   - Entra admin center > App registrations > New registration, any name (the tool uses "PackTune"; an earlier "Intune Chocolatey Deployment" registration is reused)
+   - Entra admin center > App registrations > New registration, any name (the tool uses "PackTune"; a registration of the earlier name "Intune Chocolatey Deployment" is recognized and reused when you are its only owner)
    - Authentication > Add a platform > Mobile and desktop applications > Redirect URI `http://localhost`
    - API permissions > Microsoft Graph > Delegated: the five permissions above, then grant admin consent
    - Note the Application (client) ID and the tenant
@@ -115,7 +115,7 @@ Opened with **Devices** on an app in *In tenant*.
 - **Device log**: each device writes the result of its last attempt (`last-result.json`) and its update log. The status report is a Remediations detection script that Intune runs on all devices every hour; it lists failed apps first with their cause. **Set up status report** creates it.
 - **Licensing**: Remediations need Windows Enterprise E3/E5 (Microsoft 365 F3/E3/E5), Education A3/A5, or Windows VDA per user. Without them the install status still works, and the page says so.
 - **Causes** are short texts for common exit and error codes from the documented Windows, winget and Intune codes. The mapping is not verified against a live tenant.
-- **Full log**: **Open in Intune admin center to collect diagnostics** opens the device. Run *Collect diagnostics* there, download the package, and look for `IntuneChocoDeployment-<package>.log` in the `IntuneManagementExtension\Logs` folder.
+- **Full log**: **Open in Intune admin center to collect diagnostics** opens the device. Run *Collect diagnostics* there, download the package, and look for `PackTune-<package>.log` (`IntuneChocoDeployment-<package>.log` on devices that did not run the new scripts yet) in the `IntuneManagementExtension\Logs` folder.
 
 ### Import
 
@@ -133,7 +133,7 @@ A package source offered by an import is used only when it is an https URL witho
 
 ![Activity](docs/screenshots/activity.png)
 
-Deployments run one after another in the background, and the window stays usable. *Show log* shows the steps of one job. Every step is also written to a log file per day in `%LOCALAPPDATA%\IntuneChocoDeployment\logs` (button *Open log files*).
+Deployments run one after another in the background, and the window stays usable. *Show log* shows the steps of one job. Every step is also written to a log file per day in `%LOCALAPPDATA%\PackTune\logs` (button *Open log files*).
 
 ### Settings
 
@@ -145,7 +145,7 @@ Deployments run one after another in the background, and the window stays usable
 - **Sandbox test**: the folder of MSIX Sandbox Studio ([WindowsSandboxMSIXInstaller](https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller)). It is found automatically in the folder next to this repository, in `C:\git\WindowsSandboxMSIXInstaller`, or as installed module. The tests need Windows Sandbox.
 - Module installation and the work folder.
 
-Settings are saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and are also used by the command line functions. Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder.
+Settings are saved in `%LOCALAPPDATA%\PackTune\settings.json` and are also used by the command line functions. On the first start after the rename they are copied (not moved) from `%LOCALAPPDATA%\IntuneChocoDeployment`, together with the feed and icon caches. Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder.
 
 ## What gets deployed on devices
 
@@ -174,7 +174,7 @@ Each app is one Win32 app in Intune with:
 
 ### Scheduled tasks
 
-Chocolatey apps register their tasks in `\Intune-Choco-Updates\`, winget apps in `\Intune-Winget-Updates\`, each with the package name in the task name:
+Chocolatey apps register their tasks in `\PackTune\Chocolatey\`, winget apps in `\PackTune\Winget\`, the runtime in `\PackTune\Runtime\`, each with the package name in the task name (`\Intune-Choco-Updates\` and `\Intune-Winget-Updates\` are the folders of the earlier name; the next run of `install.ps1` removes the old tasks):
 
 - **Update \<package\> on startup**: at PC start after a random wait of 5 to 60 minutes (configurable). In Automatic mode it installs; in Ask-the-user mode it only checks. Automatic mode also runs it once a day in the time window.
 - **Update \<package\> in time window**, **when idle**, **at sign-in**: the other automatic triggers, when the schedule has them. The conditions are checked by `update.ps1`.
@@ -186,15 +186,16 @@ Chocolatey apps register their tasks in `\Intune-Choco-Updates\`, winget apps in
 
 ### Folders, logs and results
 
-Every folder of the tool is under `%ProgramFiles%\IntuneChocoDeployment`:
+Every folder of the tool is under `%ProgramFiles%\PackTune`:
 
 - `Chocolatey\<package>` holds the helpers, the config, the policy marker and `last-result.json`.
-- `Winget\<id>` (ids are cleaned of characters outside `A-Za-z0-9._-`), `Winget\Runtime` and `Winget\Logs` (transcripts) do the same for winget.
+- `Winget\<id>` (ids are cleaned of characters outside `A-Za-z0-9._-`) and `Winget\Logs` (transcripts) do the same for winget; `Runtime` belongs to the PackTune Runtime app.
 
 Users cannot create anything in `%ProgramFiles%`. The folders belong to SYSTEM, SYSTEM and Administrators have full control and users only read. The scripts never follow links, change files only inside this tree, and stop (fail closed) when a folder above is not admin-only.
 
+- **The folder of the earlier name** `%ProgramFiles%\IntuneChocoDeployment` is removed by `install.ps1` of each app (and by the runtime) when it applies its settings again, with the same safe helper as everything else (links are removed, never followed). Detection fails after the update of the tool (the device script revision changed), so Intune runs `install.ps1` again by itself.
 - **Older versions** used `%ProgramData%\IntuneChocoUpdates` and `%ProgramData%\IntuneWingetDeployment`. Those folders stay unused and are not removed by the tool; delete them by hand if you want them gone. Devices move to the new folders with the next settings change of their app, when `install.ps1` registers the tasks again.
-- **Device log**: `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<package>.log` (1 MB, then one rollover to `...-<package>.1.log`). It is part of Intune's *Collect diagnostics*. The scripts write it only while that folder and the folders above it are admin-only and no links.
+- **Device log**: `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\PackTune-<package>.log` (1 MB, then one rollover to `...-<package>.1.log`). It is part of Intune's *Collect diagnostics*. The scripts write it only while that folder and the folders above it are admin-only and no links.
 - **`last-result.json`** in each app folder: `lastAttempt`, `action`, `status`, `exitCode`, `cause`, `installedVersion`, `targetVersion`. The status report reads it.
 
 ### Detection and policy fingerprint
@@ -203,7 +204,7 @@ Every update setting (version, mode, grace period, package source, delays, sched
 
 ### One operation at a time
 
-All choco and winget operations of a device (install, update, uninstall, both sources) share the mutex `Global\IntuneChocoDeployment`. A second operation waits up to 30 minutes for it and then exits with code 1618, which Intune retries. The mutex is created for SYSTEM and Administrators only. If one with that name exists already and belongs to someone else, nothing is installed (fail closed) and the cause is logged.
+All choco and winget operations of a device (install, update, uninstall, both sources) share the mutex `Global\PackTune`. During the transition they take `Global\IntuneChocoDeployment` as well (in this order), so scripts of the old and the new version never run side by side. A second operation waits up to 30 minutes for it and then exits with code 1618, which Intune retries. The mutex is created for SYSTEM and Administrators only. If one with that name exists already and belongs to someone else, nothing is installed (fail closed) and the cause is logged.
 
 ## Command line
 
@@ -230,6 +231,10 @@ Without parameters you are asked for tenant and client ID. A browser window open
 | `Publish-PackTuneRelease` | Releases a version the right way for the assignment (supersedence for Available apps, in place for Required) |
 | `Remove-PackTuneSupersededApps` | Removes superseded apps that no device reports as installed |
 | `Test-PackTunePackage` | Tests a package in Windows Sandbox |
+
+### Old command names
+
+The tool was called IntuneChocoDeployment before. The old commands still work as aliases for one major version and are listed in `PackTune-Aliases.ps1`, for example `Connect-IntuneChoco` (now `Connect-PackTune`), `New-IntuneWin32ChocoApplication` (`New-PackTuneChocolateyApp`), `New-IntuneWin32WingetApplication` (`New-PackTuneWingetApp`), `Update-IntuneChocoApp` (`Update-PackTuneApp`), `Test-IntuneChocoPackage` (`Test-PackTunePackage`). `Start-IntuneChocoTool.ps1` forwards to `Start-PackTune.ps1`. Apps created by earlier versions carry the notes marker `PoweredByChocolatey` or `PoweredByWinget`; they are still read and listed, and new or changed apps get `PoweredByPackTune;from=Chocolatey|Winget`.
 
 Examples:
 

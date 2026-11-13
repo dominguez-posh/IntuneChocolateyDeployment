@@ -102,10 +102,10 @@ version. Win32 gives the rest of PackTune for free: supersedence and in-place re
 return codes, detection, test lab. MSI stays a Win32 app as well.
 
 ### 4.1 Install script (SYSTEM, PowerShell 5.1, ASCII)
-Same rules as the other device scripts: relaunch in 64-bit, `$ToolRoot` = `%ProgramFiles%\IntuneChocoDeployment`,
-protected folders (`Protect-Folder`, SIDs), `Global\IntuneChocoDeployment` mutex around the install, `Write-DeviceLog`.
+Same rules as the other device scripts: relaunch in 64-bit, `$ToolRoot` = `%ProgramFiles%\PackTune`,
+protected folders (`Protect-Folder`, SIDs), `Global\PackTune` mutex around the install, `Write-DeviceLog`.
 Steps:
-1. Work folder `%ProgramFiles%\IntuneChocoDeployment\Custom\<app id>` protected; copy `package.msix` and `signing.cer`
+1. Work folder `%ProgramFiles%\PackTune\Custom\<app id>` protected; copy `package.msix` and `signing.cer`
    there from the package folder (the Intune cache folder is user-readable but not writable).
 2. Check the MSIX signature on the device against the shipped `.cer` (`Get-AuthenticodeSignature`: signer thumbprint
    equals the thumbprint of `signing.cer`, status valid or only "untrusted root" before the next step). Refuse
@@ -248,9 +248,9 @@ SharePoint write access is the power to replace an installer that becomes an app
   `installer.zip`).
 
 ### 8.3 Device scripts
-MSI and MSIX scripts run as SYSTEM: ASCII, Windows PowerShell 5.1, SIDs instead of names, `Global\IntuneChocoDeployment`
+MSI and MSIX scripts run as SYSTEM: ASCII, Windows PowerShell 5.1, SIDs instead of names, `Global\PackTune`
 mutex around `msiexec` and the provisioning (Windows Installer allows one install at a time, 1618), `Write-DeviceLog`,
-folders under `%ProgramFiles%\IntuneChocoDeployment` only, no user-writable paths, `DeviceScriptRevision` raised where
+folders under `%ProgramFiles%\PackTune` only, no user-writable paths, `DeviceScriptRevision` raised where
 shared text changes. Tests parse and check them. Where the module's templates do not meet this, PackTune passes its own
 scripts (`Save-Win32AppProject -Scripts`).
 
