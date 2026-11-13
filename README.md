@@ -1,325 +1,273 @@
-![image](https://user-images.githubusercontent.com/9081611/163731912-44660347-56b9-4a20-a571-bd1139bc2636.png)
+# Intune Chocolatey Deployment
 
-# Deploy Intune Win32 Applications automated with chocolatey
-## Description
-With this script you automate the APP-Deployment.
-You can publish Chocolatey APPs with intune and keep them up2date.
-The Script automaticly creates the application, and installs automaticly the required chocolatey application.
-It also downloads the Application-Icons from Chocolatey to make it watching nice in the Customer Portal, if you dont want to install it automaticly
-The Application is published automaticly for every user.
-You can also make it be installed automaticly
+Publish Chocolatey and winget apps to Microsoft Intune as Win32 apps, keep them up to date on the devices, and see what happened on each device.
 
-For keeping the installed software updated, the Installer creates a Scheduled Task for every application with fires a "choco upgrade <application> -y" on every startup for every deployed application
-  
-Special thanks to Brad Wyatt who gave me the the incentive to that automation 
-https://www.thelazyadministrator.com/2020/02/05/intune-chocolatey-a-match-made-in-heaven/
+![Tour](docs/screenshots/demo.webp)
+
+## What it does
+
+- **One app list** for Chocolatey and winget. For each app the tool shows both versions and recommends the source with the newer one.
+- **Deploys** each app as an Intune Win32 app with install script, detection rule, dependency app and assignment (Available, Required or None).
+- **Keeps devices current** with a per-app update mode: Off, Automatic per schedule, or Ask the user with a grace period. Versions are either always the newest or pinned.
+- **Releases new versions** from the tool: Required apps are updated in place, Available apps get a new app that supersedes the old one.
+- **Shows the status** of every app: install status per device, the update log each device reports, and the cause of failures. It also imports apps that already exist in a tenant and tests packages in Windows Sandbox.
 
 ## Requirements
-- Windows 10 or Windows 11, Windows PowerShell 5.1 or PowerShell 7 (the graphical interface runs in Windows PowerShell 5.1)
-- The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer
-- An Entra ID app registration (see below)
 
-Chocolatey and Inkscape are **not** needed on the admin machine anymore: package infos and icons come straight from the
-chocolatey.org feed, SVG icons are converted with Microsoft Edge.
+- Admin machine: Windows 10 or Windows 11. The graphical interface runs in Windows PowerShell 5.1; the command line works in Windows PowerShell 5.1 and PowerShell 7.
+- The PowerShell module [IntuneWin32App](https://github.com/MSEndpointMgr/IntuneWin32App) 1.5.0 or newer, and `Microsoft.WinGet.Client` for winget. `Install-IntunechocoComponents` installs both for the current user.
+- Chocolatey and Inkscape are **not** needed on the admin machine: package infos and icons come from the chocolatey.org feed, SVG icons are converted with Microsoft Edge.
+- An Entra ID app registration with these delegated Microsoft Graph permissions and admin consent:
+  - `DeviceManagementApps.ReadWrite.All`
+  - `DeviceManagementConfiguration.ReadWrite.All`
+  - `DeviceManagementRBAC.Read.All`
+  - `Group.Read.All`
+  - `DeviceManagementManagedDevices.Read.All` (install status and device logs in *In tenant*)
 
-## Install-Guide
-1. Download the script and save it, for example to C:\admin
-2. Install the required module once (no admin rights needed):
-```powershell
-. C:\admin\ChocoIntuneDeployment-Main.ps1
-Install-IntunechocoComponents
-```
-3. Create an app registration in Entra ID (once per tenant). Microsoft retired the shared "Microsoft Intune PowerShell" app,
-   so IntuneWin32App needs your own. **The graphical interface does this for you** (*Set up everything* or *Create* on
-   the start page, or `New-IntuneChocoAppRegistration` on the command line): you sign in once with a Global Administrator
-   through Microsoft's "Microsoft Graph Command Line Tools" app, and the tool creates the registration "Intune Chocolatey
-   Deployment" with the permissions below, grants the admin consent and saves tenant and client ID. By hand:
-   - Entra admin center > App registrations > New registration, any name (e.g. "Intune Choco Deployment")
+### Install
+
+1. Download the repository and keep it together, for example in `C:\admin`.
+2. Install the modules once (no admin rights needed):
+   ```powershell
+   . C:\admin\ChocoIntuneDeployment-Main.ps1
+   Install-IntunechocoComponents
+   ```
+3. Start the graphical interface with **Start.cmd** and follow the *Start* page (see below). It creates the app registration for you. By hand, the registration is:
+   - Entra admin center > App registrations > New registration, any name (the tool uses "Intune Chocolatey Deployment")
    - Authentication > Add a platform > Mobile and desktop applications > Redirect URI `http://localhost`
-   - API permissions > Microsoft Graph > Delegated: `DeviceManagementApps.ReadWrite.All`, `DeviceManagementConfiguration.ReadWrite.All`,
-     `DeviceManagementRBAC.Read.All`, `Group.Read.All`, then grant admin consent
-   - Note the Application (client) ID
+   - API permissions > Microsoft Graph > Delegated: the five permissions above, then grant admin consent
+   - Note the Application (client) ID and the tenant
 
-## Graphical interface
-Double-click **Start.cmd** (or run `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`).
-The tool is a WPF window for Windows PowerShell 5.1, without a console window next to it.
+Sign-in uses Microsoft's own sign-in in the browser. Optionally you can sign in with an account from [Keevault](https://keevault.de) (requires *AI agents (MCP)* switched on in Keevault).
 
-- **Package source**: the switch in the header sets **Chocolatey** or **winget** (see below), the active one is filled
-  light; the choice is remembered.
-- **Start**: guided steps and a readiness list (modules, app registration, sign-in, Chocolatey app in the tenant). An item
-  that is not ready is red, says why and has the button that fixes it; **Set up everything** runs all fixes one after
-  another (install the modules, create the app registration with admin consent, sign in, deploy the Chocolatey app).
-- **Sign in**: opens the Microsoft sign-in in your browser and waits up to five minutes for it; the button turns into
-  *Cancel sign-in* meanwhile. The sign-in is renewed silently during long runs. The arrow next to it offers
-  **Sign in with Keevault**: you pick the Microsoft account in [Keevault](https://keevault.de), and user name, password and
-  one-time code are filled into an embedded sign-in window (WebView2). Needs Keevault with *AI agents (MCP)* switched on;
-  the token stays in this process. Keevault lists the accounts of the configured tenant first, all other Microsoft
-  accounts below. Picking an account of another tenant switches the tool to that tenant: with the app registration
-  used there before, or, the first time, with *Create* on the start page to set one up.
-- **Catalog**: curated apps by category with icons, versions, publishers and license notes. Select several apps
-  (Ctrl+click / Shift+click, the selection is kept across filters), choose the assignment (available, required, none),
-  version and automatic updates, and deploy them in one go (see [Updates](#updates)).
-- **Search**: the whole Chocolatey community repository (or your metadata feed).
-- **Details**: description, links, license note, and a custom icon for any package (PNG, JPEG, SVG, ICO).
-- **In tenant**: the Win32 apps this tool created, with a link to each app in the Intune admin center and
-  *Remove from Intune* (only apps this tool created; Chocolatey stays while other apps depend on it). Catalog and
-  search mark apps that are already in the tenant and do not deploy them twice. Select an app to change its version and
-  automatic updates below the list (**Apply in Intune**); a pinned app with a newer version offers **Release <version>**
-  (see [Updates](#updates)).
-- **Test in sandbox**: tests a package with the chosen settings in a Windows Sandbox before it goes to Intune (from the
-  deploy panel, or under In tenant), via
-  [MSIX Sandbox Studio](https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller) (Win32 Test Lab). The tool finds
-  it next to this repo, in `C:\git\WindowsSandboxMSIXInstaller` or as installed module; otherwise set the path in Settings.
-- **Activity**: deployments run one after another in the background, the window stays usable; every step is logged,
-  also to a log file per day (`%LOCALAPPDATA%\IntuneChocoDeployment\logs`, button *Log files*).
-- **Settings**: tenant and client ID, deployment defaults, update defaults for new apps, update delay, package sources,
-  the Sandbox Studio path and the module installation.
-  Saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and also used by the command line functions.
+## Using the tool
 
-Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder
-(`%LOCALAPPDATA%\IntuneChocoDeployment`, button *Open work folder* in the settings).
+Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypass -File C:\admin\Start-IntuneChocoTool.ps1`). The header switches the package source between **Chocolatey** and **winget**; the choice is remembered. The **Help** entry in the navigation explains each page.
 
-## How to Use (command line)
-![Animation](https://user-images.githubusercontent.com/9081611/163805757-500bed68-a553-48db-b468-c3f8e62f25dd.gif)
-  
-in simplest way, easy run the script.
+### Start
+
+![Start](docs/screenshots/start.png)
+
+The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency apps in the tenant and the optional status report. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
+
+### Apps
+
+![Apps](docs/screenshots/apps.png)
+
+One list for both sources, from the curated list in `catalog.json` and the search.
+
+- **Source filter**: All sources, winget, Chocolatey, or Both (apps available from both).
+- **Recommended** marks the source with the higher version. Equal or unknown versions give no recommendation.
+- **Search repositories** searches the whole Chocolatey community repository or winget.
+- Select several apps (Ctrl or Shift click), choose the assignment, the install source and **Review and deploy**. The details panel shows links, a license note where one is known, a custom icon (PNG, JPEG, SVG, ICO) and **Test in sandbox**.
+
+### Review and deploy
+
+![Review and deploy](docs/screenshots/deploy.png)
+
+- **Install with**: the source per app. The default is the recommended source, else the preferred source from the settings.
+- **Assignment**: Available (in the Company Portal), Required (installed on the devices) or None.
+- **Updates on devices** and **Version on devices**: always the newest version, or one pinned version.
+- Chocolatey apps get the Chocolatey app as a dependency and winget apps the winget runtime app; missing dependency apps are created first.
+
+Deployments run in the background, one after another (see *Activity*).
+
+### In tenant
+
+![In tenant](docs/screenshots/tenant.png)
+
+Lists the apps this tool created, plus the two dependency apps (Chocolatey and winget runtime). Select an app to change its settings below the list:
+
+- **Version on devices** (newest or pinned) and **How devices update** (Off, Automatic, or Ask the user, then install).
+- **When updates install** shows the schedule summary; **Advanced** opens the schedule (see *Update schedule*).
+- **Apply in Intune** writes the new policy. Devices take it at their next Intune check.
+- **Release**: a pinned app with a newer version offers the release. Required apps are changed in place. Available apps get a new app that supersedes the old one, with auto-update of superseded apps on.
+- **Clean up**: removes superseded apps once no device reports them as installed any more.
+- **Devices** opens the status of the app (see *Status*). **Remove from Intune** removes only apps this tool created; Chocolatey stays while other apps depend on it.
+
+### Update schedule
+
+![Update schedule](docs/screenshots/schedule.png)
+
+Opened from an app (**This app**) or for new apps (**Default for new apps**). The schedule decides when an *Automatic* app updates and under which conditions.
+
+- **Install updates**: at PC start (after a random wait), in a time window (daily at a random time, on the chosen weekdays; it may cross midnight), when the PC was idle for 1, 5, 10, 15, 30 or 60 minutes, or at user sign-in.
+- **Only if**: the PC runs on mains power, no presentation or full-screen app is running, the network is not metered, the app is not running.
+- **Advanced**: spread over devices, how often to look for new versions (1, 4 or 24 hours), the deadline for *Ask the user, then install* (default 2 days), what happens when the app is open at the deadline (install anyway, warn and close, close, or wait), restart handling, retries after a failed update, and process names for "app is running".
+
+Update modes:
+
+| Mode | Behaviour on the device |
+|------|-------------------------|
+| **Off** | No automatic updates. A released version is installed right away; a settings change alone never upgrades a latest app. |
+| **Automatic** (`Startup`) | Per schedule. Default: at PC start and once a day between 10:00 and 15:00. |
+| **Ask the user, then install** (`Custom`) | Checked at startup and every 4 hours. Signed-in users get a popup and can install now or snooze. After the grace period (default 48 hours) it is installed without waiting for a restart. |
+
+Changes take effect without redeploying: the device's detection compares a fingerprint of the policy and runs `install.ps1` again when it changed (see *What gets deployed*). Apps created by older versions count as latest and Automatic until you change them.
+
+### Status
+
+![Status](docs/screenshots/status.png)
+
+Opened with **Devices** on an app in *In tenant*.
+
+- **Counts and rows**: installed and current, waiting for install, failed, and no report for 7 days, with one row per device (status, version, cause, last report). The install status comes from Intune.
+- **Device log**: each device writes the result of its last attempt (`last-result.json`) and its update log. The status report is a Remediations detection script that Intune runs on all devices every hour; it lists failed apps first with their cause. **Set up status report** creates it.
+- **Licensing**: Remediations need Windows Enterprise E3/E5 (Microsoft 365 F3/E3/E5), Education A3/A5, or Windows VDA per user. Without them the install status still works, and the page says so.
+- **Causes** are short texts for common exit and error codes from the documented Windows, winget and Intune codes. The mapping is not verified against a live tenant.
+- **Full log**: **Open in Intune admin center to collect diagnostics** opens the device. Run *Collect diagnostics* there, download the package, and look for `IntuneChocoDeployment-<package>.log` in the `IntuneManagementExtension\Logs` folder.
+
+### Import
+
+![Import](docs/screenshots/import.png)
+
+The tool keeps no local database: all state is in the Intune apps (the notes of each app). Import brings in apps from three places:
+
+- **This tenant**: Win32 apps that already install with Chocolatey or winget and are not managed yet. *Take over* writes the tool's notes (package and update policy) into the app. Content, detection and assignments stay as they are, and devices notice nothing; the new device scripts come with the next settings change.
+- **Another tenant**: a read-only sign-in with that tenant's own app registration (`DeviceManagementApps.Read.All`). The apps are created here, with assignment None by default.
+- **Export file**: *Export managed apps* writes a JSON file with name, package, version, update mode and feed. It holds no tenant or app IDs and no secrets. Importing it creates the apps here.
+
+A package source offered by an import is used only when it is an https URL without user name, password or query, and only after you confirm it for each app.
+
+### Activity
+
+![Activity](docs/screenshots/activity.png)
+
+Deployments run one after another in the background, and the window stays usable. *Show log* shows the steps of one job. Every step is also written to a log file per day in `%LOCALAPPDATA%\IntuneChocoDeployment\logs` (button *Open log files*).
+
+### Settings
+
+![Settings](docs/screenshots/settings.png)
+
+- **Tenant and app registration**: tenant (domain or ID) and client ID. *Create or update app registration* runs the setup again, adds missing permissions and the admin consent.
+- **Deployment defaults**: assignment, preferred source, architecture, version, update mode and the default schedule for new apps.
+- **Package sources**: the metadata feed (read on this computer), the package source used on the devices (`choco --source`), and the download URL of the Chocolatey bootstrap. Empty = the community repository.
+- **Sandbox test**: the folder of MSIX Sandbox Studio ([WindowsSandboxMSIXInstaller](https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller)). It is found automatically in the folder next to this repository, in `C:\git\WindowsSandboxMSIXInstaller`, or as installed module. The tests need Windows Sandbox.
+- Module installation and the work folder.
+
+Settings are saved in `%LOCALAPPDATA%\IntuneChocoDeployment\settings.json` and are also used by the command line functions. Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder.
+
+## What gets deployed on devices
+
+Each app is one Win32 app in Intune with:
+
+- **Install command**: `install.ps1` (as SYSTEM, in 64-bit PowerShell) with the policy baked in. Uninstall runs the same script with `-Uninstall`.
+- **Detection**: a script that checks the installed package and the policy fingerprint (below).
+- **Dependency**: Chocolatey apps depend on the Chocolatey app, winget apps on the winget runtime app. Both are deployed once per tenant and set to install automatically. The winget runtime app makes App Installer usable for SYSTEM (winget is not in the SYSTEM path, so the newest App Installer in `WindowsApps` is used).
+
+### Chocolatey apps
+
+- `install.ps1` runs `choco upgrade <package> -y` (with the pinned version and package source, if set). On success it copies the helpers `update.ps1`, `notify.ps1` and `probe.ps1` and writes the policy marker `policy.txt`. The Chocolatey dependency app retries its download up to four times with a random wait of 1 to 5 minutes, because the community repository rate-limits downloads.
+- Uninstall runs `choco uninstall <package> --remove-dependencies`. The tasks and the folder are removed only when it succeeds (exit codes 0, 1605, 1614, 1641, 3010).
+- The update helpers also upgrade Chocolatey itself, at most once a day.
+- Detection passes when `lib\<package>\<package>.nuspec` exists in the Chocolatey folder and `policy.txt` matches the policy fingerprint. Requirement: Windows 10 1607 or newer.
+
+### winget apps
+
+- `install.ps1` runs `winget install --id <id> --exact --scope machine --silent` as SYSTEM. Packages without a machine-scope installer fail with a clear message (winget exit code -1978335216) instead of installing into the profile of SYSTEM.
+- Uninstall runs `winget uninstall --id <id> --exact`. Tasks and folder are removed when it succeeded or the package was not installed.
+- Detection runs `winget list --id <id> --exact --source winget` and checks the policy fingerprint. Requirement: Windows 10 1809 or newer.
+- Only the winget.exe in `WindowsApps` is used, never one from `PATH`. A pinned winget app only moves forward, because winget cannot go back to an older version.
+- Packages come from the [winget-pkgs](https://github.com/microsoft/winget-pkgs) repository and the `Microsoft.WinGet.Client` module; the vendors' sites deliver the files, so there is no repository rate limit. An app that already exists under the same name (e.g. from Chocolatey) is skipped.
+
+### Scheduled tasks
+
+Chocolatey apps register their tasks in `\Intune-Choco-Updates\`, winget apps in `\Intune-Winget-Updates\`, each with the package name in the task name:
+
+- **Update \<package\> on startup**: at PC start after a random wait of 5 to 60 minutes (configurable). In Automatic mode it installs; in Ask-the-user mode it only checks. Automatic mode also runs it once a day in the time window.
+- **Update \<package\> in time window**, **when idle**, **at sign-in**: the other automatic triggers, when the schedule has them. The conditions are checked by `update.ps1`.
+- **Retry \<package\> update**: after a failure, at the next chance set in the schedule.
+- **Check \<package\> for updates** (Ask-the-user mode): every 1, 4 or 24 hours (default 4).
+- **Notify \<package\> update** (Ask-the-user mode): at sign-in and hourly, shows the popup in the user session.
+- **Update \<package\> now**: started by the popup; users may start it, and it runs as SYSTEM.
+- **Probe \<package\> screen state**: whether a presentation or full-screen app runs. Windows answers this query only for the caller's own session, so `update.ps1` (SYSTEM) starts this task in each signed-in session, which writes the state and a nonce to the user's `HKCU\Software\IntuneChocoDeployment\ScreenProbe` key. `update.ps1` reads those numbers; no user file is opened as SYSTEM, and the value is not logged.
+
+### Folders, logs and results
+
+Every folder of the tool is under `%ProgramFiles%\IntuneChocoDeployment`:
+
+- `Chocolatey\<package>` holds the helpers, the config, the policy marker and `last-result.json`.
+- `Winget\<id>` (ids are cleaned of characters outside `A-Za-z0-9._-`), `Winget\Runtime` and `Winget\Logs` (transcripts) do the same for winget.
+
+Users cannot create anything in `%ProgramFiles%`. The folders belong to SYSTEM, SYSTEM and Administrators have full control and users only read. The scripts never follow links, change files only inside this tree, and stop (fail closed) when a folder above is not admin-only.
+
+- **Older versions** used `%ProgramData%\IntuneChocoUpdates` and `%ProgramData%\IntuneWingetDeployment`. Those folders stay unused and are not removed by the tool; delete them by hand if you want them gone. Devices move to the new folders with the next settings change of their app, when `install.ps1` registers the tasks again.
+- **Device log**: `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<package>.log` (1 MB, then one rollover to `...-<package>.1.log`). It is part of Intune's *Collect diagnostics*. The scripts write it only while that folder and the folders above it are admin-only and no links.
+- **`last-result.json`** in each app folder: `lastAttempt`, `action`, `status`, `exitCode`, `cause`, `installedVersion`, `targetVersion`. The status report reads it.
+
+### Detection and policy fingerprint
+
+Every update setting (version, mode, grace period, package source, delays, schedule and the device script revision) is hashed into a fingerprint, which is part of the detection rule. The device's `policy.txt` must match it. A change in Intune therefore makes detection fail, Intune runs `install.ps1` again, and that applies the new policy. Changes to the device scripts raise the revision, which changes the fingerprint for every app.
+
+### One operation at a time
+
+All choco and winget operations of a device (install, update, uninstall, both sources) share the mutex `Global\IntuneChocoDeployment`. A second operation waits up to 30 minutes for it and then exits with code 1618, which Intune retries. The mutex is created for SYSTEM and Administrators only. If one with that name exists already and belongs to someone else, nothing is installed (fail closed) and the cause is logged.
+
+## Command line
+
+The interface uses the same functions. Run the script directly for a guided start, or dot-source it and call the functions:
+
 ```powershell
 C:\admin\ChocoIntuneDeployment-Main.ps1 -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
-```
-Without parameters you will be asked for tenant and client ID. A browser window opens for the sign-in.
 
-Then you can choose the software you want to install. (Hold STRG to select more then One; in PowerShell 7 you get a numbered list instead)
-
-To use the functions manually, dot-source the script and connect:
-```powershell
 . C:\admin\ChocoIntuneDeployment-Main.ps1
 Connect-IntuneChoco -TenantID "contoso.onmicrosoft.com" -ClientID "<application id>"
 ```
 
-Start the Process With OK
-  
+Without parameters you are asked for tenant and client ID. A browser window opens for the sign-in.
 
-Everything else is done automaticly now
-  
-### Optional Steps
-### Adding Applications to the Softwarelist
-The software list lives in [catalog.json](catalog.json), used by the GUI and by the command line:
-```json
-{ "id": "<choconame>", "winget": "<winget id, optional>", "name": "<Description>", "category": "<Category>" }
-```
-`winget` is the id of the same app in the winget repository (e.g. `7zip.7zip`); entries without it only show up when
-Chocolatey is the package source.
+| Function | Use |
+|----------|-----|
+| `Install-IntunechocoComponents` | Installs IntuneWin32App and Microsoft.WinGet.Client (once) |
+| `New-IntuneChocoAppRegistration` | Creates or updates the app registration and grants the admin consent |
+| `Connect-IntuneChoco` | Signs in and sets tenant and client ID |
+| `install-chocolatey` | Deploys the Chocolatey dependency app (normally done automatically) |
+| `New-IntuneWin32ChocoApplication` | Deploys Chocolatey packages |
+| `New-IntuneWin32WingetApplication` | Deploys winget packages |
+| `Update-IntuneChocoApp` | Changes an app in place: version, update mode, schedule |
+| `Publish-IntuneChocoRelease` | Releases a version the right way for the assignment (supersedence for Available apps, in place for Required) |
+| `Remove-IntuneChocoSupersededApps` | Removes superseded apps that no device reports as installed |
+| `Test-IntuneChocoPackage` | Tests a package in Windows Sandbox |
 
-### Install Chocolatey Manually
-This step is only required, if you want to install it manually or the automatic process is not working.
-Normaly, chocolaty will be installed automaticly befor you publish the first application
-```powershell
-install-chocolatey
-```
-### Create a new Application
-Installing a new Application is done simply by running the main function
-```powershell
-New-IntuneWin32ChocoApplication
-```
-You will be prompted to enter a pattern of what Software you want to install.
-After that select the wanted software.
+Examples:
 
-By default the Software is published but not autoinstalled for every user in the intune Tenant.
-To make it automaticly installed add the Switch -Required, or choose the assignment explicitly
 ```powershell
-New-IntuneWin32ChocoApplication -Required
-New-IntuneWin32ChocoApplication "vlc" -Assignment None   # Available, Required or None
-```
-
-If you know the exact chocolatey name, you can also deploy the software without any userpromt
-```powershell
-New-IntuneWin32ChocoApplication "googlechrome"
+New-IntuneWin32ChocoApplication "googlechrome"                    # Available (default), always the newest version
+New-IntuneWin32ChocoApplication "vlc" -Required                   # installed on all devices
+New-IntuneWin32ChocoApplication "vlc" -Assignment None            # Available, Required or None
 New-IntuneWin32ChocoApplication "vlc", "7zip.install" -NoIconPrompt
-```
-If a package has no icon on chocolatey.org, you can pick a file (Cancel creates the app without icon),
-pass one with `-IconFile C:\icons\app.png`, or skip the question with `-NoIconPrompt`.
-
-Update mode, grace period and version can be set per app:
-```powershell
+New-IntuneWin32ChocoApplication "vlc" -IconFile C:\icons\vlc.png  # icon from a file when the package has none
 New-IntuneWin32ChocoApplication "vlc" -UpdateMode Custom -GraceHours 48
 New-IntuneWin32ChocoApplication "7zip.install" -Version current -UpdateMode Off   # pin today's version
-Update-IntuneChocoApp -AppId <intune app id> -Version 3.0.21                      # release a new version
-Update-IntuneChocoApp -AppId <intune app id> -UpdateMode Startup                  # change only the settings
-Test-IntuneChocoPackage -ChocoName vlc                                            # Windows Sandbox test
-```
 
-### Updates
-Each app has its own update mode, stored in the app notes in Intune (`update=`, `grace=`, and the package source and
-startup delay of the app in `source=` and `delay=`, which a later change keeps):
-
-| Mode | Behaviour on the device |
-|------|-------------------------|
-| **Off** | No automatic updates. The device gets a new version only when you release it in the tool; a settings change alone never upgrades a **latest** app. |
-| **Startup** | Automatic per schedule (see below). Default: at the next PC start (after the random delay) and once a day between 10 and 15 o'clock, because with Fast Startup a shutdown is no real start. |
-| **Custom** | Checked at startup and every 4 hours. When an update is available, signed-in users get a popup and can install it right away or snooze it. After the grace period (hours or days) it is installed automatically, without waiting for a restart. |
-
-The version is either **latest** (the device follows the newest version on the feed) or **pinned** to one version.
-For pinned apps, **Release** in the tool (or `Update-IntuneChocoApp -Version`) moves the app to a new version. The
-update mode then decides when devices install it.
-
-Settings changes take effect without redeploying. The detection script compares a fingerprint of the policy with
-`%ProgramFiles%\IntuneChocoDeployment\Chocolatey\<package>\policy.txt`. After a change in Intune, detection fails, Intune runs
-`install.ps1` again, and that applies the new settings.
-
-#### Update schedule (Startup = automatic per schedule)
-Every app also has a schedule: when and under which conditions updates install. It is stored in the app notes as
-`cfg=` (base64url of a versioned compact JSON, after the readable fields; notes stay well below 1000 characters) and
-read by `ConvertFrom-ChocoAppNotes` only. Apps without `cfg=` use the defaults, which equal the earlier behavior.
-Defaults for new apps: the `UpdateSchedule` setting (JSON of the values below), otherwise the built-in defaults.
-Change one app: `Update-IntuneChocoApp -AppId <id> -Schedule @{ OnlyOnMains = $true; WindowFrom = "12:00" }`.
-
-| Value | Meaning (default) |
-|-------|-------------------|
-| `TriggerStart`, update delay min/max | At PC start, after a random wait (on, 5 to 60 min) |
-| `TriggerWindow`, `WindowFrom`, `WindowTo`, `WindowDays` | Daily at a random time inside the window, on the weekdays 1 (Monday) to 7 (on, 10:00 to 15:00, all days). The window may cross midnight. |
-| `IdleMinutes` | When the PC was idle for 1, 5, 10, 15, 30 or 60 minutes (0 = off) |
-| `TriggerLogon` | At user sign-in (off) |
-| `OnlyOnMains`, `NoPresentation`, `NoMetered`, `AppNotRunning` | Conditions (all off): not on battery, no presentation or full-screen app, no metered network, the app is not running |
-| `CheckIntervalHours` | Custom mode: look for new versions every 1, 4 or 24 hours (4) |
-| `DeadlineAppMode`, `CloseAfterMinutes` | Custom mode, app open at the deadline: `Install` (installer decides), `AskClose` (warn, close after N minutes), `Close`, `Wait` (until closed) (Install, 15) |
-| `RestartMode` | If the installer needs a restart: `Never`, `Ask` (prompt in the user session), `OutsideWindow` (announced 10 minutes ahead, only outside the time window) (Never) |
-| `RetryMode`, `RetryCount`, `RetryHours` | After a failure: `Next` chance (next trigger), `None` (not for the same version for 7 days), `Every` N times every X hours (Next, 3, 4) |
-| `ProcessNames` | Process names for "app is running", comma separated; empty = found from the install folder (best effort) |
-
-Task Scheduler does what it can express (start, weekly trigger with random delay, idle trigger, battery and network
-settings); `update.ps1` checks the rest. In Custom mode the grace period decides: the deadline waives power, network and
-app-open conditions (the app is handled by `DeadlineAppMode`); a presentation still delays it by up to 4 hours.
-Presentation detection: `SHQueryUserNotificationState` only answers for the caller's own session, so `update.ps1`
-(SYSTEM) starts the on-demand task `Probe <package> screen state` (Users group) in every signed-in session
-(`RunEx` with the session id and a random nonce); `probe.ps1` writes the state and the nonce into the user's registry
-(`HKCU\Software\IntuneChocoDeployment\ScreenProbe`), where `update.ps1` reads them as numbers (no file of the user is
-opened as SYSTEM, the value is never logged). Not verified on a real device yet.
-
-Every script also logs to `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<package>.log`
-(1 MB, one rollover to `...-<package>.1.log`), which Intune's "Collect diagnostics" includes. The scripts write there
-only while that folder and the folders above it are admin-only and no link, and never into a link or a file someone else
-owns (then that log line is skipped). Each app folder holds `last-result.json` (fields `lastAttempt`, `action`,
-`status`, `exitCode`, `cause`, `installedVersion`, `targetVersion`; see `Save-LastResult` in `Get-DeviceScriptCommon`),
-which the status script reads.
-
-Apps created by older versions keep working. They count as **latest / Startup** until you change their settings.
-
-> **Available assignments:** Intune does not run the install again for apps assigned as *Available* when detection
-> fails. Changed settings and released versions therefore reach devices on their own only where the app is assigned
-> as **Required**. A mechanism for Available apps is not built yet.
-
-Only one choco or winget operation runs at a time on a device: install, update and uninstall of all apps (both
-sources) share the lock `Global\IntuneChocoDeployment` and wait up to 30 minutes for it (otherwise exit code 1618,
-which Intune retries). The lock is created with a security descriptor for SYSTEM and Administrators only; if it exists
-already and belongs to someone else, nothing is installed and the cause is logged. The Chocolatey update helpers also update Chocolatey itself, at most once a day. The check for
-a newer version asks the source for that one package (`choco search <id> --exact`) and compares versions numerically
-(`1.2.0` equals `1.2`).
-
-### What gets deployed
-- `install.ps1` runs `choco upgrade <package> -y` as SYSTEM in 64-bit PowerShell and copies `update.ps1` and
-  `notify.ps1` to `%ProgramFiles%\IntuneChocoDeployment\Chocolatey\<package>`. It also registers the scheduled tasks under
-  `\Intune-Choco-Updates\`:
-  - `Update <package> on startup` (Startup and Custom modes). Each device waits a random 5 to 60 minutes after startup
-    (configurable), so many devices behind one IP don't download at the same time. In Startup mode it also runs once a
-    day; in Custom mode it only checks (the popup and the grace period decide when the update is installed).
-  - `Check <package> for updates` (Custom mode) runs every 4 hours.
-  - `Notify <package> update` (Custom mode) shows the popup in the user session.
-  - `Update <package> now` (Custom mode) is started by the popup. Users may start it, and it runs as SYSTEM.
-
-  All helper folders are under `%ProgramFiles%\IntuneChocoDeployment` (`Chocolatey\<package>`, `Winget\<id>`,
-  `Winget\Runtime`, `Winget\Logs`). Users cannot create anything in `%ProgramFiles%`, so nobody can prepare the tree
-  before SYSTEM uses it. The folders belong to SYSTEM and inherit nothing: SYSTEM and Administrators have full control,
-  Users may only read. The scripts change files only inside this tree, never follow or enter links, and stop (fail
-  closed) when a folder above is not admin-only.
-
-  **Devices set up by versions before device script revision 5** used `%ProgramData%\IntuneChocoUpdates` and
-  `%ProgramData%\IntuneWingetDeployment` (a standard user could create these folders before SYSTEM did). The new
-  scripts reach a device with the next settings change of the app (the revision is part of the policy fingerprint):
-  `install.ps1` then registers the tasks with the same names again for the new folders, which replaces the old tasks.
-  The old folders are left alone on purpose: removing a tree a user could have changed as SYSTEM is what the change
-  avoids. Delete them by hand or with your own script if you want them gone.
-
-  Uninstall runs `choco uninstall <package> --remove-dependencies` (a meta package like `vlc` takes `vlc.install` with
-  it). Only when that succeeds (0, 1605, 1614, 1641, 3010) are the tasks and the folder removed; otherwise the error goes
-  to Intune and everything stays as it is.
-- If the tasks cannot be registered, `install.ps1` exits with 1 and writes no policy marker, so Intune tries again.
-- With a package source configured, install and update task use `choco --source <your feed>`.
-- The detection script checks `%ProgramData%\chocolatey\lib\<package>` and the policy fingerprint.
-- The app gets a dependency to the Chocolatey app (auto install), which is deployed once per tenant.
-  Its installer retries with a random wait when the Chocolatey download is rate limited.
-- Requirement: Windows 10 1607 or newer (includes Windows 11), x64/x86. Use `-Architecture AllWithARM64` for ARM devices.
-
-### winget packages
-The package source switch in the header (Chocolatey | winget, the active source is filled light) switches catalog,
-search and deployment between Chocolatey and winget. On the command line:
-```powershell
 New-IntuneWin32WingetApplication -WingetId "7zip.7zip", "VideoLAN.VLC" -Assignment Available
+
+Update-IntuneChocoApp -AppId <intune app id> -Schedule @{ OnlyOnMains = $true; WindowFrom = "12:00" }
+Update-IntuneChocoApp -AppId <intune app id> -UpdateMode Startup  # change only the settings
+Publish-IntuneChocoRelease -AppId <intune app id> -Version 3.0.21 # new version, way by assignment
+
+Test-IntuneChocoPackage -ChocoName vlc
 ```
-- Package infos and the search come from Microsoft's `Microsoft.WinGet.Client` module (installed by
-  `Install-IntunechocoComponents`) and the manifests in [winget-pkgs](https://github.com/microsoft/winget-pkgs).
-- `install.ps1` runs `winget install --id <id> --exact --scope machine --silent` as SYSTEM. Packages without a
-  machine-scope installer fail with a clear message (winget exit code -1978335216): installed without scope as SYSTEM,
-  they would land in the profile of SYSTEM instead of for all users. winget is not in SYSTEM's path, so the script takes the newest App
-  Installer from `WindowsApps` and waits up to ten minutes when it is not registered yet (right after Autopilot).
-- Update modes, grace period, pinned versions and the sandbox test work as for Chocolatey apps (see [Updates](#updates));
-  the tasks are under `\Intune-Winget-Updates\`, the helpers in `%ProgramFiles%\IntuneChocoDeployment\Winget\<id>`. winget cannot
-  go back to an older version, so a pinned winget app only moves forward. Apps deployed before keep working and count
-  as **latest / Startup** until you change their settings.
-- Uninstall runs `winget uninstall --id <id> --exact` (without `--source`, winget often cannot map the installed
-  product to the source) and removes tasks and folder only when it succeeded or the package was not installed. Logs: `%ProgramFiles%\IntuneChocoDeployment\Winget\Logs`.
-  winget.exe is only taken from the `WindowsApps` folder, never from `PATH`.
-- The detection script relies on the exit code of `winget list --id <id> --exact --source winget` (the table cuts long
-  ids) and checks the policy fingerprint. Requirement: Windows 10
-  1809 or newer.
-- No dependency app: winget is part of Windows. winget downloads from the vendors' sites, so there is no repository
-  rate limit. Packages rarely have an icon in winget; catalog apps use the icon of their Chocolatey package.
-- An app that already exists under the same name (e.g. from Chocolatey) is skipped, so nothing is installed twice.
+
+Catalog entries live in [catalog.json](catalog.json): `{ "id": "<choco id>", "winget": "<winget id, optional>", "name": "<description>", "category": "<category>" }`.
 
 ## Licenses and rate limits
-- Chocolatey itself is Apache 2.0. The installed software keeps its own license. The tool shows a note for packages with
-  known restrictions (Oracle Java, TeamViewer, AnyDesk, Adobe Reader distribution, Sublime Text, 1Password); the catalog
-  uses Eclipse Temurin instead of Oracle Java.
-- Chocolatey [does not recommend](https://docs.chocolatey.org/en-us/community-repository/community-packages-disclaimer/)
-  organizational use of the community repository and rate limits it (about 20 package downloads per minute and IP,
-  temporary blocks at heavy use). For larger environments put a caching proxy or internal repository (ProGet, Nexus,
-  Azure Artifacts) in front and set it as package source.
-- Package infos are read with the NuGet v2 queries choco itself sends (choco 1.x style, falling back to the choco 2.x
-  style). Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
-### IntuneWin32App on non-English Windows
-IntuneWin32App 1.5.0 checks the token expiry by writing the date in the current culture and reading it back in US
-format. On a German (or any day-first) Windows a fresh token then counts as expired, the module tries to renew it
-and gives up with `break`, which silently ends the calling script. This tool runs every module call with the invariant
-culture and turns such a give-up into a visible error, so it works on any Windows language.
+
+- Chocolatey itself is Apache 2.0. The installed software keeps its own license. The tool shows a note for packages with known restrictions (for example Oracle Java, TeamViewer, AnyDesk, Adobe Reader distribution, Sublime Text, 1Password); the catalog uses Eclipse Temurin instead of Oracle Java.
+- Chocolatey [does not recommend](https://docs.chocolatey.org/en-us/community-repository/community-packages-disclaimer/) organizational use of the community repository and rate-limits it (about 20 package downloads per minute and IP, temporary blocks at heavy use). For larger environments put a caching proxy or internal repository (ProGet, Nexus, Azure Artifacts) in front and set it as package source.
+- Package infos are read with the NuGet v2 queries choco itself sends. Chocolatey does not guarantee other OData query forms, so the catalog has no batch lookup and caches results for 24 hours.
+- **IntuneWin32App on non-English Windows**: IntuneWin32App 1.5.0 checks the token expiry by writing the date in the current culture and reading it back in US format. On a day-first Windows a fresh token then counts as expired, and the module gives up with `break`, which silently ends the calling script. The tool runs every module call with the invariant culture and turns such a give-up into a visible error.
 
 ## Tests
-`Tests\Invoke-GuiSmoke.ps1` starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`) and its own
-`%LOCALAPPDATA%`, drives every page (sign-in with cancel and token renewal against a local stand-in for the Microsoft
-sign-in, catalog, search, custom icon, deployments, tenant with removal, settings, sign-out) and checks the results.
-Nothing shows up on the desktop and nothing is sent to a tenant; package infos come from the real Chocolatey feed. Screenshots of every page land in `%TEMP%\IntuneChocoSmoke`.
 
-### Results:
-New created Windows applications
-![image](https://user-images.githubusercontent.com/9081611/163807675-df7319ab-3104-43ee-8707-7a8c0b0f0255.png)
+Run in Windows PowerShell 5.1 from the repository folder. None of them contacts a tenant.
 
-Configured chocolatey Application with detection Rule
+- `Tests\Invoke-GuiSmoke.ps1`: starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`), its own `%LOCALAPPDATA%` and a stand-in for the Microsoft sign-in. It drives every page and checks the results. Package infos come from the real Chocolatey feed.
+- `Tests\Check-Insight.ps1`: import, status and device-log functions with fake Graph responses.
+- `Tests\Check-Schedule.ps1`: policy round trip through the notes, fingerprint, notes length and the generated device scripts (they are parsed, never run).
+- `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, winget runtime dependency, release by supersedence or in place.
 
-![image](https://user-images.githubusercontent.com/9081611/163807786-8cad4527-6922-46b2-a650-ad29a70e82b1.png)
+The screenshots and the tour are rendered from the same demo data and refreshed with:
 
-Deployed application with detection script, dependency to the choco application and available for all users
-
-![image](https://user-images.githubusercontent.com/9081611/163807922-685e9195-9568-4833-9e5f-3167d731efe5.png)
-
-
-![image](https://user-images.githubusercontent.com/9081611/163808042-c876dcd3-3d1b-4f7d-a150-0917ee611f53.png)
-  
-Result shown in Company Portal:
-
-![image](https://user-images.githubusercontent.com/9081611/163808208-c31b7b10-3db3-4a03-b657-591bcb241625.png)
-
-Configured Update Task in Task Scheduler
-  
-![image](https://user-images.githubusercontent.com/9081611/163808457-a48c8598-1e48-474e-a397-7e471d5f6f80.png)
-
-  
-
-
+- `Tests\Capture-Docs.ps1`: renders the PNG screenshots in `docs\screenshots`.
+- `Tests\Record-Demo.ps1`: records `docs\screenshots\demo.webp`. It needs `img2webp` from libwebp (`winget install Google.Libwebp`).
