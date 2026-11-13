@@ -76,7 +76,7 @@ $script:FrameWatch = [Diagnostics.Stopwatch]::StartNew()
 $script:LastFrame = $null
 function Save-Frame {
     $window.UpdateLayout()
-    $w = [int]$window.ActualWidth; $h = [int]$window.ActualHeight
+    $w = [int]$window.Content.ActualWidth; $h = [int]$window.Content.ActualHeight
     $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
     $bmp.Render($demoRoot)
     $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder

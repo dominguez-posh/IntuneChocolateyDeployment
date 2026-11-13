@@ -97,7 +97,7 @@
                 <StackPanel>
                     <Grid>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Border Style="{StaticResource MonoTile}" Width="32" Height="32" CornerRadius="7" Background="{Binding [TileBg]}" Margin="0,0,12,0">
                             <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -107,8 +107,9 @@
                             <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{Binding [SubFg]}" TextWrapping="Wrap"/>
                         </StackPanel>
                         <Button Grid.Column="2" Uid="log" Style="{StaticResource LinkButton}" Content="{Binding [LogToggle]}" FontSize="13" Margin="8,0" VerticalAlignment="Center"/>
-                        <Button Grid.Column="3" Uid="retry" Style="{StaticResource SmallButton}" Content="Retry" Margin="4,0,12,0" Visibility="{Binding [RetryVis]}"/>
-                        <Border Grid.Column="4" Style="{StaticResource Pill}" Background="{Binding [StatusBg]}" VerticalAlignment="Center" Padding="10,2">
+                        <Button Grid.Column="3" Uid="open" Style="{StaticResource LinkButton}" Content="Open in Intune" FontSize="13" Margin="4,0,8,0" VerticalAlignment="Center" Visibility="{Binding [OpenVis]}"/>
+                        <Button Grid.Column="4" Uid="retry" Style="{StaticResource SmallButton}" Content="Retry" Margin="4,0,12,0" Visibility="{Binding [RetryVis]}"/>
+                        <Border Grid.Column="5" Style="{StaticResource Pill}" Background="{Binding [StatusBg]}" VerticalAlignment="Center" Padding="10,2">
                             <TextBlock Text="{Binding [Status]}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding [StatusFg]}"/>
                         </Border>
                     </Grid>
@@ -314,8 +315,8 @@
                                     </StackPanel>
                                     <Button x:Name="BtnSelectShown" Grid.Column="1" VerticalAlignment="Bottom" Content="Select all shown"/>
                                 </Grid>
-                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,0">
-                                    <Border Background="White" BorderBrush="{StaticResource Border}" BorderThickness="1,1,1,2" CornerRadius="6" Width="460" Height="40">
+                                <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,0">
+                                    <Border Background="White" BorderBrush="{StaticResource Border}" BorderThickness="1,1,1,2" CornerRadius="6" Width="420" Height="40" Margin="0,0,10,8">
                                         <Grid>
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                             <TextBlock Text="&#xE721;" Style="{StaticResource Glyph}" FontSize="14" Foreground="{StaticResource MutedText}" Margin="12,0,10,0"/>
@@ -323,24 +324,18 @@
                                             <TextBlock x:Name="HintFilter" Grid.Column="1" Text="Filter apps, e.g. browser, pdf, zip" Foreground="#767676" VerticalAlignment="Center" IsHitTestVisible="False"/>
                                         </Grid>
                                     </Border>
-                                    <Button x:Name="BtnSearchRepos" Margin="10,0,0,0" Content="Search repositories" Tag="&#xE721;"/>
-                                    <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                                </StackPanel>
-                                <StackPanel Grid.Row="2" Margin="0,14,0,6">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" VerticalAlignment="Top" AutomationProperties.Name="Available via">
-                                            <StackPanel Orientation="Horizontal">
-                                                <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="All sources" IsChecked="True"/>
-                                                <RadioButton x:Name="FltWinget" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="winget"/>
-                                                <RadioButton x:Name="FltChoco" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Chocolatey"/>
-                                                <RadioButton x:Name="FltBoth" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Both"/>
-                                            </StackPanel>
-                                        </Border>
-                                        <Border Grid.Column="1" Width="1" Height="22" Background="{StaticResource Border}" Margin="0,0,12,8" VerticalAlignment="Top"/>
-                                        <WrapPanel x:Name="PanelChips" Grid.Column="2"/>
-                                    </Grid>
-                                </StackPanel>
+                                    <Button x:Name="BtnSearchRepos" Margin="0,0,12,8" Content="Search repositories" Tag="&#xE721;"/>
+                                    <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" AutomationProperties.Name="Available via">
+                                        <StackPanel Orientation="Horizontal">
+                                            <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="All sources" IsChecked="True"/>
+                                            <RadioButton x:Name="FltWinget" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="winget"/>
+                                            <RadioButton x:Name="FltChoco" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Chocolatey"/>
+                                            <RadioButton x:Name="FltBoth" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Both"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                </WrapPanel>
+                                <WrapPanel x:Name="PanelChips" Grid.Row="2" Margin="0,14,0,6"/>
                                 <ScrollViewer x:Name="AppsScroll" Grid.Row="3" Style="{StaticResource PageScroll}">
                                     <ItemsControl x:Name="CardList" ItemTemplate="{StaticResource AppCardTemplate}" Margin="0,0,0,130">
                                         <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel x:Name="CardGrid" ItemWidth="320"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
@@ -446,6 +441,12 @@
                                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                             <TextBlock x:Name="TxtBannerRuntime" TextWrapping="Wrap" VerticalAlignment="Center"/>
                                             <Button x:Name="BtnBannerRuntime" Grid.Column="1" Padding="14,7" Margin="12,0,0,0" Content="Add winget runtime dependency"/>
+                                        </Grid>
+                                    </Border>
+                                    <Border x:Name="BannerCleanup" Visibility="Collapsed" Background="#F3F3F3" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1" CornerRadius="8" Padding="16,10" Margin="0,12,0,0">
+                                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="TxtBannerCleanup" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Text2}"/>
+                                            <Button x:Name="BtnBannerCleanup" Grid.Column="1" Style="{StaticResource SmallButton}" Margin="12,0,0,0" Content="Clean up"/>
                                         </Grid>
                                     </Border>
                                     <Border Style="{StaticResource CardBox}" Margin="0,16,0,0">

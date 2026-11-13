@@ -381,7 +381,7 @@ function Update-JobRow($Job) {
         StatusBg = $script:PillColors[$pillName][0]; StatusFg = $script:PillColors[$pillName][1]
         Progress = $progress; ProgressVis = (ConvertTo-Vis ($status -in 'queued', 'running'))
         Log = $logText; LogVis = (ConvertTo-Vis $open); LogToggle = $(if ($entries.Count) { if ($open) { 'Hide log' } else { 'Show log' } } else { '' })
-        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test'))
+        RetryVis = (ConvertTo-Vis ($status -eq 'failed' -and $Job.Spec -and $Job.Kind -ne 'test')); OpenVis = (ConvertTo-Vis ($status -eq 'succeeded' -and [bool]$row['Open']))
     }
 }
 
@@ -1218,6 +1218,7 @@ $ui.CardList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEv
 function Update-SelectionBar {
     $count = $script:Selected.Count
     $ui.SelectionBar.Visibility = ConvertTo-Vis ($count -gt 0 -and $script:CurrentPage -eq 'Apps')
+    $ui.CardList.Margin = if ($ui.SelectionBar.Visibility -eq 'Visible') { '0,0,0,110' } else { '0,0,0,16' }
     $ui.TxtSelectionCount.Text = if ($count -eq 1) { '1 app selected' } else { "$count apps selected" }
     $wingetMissing = (@($script:Selected.Values | Where-Object { (Get-AppSource $_) -eq 'Winget' }).Count -gt 0) -and -not $script:ModuleState.Winget
     $ui.BtnReview.IsEnabled = $count -gt 0 -and (Test-SignedIn) -and $script:ModuleState.Ok -and -not $wingetMissing
@@ -1557,7 +1558,7 @@ else { New-IntuneWin32ChocoApplication -ChocoName $Id @Params }
                     $script:TenantPackages[$key] = $true
                     $script:RecentDeploys[$key] = Get-Date
                     $appId = @($Result | Where-Object { $_ -is [string] }) | Select-Object -First 1
-                    $Job.Row['Open'] = [string]$appId
+                    $Job.Row['Open'] = [string]$appId; Update-JobRow $Job
                     Show-Toast "$($Job.Display) was created in Intune." 'ok'
                 }
                 'skipped' { Show-Toast "$($Job.Display) was skipped: it is already in the tenant." 'warn' }
@@ -1751,6 +1752,7 @@ Get-IntuneChocoTenantApps | ForEach-Object {
         Start-RuntimeCheck
         Start-StatusCheck
         Start-CountsTask
+        Start-SupersededCheck
         Update-Readiness
     })
     Update-Readiness
@@ -1788,7 +1790,7 @@ function Update-TenantRows {
         $ui.TxtTenantEmpty.Visibility = 'Visible'
         $ui.TxtTenantEmpty.Text = if (Test-SignedIn) { 'Reading the apps in the tenant ...' } else { 'Sign in to see the apps this tool created in your tenant.' }
         $ui.TxtTenantCount.Text = if (Test-SignedIn) { 'Reading the apps in the tenant ...' } else { 'Sign in to see the apps this tool created in your tenant.' }
-        $ui.BannerRelease.Visibility = 'Collapsed'; $ui.BannerRuntime.Visibility = 'Collapsed'
+        $ui.BannerRelease.Visibility = 'Collapsed'; $ui.BannerRuntime.Visibility = 'Collapsed'; $ui.BannerCleanup.Visibility = 'Collapsed'
         Update-TenantBadge
         Update-TenantButtons
         return
@@ -1860,6 +1862,9 @@ function Update-TenantRows {
     $noRuntime = @($script:WingetNoRuntime)
     $ui.BannerRuntime.Visibility = ConvertTo-Vis ($noRuntime.Count -gt 0)
     $ui.TxtBannerRuntime.Text = "$($noRuntime.Count) winget app$(if ($noRuntime.Count -ne 1) { 's' }) in the tenant ha$(if ($noRuntime.Count -ne 1) { 've' } else { 's' }) no winget runtime dependency yet: $(($noRuntime | ForEach-Object { $_.DisplayName }) -join ', ')."
+    $old = @($script:SupersededOld)
+    $ui.BannerCleanup.Visibility = ConvertTo-Vis ($old.Count -gt 0)
+    $ui.TxtBannerCleanup.Text = "$($old.Count) old app version$(if ($old.Count -ne 1) { 's' }) $(if ($old.Count -ne 1) { 'are' } else { 'is' }) no longer installed on any device."
     Update-TenantBadge
     Update-TenantButtons
 }
@@ -1883,6 +1888,35 @@ function Start-RuntimeCheck {
         param($Result, $Job)
         $script:WingetNoRuntime = @($Result | Where-Object { $_ -and $_.Id })
         Update-TenantRows
+    })
+}
+
+# ---------------------------------------------------------------- clean up superseded old app versions
+$script:InstallCountFake = ''     # tests only: script text (param($AppId) -> device count) instead of the Graph query
+$script:SupersededOld = @()
+function Start-SupersededCheck {
+    # Old versions of released apps that no device reports installed any more (hidden; Graph install counts)
+    if (-not (Test-SignedIn) -or (Test-TaskRunning 'supercheck')) { return }
+    $work = 'param($CountFake) $P = @{ WhatIf = $true }; if ($CountFake) { $P.InstallCount = [scriptblock]::Create($CountFake) }; Remove-IntuneChocoSupersededApps @P'
+    [void](Start-UiTask -Kind 'supercheck' -Title 'Checking superseded old app versions' -Hidden -NeedsAuth -Arguments @{ CountFake = $script:InstallCountFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $script:SupersededOld = @($Result | Where-Object { $_ -and $_.OldId -and $null -ne $_.InstalledCount -and $_.InstalledCount -eq 0 })
+        Update-TenantRows
+    })
+}
+Add-Click $ui.BtnBannerCleanup {
+    $old = @($script:SupersededOld)
+    if ($old.Count -eq 0) { return }
+    $list = ($old | ForEach-Object { "- $($_.OldName) $($_.OldVersion) (replaced by $($_.NewVersion))" }) -join "`n"
+    if (-not (Confirm-Action "Remove these old app versions from Intune?`n`n$list`n`nNo device reports them installed any more. Apps that are still installed somewhere stay." 'Clean up')) { return }
+    Update-UiToken
+    $work = 'param($Ids, $CountFake) $P = @{ AppId = $Ids }; if ($CountFake) { $P.InstallCount = [scriptblock]::Create($CountFake) }; Remove-IntuneChocoSupersededApps @P'
+    [void](Start-UiTask -Kind 'cleanup' -Title "Removing $($old.Count) old app version(s)" -Display 'Clean up old versions' -NeedsAuth -Arguments @{ Ids = @($old | ForEach-Object { $_.OldId }); CountFake = $script:InstallCountFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $removed = @($Result | Where-Object { $_.Removed }).Count
+        if ($Job.Status -eq 'succeeded') { Show-Toast "$removed old app version(s) removed." 'ok' }
+        $script:SupersededOld = @(); $script:TenantApps = $null
+        Start-TenantRefresh
     })
 }
 Add-Click $ui.BtnBannerRuntime {
@@ -2329,6 +2363,7 @@ $ui.LstJobs.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEve
         $job = $b.DataContext.Data
         if ($b.Uid -eq 'log') { $job.LogOpen = -not $job.LogOpen; Update-JobRow $job }
         elseif ($b.Uid -eq 'retry') { Restart-Job $job }
+        elseif ($b.Uid -eq 'open' -and $job.Row['Open']) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($job.Row['Open'])" }
     }
     catch { Show-Error $_.Exception.Message }
 })
@@ -2462,7 +2497,7 @@ function Complete-SignIn([string]$How) {
 function Disconnect-Intune {
     $script:Shared.Auth = $null
     Set-IntuneChocoAuthState @{}
-    $script:TenantApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:StatusScript = $null
+    $script:TenantApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:StatusScript = $null; $script:SupersededOld = @()
     $script:DeviceCounts = @{}; $script:WingetNoRuntime = @(); $script:ImportApps = $null
     Update-TenantRows
     Update-AppList

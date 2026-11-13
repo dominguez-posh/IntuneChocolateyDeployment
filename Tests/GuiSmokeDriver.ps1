@@ -16,7 +16,7 @@ function Test-Smoke([string]$Name, [bool]$Ok, $Detail) {
 }
 function Save-SmokeShot([string]$Name) {
     $window.UpdateLayout()
-    $w = [int]$window.ActualWidth; $h = [int]$window.ActualHeight
+    $w = [int]$window.Content.ActualWidth; $h = [int]$window.Content.ActualHeight
     $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
     $bmp.Render($window.Content)
     $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
@@ -281,6 +281,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'finished jobs are marked Done' (@($script:JobRows | Where-Object { $_['Status'] -eq 'Done' }).Count -ge 2) (@($script:JobRows | ForEach-Object { $_['Status'] }) -join ',')
         Test-Smoke 'toast announces the result' ($ui.ToastHost.Children.Count -ge 1)
+        $zipRow = @($script:JobRows | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+        Test-Smoke 'finished deploy row offers Open in Intune with the app id' ($zipRow['OpenVis'] -eq 'Visible' -and $zipRow['Open'] -eq $zip.id) "$($zipRow['OpenVis']) $($zipRow['Open'])"
         Show-Page 'Activity'
         Save-SmokeShot '06-activity-done'
         $true } }
@@ -505,6 +507,40 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $old = $zips | Where-Object { $_.notes -notmatch 'update=Custom;grace=12' }
                 Test-Smoke 'Available app is released as a new app that supersedes the old one' ($apps.Count -eq $s.Before + 1 -and $new -and @($new.supersedence).targetId -contains $old.id) "$($apps.Count) / $($s.Before)"
                 Test-Smoke 'tenant lists the app once per version' (@($script:TenantRowList | Where-Object { $_.Data.Package -eq '7zip.install' }).Count -eq 2)
+                $true
+            }
+        } } }
+    @{ Name = 'clean up superseded old versions'; Phase = 0; Do = {
+        param($s)
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $script:InstallCountFake = 'param($AppId) 3'
+                Start-SupersededCheck
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'old version still installed on devices: kept, no banner' ($script:SupersededOld.Count -eq 0 -and $ui.BannerCleanup.Visibility -eq 'Collapsed')
+                $script:InstallCountFake = 'param($AppId) 0'
+                Start-SupersededCheck
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'banner offers the clean up of old versions nobody has installed' ($script:SupersededOld.Count -eq 1 -and $ui.BannerCleanup.Visibility -eq 'Visible' -and $ui.TxtBannerCleanup.Text -like '1 old app version is no longer installed on any device*') $ui.TxtBannerCleanup.Text
+                Save-SmokeShot '18-tenant-cleanup'
+                $s.Before = @(Get-StoreApps | Where-Object { $_.notes -like '*package=7zip.install;*' }).Count
+                & $script:ClickActions[$ui.BtnBannerCleanup]
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                $zips = @(Get-StoreApps | Where-Object { $_.notes -like '*package=7zip.install;*' })
+                Test-Smoke 'old version removed, the new app stays' ($s.Before -eq 2 -and $zips.Count -eq 1 -and $zips[0].notes -match 'update=Custom;grace=12') "$($s.Before) -> $($zips.Count)"
+                Test-Smoke 'banner gone after the clean up' ($ui.BannerCleanup.Visibility -eq 'Collapsed')
+                $script:InstallCountFake = ''
                 $true
             }
         } } }
