@@ -130,6 +130,7 @@ function Save-IntuneChocoSettings {
     if ($Clean.Source -notin "Chocolatey", "Winget") { throw "Unknown package source '$($Clean.Source)'" }
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
+    Assert-ChocoPackageSource $Clean.PackageSource
     # The current pair is remembered for later tenant switches
     $Map = ConvertFrom-TenantClients $Clean.TenantClients
     if ($Clean.TenantID -and $Clean.ClientID) { $Map[$Clean.TenantID.ToLower()] = $Clean.ClientID }
@@ -641,14 +642,27 @@ function New-IntuneChocoAppRegistration {
         @{ id = $Scope.id; type = "Scope" }
     }
 
-    # An app registration of an earlier setup is reused
+    # An app registration of an earlier setup is reused only when the signed-in account is its only owner (the
+    # setup creates it as the signed-in admin, who becomes its owner). The name alone proves nothing: any user may
+    # register an app with this name, and it would get the admin consent below. The tag only marks registrations of
+    # this tool; it is not trusted, an owner can set any tag.
+    $Tag = "IntuneChocoDeployment"
+    $Me = [string]$Claims.oid
     $Filter = [uri]::EscapeDataString("displayName eq '$($DisplayName.Replace("'", "''"))'")
-    $App = (& $Call GET "/v1.0/applications?`$filter=$Filter&`$select=id,appId,publicClient,isFallbackPublicClient" $null).value |
-        Where-Object { $_.publicClient.redirectUris -contains "http://localhost" } | Select-Object -First 1
+    $App = $null
+    foreach ($Candidate in @((& $Call GET "/v1.0/applications?`$filter=$Filter&`$select=id,appId,publicClient,tags" $null).value)) {
+        if (-not $Candidate -or $Candidate.publicClient.redirectUris -notcontains "http://localhost") { continue }
+        $Owners = @((& $Call GET "/v1.0/applications/$($Candidate.id)/owners?`$select=id" $null).value | ForEach-Object { [string]$_.id })
+        if ($Me -and $Owners.Count -gt 0 -and @($Owners | Where-Object { $_ -ne $Me }).Count -eq 0) { $App = $Candidate; break }
+        Write-Warning "The app registration '$DisplayName' ($($Candidate.appId)) is not reused: you are not its only owner. A new one is created."
+    }
+    # Authorization code with PKCE on the loopback redirect (http://localhost) works as a public client through the
+    # redirect URI alone; the fallback (device code, password flows) is not needed and stays off
     $Definition = @{
-        isFallbackPublicClient = $true
+        isFallbackPublicClient = $false
         publicClient           = @{ redirectUris = @("http://localhost") }
         requiredResourceAccess = @(@{ resourceAppId = $GraphApp; resourceAccess = @($Access) })
+        tags                   = @($Tag)
     }
     if ($App) {
         Write-Host "App registration '$DisplayName' exists already ($($App.appId)), its permissions are updated"

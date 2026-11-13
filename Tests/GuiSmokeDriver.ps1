@@ -144,6 +144,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $log = Get-SmokeLog + (Get-JobLog)
         Test-Smoke 'set up finished' ((-not $script:SetupRunning) -and $log -match 'Everything is set up') (($log -split "`n" | Select-Object -Last 3) -join ' | ')
         Test-Smoke 'app registration created with admin consent' ($log -match "App registration 'Intune Chocolatey Deployment' created" -and $log -match 'Admin consent granted: DeviceManagementApps\.ReadWrite\.All')
+        Test-Smoke 'a registration of the same name owned by someone else is not reused' ($log -match 'not reused: you are not its only owner')
         Test-Smoke 'tenant and client id saved' ((Get-IntuneChocoSettings).ClientID -eq '11111111-2222-3333-4444-555555555555' -and (Get-IntuneChocoSettings).TenantID -eq 'contoso.onmicrosoft.com')
         $names = @(Get-StoreApps | ForEach-Object { $_.displayName })
         Test-Smoke 'Chocolatey and the winget runtime deployed by the set up' (@($script:TenantApps | Where-Object IsChocolatey).Count -eq 1 -and $script:RuntimeId -and ($names -contains 'Chocolatey') -and ($names -contains 'winget runtime')) ($names -join ', ')

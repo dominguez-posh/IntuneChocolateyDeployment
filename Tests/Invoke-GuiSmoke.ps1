@@ -44,7 +44,7 @@ $authority = [powershell]::Create()
     $State.Listener = $listener
     $token = {
         param($Name)
-        $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`",`"oid`":`"admin-oid`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
         "{`"token_type`":`"Bearer`",`"scope`":`"https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All`",`"expires_in`":3600,`"access_token`":`"x.$claims.y`",`"refresh_token`":`"refresh-$Name`"}"
     }
     while ($listener.IsListening) {
@@ -73,9 +73,12 @@ $authority = [powershell]::Create()
                 'GET /v1.0/servicePrincipals' {
                     if ($query -like "*00000003-0000-0000-c000-000000000000*") { @{ value = @(@{ id = 'graph-sp'; oauth2PermissionScopes = @($scopes | ForEach-Object { @{ id = "scope-$_"; value = $_ } }) }) } }
                     elseif ($State.Sp) { @{ value = @(@{ id = 'sp-1' }) } } else { @{ value = @() } } }
-                'GET /v1.0/applications' { @{ value = @() } }
+                # A registration with the same name, made and owned by someone else: must not be reused (no PATCH)
+                'GET /v1.0/applications' { @{ value = @(@{ id = 'decoy-obj'; appId = '99999999-9999-9999-9999-999999999999'; publicClient = @{ redirectUris = @('http://localhost') }; tags = @('IntuneChocoDeployment') }) } }
+                'GET /v1.0/applications/decoy-obj/owners' { @{ value = @(@{ id = 'someone-else' }, @{ id = 'admin-oid' }) } }
+                'PATCH /v1.0/applications/*' { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: a registration of someone else was reused' } } }
                 'POST /v1.0/applications' {
-                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 5
+                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -eq $false -and @($sent.tags) -contains 'IntuneChocoDeployment' -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 5
                     if ($okApp) { $State.App = $true; @{ id = 'app-obj'; appId = '11111111-2222-3333-4444-555555555555' } } else { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: unexpected app registration' } } } }
                 'POST /v1.0/servicePrincipals' { $State.Sp = $true; @{ id = 'sp-1' } }
                 'GET /v1.0/oauth2PermissionGrants' { @{ value = @() } }

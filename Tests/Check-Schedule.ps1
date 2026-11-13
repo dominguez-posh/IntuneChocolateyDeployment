@@ -269,6 +269,8 @@ $Zero = ConvertFrom-ChocoAppNotes "PoweredByChocolatey;package=vlc;version=lates
 Test-Check "notes: grace 0 becomes 1, max delay not below min" ($Zero.GraceHours -eq 1 -and $Zero.UpdateDelayMinMinutes -eq 9 -and $Zero.UpdateDelayMaxMinutes -eq 9)
 Test-Throws "feed: user and password in the URL are refused" { New-ChocoAppPolicy -Package "vlc" -PackageSource "https://user:secret@feed.example/nuget" }
 Test-Throws "feed: query parameters (API key) are refused" { New-ChocoAppPolicy -Package "vlc" -PackageSource "https://feed.example/nuget?apikey=1" }
+$BadSettings = Get-IntuneChocoSettings; $BadSettings.PackageSource = "https://feed.example/nuget?apikey=1"
+Test-Throws "feed: the package source setting refuses query parameters as well" { Save-IntuneChocoSettings -Settings $BadSettings }
 Test-Check "feed: plain https and UNC feeds are accepted" ($(try { $null = New-ChocoAppPolicy -Package "vlc" -PackageSource "https://feed.example/nuget/"; $null = New-ChocoAppPolicy -Package "vlc" -PackageSource "\\server\choco"; $true } catch { $false }))
 Test-Check "icon URL: only https" ((Test-HttpsUrl "https://cdn.example/icon.png") -and -not (Test-HttpsUrl "http://cdn.example/icon.png") -and -not (Test-HttpsUrl "file:///C:/Windows/win.ini") -and -not (Test-HttpsUrl "\\server\share\icon.png") -and -not (Test-HttpsUrl "https://u:p@cdn.example/i.png"))
 $NoIcon = Get-ChocoIconBase64 -ChocoName "iconcheck" -IconUrl "file:///C:/Windows/win.ini" -NoIconPrompt -NoFeedLookup -WarningAction SilentlyContinue
