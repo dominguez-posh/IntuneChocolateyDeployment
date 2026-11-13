@@ -67,7 +67,7 @@ $authority = [powershell]::Create()
             # Stand-in for the Graph calls of the app registration setup; checks what the tool sends
             $path = $request.Url.AbsolutePath; $query = [uri]::UnescapeDataString($request.Url.Query)
             $sent = if ($request.HasEntityBody) { (New-Object IO.StreamReader($request.InputStream)).ReadToEnd() | ConvertFrom-Json } else { $null }
-            $scopes = 'DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementRBAC.Read.All', 'Group.Read.All'
+            $scopes = 'DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementRBAC.Read.All', 'Group.Read.All', 'DeviceManagementManagedDevices.Read.All'
             $answer = switch -Wildcard ("$($request.HttpMethod) $path") {
                 'GET /v1.0/organization' { @{ value = @(@{ verifiedDomains = @(@{ name = 'other.example'; isInitial = $false }, @{ name = 'contoso.onmicrosoft.com'; isInitial = $true }) }) } }
                 'GET /v1.0/servicePrincipals' {
@@ -75,7 +75,7 @@ $authority = [powershell]::Create()
                     elseif ($State.Sp) { @{ value = @(@{ id = 'sp-1' }) } } else { @{ value = @() } } }
                 'GET /v1.0/applications' { @{ value = @() } }
                 'POST /v1.0/applications' {
-                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 4
+                    $okApp = $sent.publicClient.redirectUris -contains 'http://localhost' -and $sent.isFallbackPublicClient -and @($sent.requiredResourceAccess[0].resourceAccess).Count -eq 5
                     if ($okApp) { $State.App = $true; @{ id = 'app-obj'; appId = '11111111-2222-3333-4444-555555555555' } } else { $context.Response.StatusCode = 400; @{ error = @{ message = 'Fake Graph: unexpected app registration' } } } }
                 'POST /v1.0/servicePrincipals' { $State.Sp = $true; @{ id = 'sp-1' } }
                 'GET /v1.0/oauth2PermissionGrants' { @{ value = @() } }

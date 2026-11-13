@@ -31,6 +31,9 @@ $script:DefaultAuthority = "https://login.microsoftonline.com"
 # Delegated Graph permissions the IntuneWin32App module works with
 $script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManagementConfiguration.ReadWrite.All", "DeviceManagementRBAC.Read.All", "Group.Read.All" |
         ForEach-Object { "https://graph.microsoft.com/$_" }) + "offline_access", "openid", "profile") -join " "
+# Added to the app registration and its consent for the install status and device views (Modules\TenantInsight.psm1).
+# Sign-ins request them with Get-InsightScopeSet once the consent exists (Test-InsightReadiness shows what is missing).
+$script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All")
 
 $script:DefaultSettings = [ordered]@{
     TenantID              = ""
@@ -603,6 +606,7 @@ function New-IntuneChocoAppRegistration {
     $GraphSp = (& $Call GET "/v1.0/servicePrincipals?`$filter=appId eq '$GraphApp'&`$select=id,oauth2PermissionScopes" $null).value | Select-Object -First 1
     if (-not $GraphSp) { throw "Microsoft Graph was not found in the tenant." }
     $ScopeNames = @($script:GraphScopeString -split " " | Where-Object { $_ -like "https://graph.microsoft.com/*" } | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' })
+    $ScopeNames += $script:GraphInsightScopes
     $Access = foreach ($Name in $ScopeNames) {
         $Scope = $GraphSp.oauth2PermissionScopes | Where-Object value -eq $Name | Select-Object -First 1
         if (-not $Scope) { throw "The Graph permission $Name was not found." }
@@ -2498,6 +2502,12 @@ function New-IntuneWin32ChocoApplicationInstallFromRepo {
 
 # winget packages (same helpers, own install script)
 . (Join-Path $PSScriptRoot "ChocoIntuneDeployment-Winget.ps1")
+
+# Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here
+Import-Module (Join-Path $PSScriptRoot "Modules\TenantInsight.psm1") -Force -Global
+Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker } `
+    -ConvertFromNotes ${function:ConvertFrom-ChocoAppNotes} -ConvertToNotes ${function:ConvertTo-ChocoAppNotes} -NewPolicy ${function:New-ChocoAppPolicy} `
+    -NewChocoApp ${function:New-IntuneWin32ChocoApplication} -NewWingetApp ${function:New-IntuneWin32WingetApplication} -SignIn ${function:Invoke-IntuneChocoPkceSignIn}
 
 # Run interactively when started as a script, only load the functions when dot-sourced
 if ($MyInvocation.InvocationName -ne '.') {
