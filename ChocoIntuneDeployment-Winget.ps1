@@ -169,6 +169,9 @@ param(
     [int]$GraceHours = __GRACE__,
     [string]$DisplayName = '__DISPLAYNAME__',
     [string]$Policy = '__POLICY__',
+    [string]$ScheduleJson = '__SCHEDULE__',
+    [int]$DelayMin = __DELAYMIN__,
+    [int]$DelayMax = __DELAYMAX__,
     [switch]$Uninstall
 )
 
@@ -184,6 +187,10 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 $Root = Join-Path $env:ProgramData "IntuneWingetDeployment"
 $SafeId = $Id -replace '[^A-Za-z0-9._-]', '_'
 $AppRoot = Join-Path $Root $SafeId
+$LogId = $SafeId
+$LogTag = if ($Uninstall) { "uninstall" } else { "install" }
+$ResultFile = ""
+$Sched = $ScheduleJson | ConvertFrom-Json
 
 __COMMON__
 
@@ -221,7 +228,8 @@ function Invoke-Winget([string]$Verb, [string[]]$Extra) {
 }
 
 $TaskPath = "\Intune-Winget-Updates\"
-$TaskNames = @("Update $SafeId on startup", "Update $SafeId now", "Check $SafeId for updates", "Notify $SafeId update")
+$TaskNames = @("Update $SafeId on startup", "Update $SafeId now", "Check $SafeId for updates", "Notify $SafeId update",
+    "Update $SafeId in time window", "Update $SafeId when idle", "Update $SafeId at sign-in", "Retry $SafeId update", "Probe $SafeId screen state")
 function Remove-UpdateTasks {
     foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 }
@@ -235,6 +243,7 @@ if ($Uninstall) {
     $ExitCode = $LASTEXITCODE
     Exit-DeploymentLock
     Write-Output "winget uninstall exit code $ExitCode"
+    Write-DeviceLog "winget uninstall $Id exit code $ExitCode"
     # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
     if ($ExitCode -notin 0, $NotInstalled, 1605, 1614 -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit $ExitCode }
     Remove-UpdateTasks
@@ -252,6 +261,7 @@ if ($Version) { $VersionArguments += @("--version", $Version) }
 
 try { Protect-Folder $AppRoot }
 catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit 1 }
+$ResultFile = Join-Path $AppRoot "last-result.json"
 # Which released version is installed: winget gives no plain answer, so the scripts remember it
 $VersionFile = Join-Path $AppRoot "version.txt"
 $AppliedVersion = if (Test-Path $VersionFile) { (Get-Content -Path $VersionFile -Raw).Trim() } else { "" }
@@ -266,70 +276,40 @@ if (-not $Installed) { $ExitCode = Invoke-Winget "install" $VersionArguments }
 elseif ($Upgrade) { $ExitCode = Invoke-Winget "upgrade" $VersionArguments }
 Exit-DeploymentLock
 $Applied = (-not $Installed) -or $Upgrade
+if ($Applied) {
+    $InstallOk = $ExitCode -in $Success -or $ExitCode -in $Reboot
+    $InstallAction = if ($Installed) { "upgrade" } else { "install" }
+    Write-DeviceLog "winget $InstallAction $Id exit code $ExitCode"
+    Save-LastResult $InstallAction $(if ($InstallOk) { "ok" } else { "failed" }) $(if ($InstallOk) { 0 } else { $ExitCode }) $(if ($InstallOk) { "ok" } else { "failed: exit code $ExitCode" }) $(if ($InstallOk) { $Version } else { "" }) $Version
+}
 if ($ExitCode -notin $Success -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit $ExitCode }
 
 # Settings for the update helpers; a new policy starts its own grace period
 try {
-    foreach ($File in "update.ps1", "notify.ps1") {
+    foreach ($File in "update.ps1", "notify.ps1", "probe.ps1") {
         Remove-Item -LiteralPath (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force -ErrorAction Stop
     }
-    Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Id = $Id; SafeId = $SafeId; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName } | ConvertTo-Json)
-    Remove-Item -Path (Join-Path $AppRoot "state.json") -Force -ErrorAction SilentlyContinue
+    Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Id = $Id; SafeId = $SafeId; TaskId = $SafeId; TaskPath = $TaskPath; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName; Schedule = $Sched } | ConvertTo-Json -Depth 4)
+    foreach ($File in "state.json", "retry.json", "restart.json") { Remove-Item -Path (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue }
     if ($Applied -and $Version) { Write-ProtectedFile $VersionFile $Version }
     elseif (-not $Version) { Remove-Item -Path $VersionFile -Force -ErrorAction SilentlyContinue }
 }
 catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit 1 }
 
+__TASKREG__
+
 Remove-UpdateTasks
 try {
-    $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $UpdateScript = Join-Path $AppRoot "update.ps1"
-    $System = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
-    $UpdateAction = { param($Step) New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$UpdateScript`" -Mode $Step" }
-
-    if ($Mode -in "Startup", "Custom") {
-        # Each device waits a random time, so a whole office does not download at the same moment
-        $Trigger = New-ScheduledTaskTrigger -AtStartup
-        $Trigger.Delay = "PT{0}M" -f (Get-Random -Minimum __DELAYMIN__ -Maximum (__DELAYMAX__ + 1))
-        $Triggers = @($Trigger)
-        if ($Mode -eq "Startup") {
-            # With Fast Startup, shutting down is no real startup: also once a day at a random time between 10 and 15
-            # o'clock (a missed run follows when the device is on again)
-            $Triggers += New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))
-        }
-        # Custom only checks at startup: the user prompt and the grace period decide when the update is installed
-        $StartupStep = if ($Mode -eq "Custom") { "Check" } else { "Startup" }
-        Register-ScheduledTask -TaskName $TaskNames[0] -TaskPath $TaskPath -Action (& $UpdateAction $StartupStep) -Trigger $Triggers -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-    }
-    if ($Mode -eq "Custom") {
-        # "Update now" from the user prompt: started on demand; signed-in users may run it (not change it)
-        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action (& $UpdateAction "Now") -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-        $Service = New-Object -ComObject Schedule.Service
-        $Service.Connect()
-        $Service.GetFolder($TaskPath.TrimEnd("\")).GetTask($TaskNames[1]).SetSecurityDescriptor("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)", 0)
-
-        # Every 4 hours: is there an update, is the grace period over?
-        $Check = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes((Get-Random -Minimum 5 -Maximum 60)) -RepetitionInterval (New-TimeSpan -Hours 4) -RepetitionDuration (New-TimeSpan -Days 3650)
-        Register-ScheduledTask -TaskName $TaskNames[2] -TaskPath $TaskPath -Action (& $UpdateAction "Check") -Trigger $Check -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-
-        # The prompt runs in the session of every signed-in user (Users group), at logon and every hour, without a console window
-        $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-        $NotifyScript = Join-Path $AppRoot "notify.ps1"
-        $NotifyAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$NotifyScript`""
-        $NotifyTriggers = @(
-            (New-ScheduledTaskTrigger -AtLogOn),
-            (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650))
-        )
-        $NotifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force -ErrorAction Stop | Out-Null
-    }
+    Register-UpdateTasks
     Write-Output "Update mode $Mode applied for $Id"
+    Write-DeviceLog "update mode $Mode applied"
 }
 catch {
     # Without its tasks the app is not set up: no marker, so detection fails and Intune runs install.ps1 again
     Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
+    Write-DeviceLog "update tasks could not be registered: $($_.Exception.Message)"
+    Save-LastResult "install" "failed" 1 "update tasks could not be registered"
     Stop-Transcript | Out-Null
     exit 1
 }
@@ -343,29 +323,57 @@ exit 0
 
     $UpdateScript = @'
 # Update helper of one winget app (scheduled tasks, SYSTEM). Settings come from config.json next to it.
-#   Startup  update to the target version (startup task)
-#   Check    update available? Remember since when; after the grace period install it
-#   Now      install the update at once (started from the user prompt)
-param([ValidateSet("Startup", "Check", "Now")][string]$Mode = "Check")
+#   -Mode Startup  update automatically per schedule (conditions, time window, retries); started by the triggers
+#   -Mode Check    update available? Remember since when; after the grace period install it (Custom mode)
+#   -Mode Now      install the update at once (started from the user prompt)
+#   -Mode Restart  restart the device when an update asked for it (restart setting "outside the time window")
+#   -Trigger       what started the run: Start, Window, Idle, Logon, Interval, Retry or Manual (for the log)
+param(
+    [ValidateSet("Startup", "Check", "Now", "Restart")][string]$Mode = "Check",
+    [ValidateSet("Start", "Window", "Idle", "Logon", "Interval", "Retry", "Manual")][string]$Trigger = "Manual"
+)
 
 $Config = Get-Content -Path (Join-Path $PSScriptRoot "config.json") -Raw | ConvertFrom-Json
 $Id = $Config.Id
+$AppKey = $Id
+$LogId = $Config.SafeId
 $StateFile = Join-Path $PSScriptRoot "state.json"
 $VersionFile = Join-Path $PSScriptRoot "version.txt"
 $LogFile = Join-Path $PSScriptRoot "update.log"
-function Write-Log([string]$Text) { Add-Content -Path $LogFile -Value ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $Mode, $Text) }
 
 __GETWINGET__
 
 $Winget = Get-Winget
-if (-not $Winget) { Write-Log "winget.exe not found"; exit 1 }
 $Common = @("--id", $Id, "--exact", "--source", "winget", "--silent", "--accept-source-agreements", "--accept-package-agreements", "--disable-interactivity")
 $Success = @(0, -1978335189, -1978335135)
 $Reboot = @(-1978334967, -1978334966, 1641, 3010)
 $NoApplicableInstaller = -1978335216
 
 __COMMON__
+__UPDATECOMMON__
 
+if (-not $Winget) { Write-Log "winget.exe not found"; exit 1 }
+
+function Get-InstalledText {
+    # winget gives no plain answer: the released version the scripts applied last
+    if (Test-Path $VersionFile) { return (Get-Content -Path $VersionFile -Raw).Trim() }
+    return ""
+}
+function Get-PendingUpdate {
+    # A released version: installed yet? Otherwise: does winget offer an upgrade?
+    if ($Config.Version) {
+        $Applied = Get-InstalledText
+        $Pending = $Applied -ne $Config.Version
+        $Target = $Config.Version
+    }
+    else {
+        & $Winget list --id $Id --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity 2>$null | Out-Null
+        $Pending = $LASTEXITCODE -eq 0
+        $Target = "latest"
+    }
+    return [pscustomobject]@{ Pending = [bool]$Pending; Installed = ""; Target = $Target }
+}
+function Invoke-SourceMaintenance { }
 function Invoke-Upgrade {
     if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return 1618 }
     try {
@@ -387,47 +395,8 @@ function Invoke-Upgrade {
     return $Code
 }
 
-switch ($Mode) {
-    "Now" { exit (Invoke-Upgrade) }
-    "Startup" { exit (Invoke-Upgrade) }
-    "Check" {
-        # A released version: installed yet? Otherwise: does winget offer an upgrade?
-        if ($Config.Version) {
-            $Applied = if (Test-Path $VersionFile) { (Get-Content -Path $VersionFile -Raw).Trim() } else { "" }
-            $Pending = $Applied -ne $Config.Version
-            $Target = $Config.Version
-        }
-        else {
-            & $Winget list --id $Id --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity 2>$null | Out-Null
-            $Pending = $LASTEXITCODE -eq 0
-            $Target = "latest"
-        }
-        if (-not $Pending) {
-            Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
-            exit 0
-        }
-        $State = $null
-        if (Test-Path $StateFile) { try { $State = Get-Content -Path $StateFile -Raw | ConvertFrom-Json } catch { } }
-        if (-not $State -or $State.Target -ne $Target) {
-            $Now = Get-Date
-            $State = [pscustomobject]@{
-                Package     = $Config.SafeId
-                DisplayName = $Config.DisplayName
-                Installed   = ""
-                Target      = $Target
-                FirstSeen   = $Now.ToString("o")
-                Deadline    = $Now.AddHours([int]$Config.GraceHours).ToString("o")
-            }
-            $State | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
-            Write-Log "update to $Target available, installed automatically from $($State.Deadline)"
-        }
-        if ((Get-Date) -ge [datetime]$State.Deadline) {
-            Write-Log "grace period is over"
-            exit (Invoke-Upgrade)
-        }
-        exit 0
-    }
-}
+$RunResult = @(Invoke-UpdateRun)
+exit [int]$RunResult[-1]
 '@
 
     $DetectionScript = @'
@@ -460,8 +429,9 @@ exit 1
     # Values go into single-quoted strings of ASCII files
     $Quote = { param($Text) ([string]$Text -replace '[^\x20-\x7E]', '').Replace("'", "''") }
     $CommonText = Get-DeviceScriptCommon
-    $InstallScript = $InstallScript.Replace("__COMMON__", $CommonText)
-    $UpdateScript = $UpdateScript.Replace("__COMMON__", $CommonText)
+    $InstallScript = $InstallScript.Replace("__TASKREG__", (Get-DeviceTaskRegistration)).Replace("__COMMON__", $CommonText)
+    $UpdateScript = $UpdateScript.Replace("__UPDATECOMMON__", (Get-DeviceUpdateCommon)).Replace("__COMMON__", $CommonText)
+    $InstallScript = $InstallScript.Replace("__SCHEDULE__", (Get-DeviceScheduleText $Policy.Schedule))
     $InstallScript = $InstallScript.Replace("__GETWINGET__", $GetWinget).Replace("__ID__", $WingetId).Replace("__VERSION__", (& $Quote $Policy.Version))
     $InstallScript = $InstallScript.Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
@@ -472,6 +442,7 @@ exit 1
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value (Get-UpdateNotifyScript -TaskPath "\Intune-Winget-Updates\") -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "probe.ps1") -Value (Get-ScreenProbeScript) -Encoding ASCII
     $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
     return $DetectionFile
@@ -502,6 +473,8 @@ function New-IntuneWin32WingetApplication {
         [string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)]
         [int]$GraceHours = $script:Settings.GraceHours,
+        # When and under which conditions updates install (hashtable of New-ChocoSchedule values); default = the UpdateSchedule setting
+        $Schedule = (Get-ChocoScheduleDefaults),
         # "latest" = devices follow the newest version; "current" = pin today's version; or an exact version.
         # Empty = the VersionMode setting (Latest or Pinned)
         [string]$Version,
@@ -555,7 +528,7 @@ function New-IntuneWin32WingetApplication {
                     }
                 }
                 $Policy = New-ChocoAppPolicy -Package $Id -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
-                    -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes
+                    -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
 
                 Write-Host "Creating the install and detection script"

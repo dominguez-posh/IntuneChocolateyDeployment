@@ -61,10 +61,13 @@ $script:DefaultSettings = [ordered]@{
     VersionMode           = "Latest"
     # Folder of WindowsSandboxMSIXInstaller (MSIX Sandbox Studio) for the Test button; empty = found automatically
     SandboxStudioPath     = ""
+    # Schedule of new apps (when and under which conditions updates install) as compact JSON with the property names of
+    # New-ChocoSchedule, e.g. {"OnlyOnMains":true,"WindowFrom":"12:00"}; empty = the built-in defaults (like before)
+    UpdateSchedule        = ""
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 3
+$script:DeviceScriptRevision = 4
 
 # Packages whose software license restricts business use or distribution
 $script:LicenseNotes = @{
@@ -129,6 +132,9 @@ function Save-IntuneChocoSettings {
     if ($Clean.UpdateMode -notin $script:UpdateModes) { throw "Unknown update mode '$($Clean.UpdateMode)'" }
     if ($Clean.GraceHours -lt 1 -or $Clean.GraceHours -gt 2160) { throw "The grace period must be between 1 hour and 90 days" }
     if ($Clean.VersionMode -notin "Latest", "Pinned") { throw "Unknown version mode '$($Clean.VersionMode)'" }
+    if ($Clean.UpdateSchedule) {
+        try { $null = New-ChocoSchedule -Values ($Clean.UpdateSchedule | ConvertFrom-Json) } catch { throw "The default schedule is invalid: $($_.Exception.Message)" }
+    }
 
     New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
     $Clean | ConvertTo-Json | Set-Content -Path $script:SettingsPath -Encoding UTF8
@@ -158,11 +164,143 @@ function Get-ChocoLicenseNote {
     return $script:LicenseNotes[$ChocoName.ToLower()]
 }#Returns a license warning for the package, or $null
 
+# Update schedule of one app: when and under which conditions updates install. Name, short key in the notes, type.
+# Defaults equal the behavior before schedules existed (startup + daily 10-15 o'clock, no conditions, check every 4 hours).
+$script:ScheduleFields = @(
+    @{ Name = "TriggerStart"; Key = "ts"; Type = "bool"; Default = $true }
+    @{ Name = "TriggerWindow"; Key = "tw"; Type = "bool"; Default = $true }
+    @{ Name = "WindowFrom"; Key = "wf"; Type = "time"; Default = "10:00" }
+    @{ Name = "WindowTo"; Key = "wt"; Type = "time"; Default = "15:00" }
+    @{ Name = "WindowDays"; Key = "wd"; Type = "days"; Default = "1234567" }
+    @{ Name = "IdleMinutes"; Key = "ti"; Type = "int"; Default = 0; Allowed = 0, 1, 5, 10, 15, 30, 60 }
+    @{ Name = "TriggerLogon"; Key = "tl"; Type = "bool"; Default = $false }
+    @{ Name = "OnlyOnMains"; Key = "cp"; Type = "bool"; Default = $false }
+    @{ Name = "NoPresentation"; Key = "cx"; Type = "bool"; Default = $false }
+    @{ Name = "NoMetered"; Key = "cm"; Type = "bool"; Default = $false }
+    @{ Name = "AppNotRunning"; Key = "ca"; Type = "bool"; Default = $false }
+    @{ Name = "CheckIntervalHours"; Key = "ci"; Type = "int"; Default = 4; Allowed = 1, 4, 24 }
+    @{ Name = "DeadlineAppMode"; Key = "da"; Type = "enum"; Default = "Install"; Map = [ordered]@{ Install = "I"; AskClose = "A"; Close = "C"; Wait = "W" } }
+    @{ Name = "CloseAfterMinutes"; Key = "dc"; Type = "int"; Default = 15; Min = 1; Max = 240 }
+    @{ Name = "RestartMode"; Key = "rm"; Type = "enum"; Default = "Never"; Map = [ordered]@{ Never = "N"; Ask = "A"; OutsideWindow = "O" } }
+    @{ Name = "RetryMode"; Key = "rr"; Type = "enum"; Default = "Next"; Map = [ordered]@{ Next = "N"; None = "X"; Every = "E" } }
+    @{ Name = "RetryCount"; Key = "rn"; Type = "int"; Default = 3; Min = 1; Max = 10 }
+    @{ Name = "RetryHours"; Key = "rh"; Type = "int"; Default = 4; Min = 1; Max = 72 }
+    @{ Name = "ProcessNames"; Key = "pn"; Type = "names"; Default = "" }
+)
+# Longest notes text this tool writes. Intune documents no limit for the notes of an app (Graph mobileApp.notes is a
+# plain string); we stay well below 1000 characters on purpose.
+$script:NotesMaxLength = 1000
+
+function Get-ChocoScheduleValue($Source, [string]$Name) {
+    # One value of a hashtable or object, $null when it is not there
+    if ($null -eq $Source) { return $null }
+    if ($Source -is [System.Collections.IDictionary]) { if ($Source.Contains($Name)) { return $Source[$Name] } else { return $null } }
+    $Property = $Source.PSObject.Properties[$Name]
+    if ($Property) { return $Property.Value }
+    return $null
+}
+
+function New-ChocoSchedule {
+    <#
+        The schedule of one app (when updates install, under which conditions, what happens at the deadline, after a
+        failure and when a restart is needed). Values (hashtable or object, may be partial) are laid over Base (an
+        earlier schedule); without Base the built-in defaults apply. Invalid values throw.
+    #>
+    param($Values, $Base)
+    $Result = [ordered]@{}
+    foreach ($Field in $script:ScheduleFields) {
+        $Value = $Field.Default
+        $FromBase = Get-ChocoScheduleValue $Base $Field.Name
+        if ($null -ne $FromBase) { $Value = $FromBase }
+        $FromValues = Get-ChocoScheduleValue $Values $Field.Name
+        if ($null -ne $FromValues) { $Value = $FromValues }
+        $Name = $Field.Name
+        switch ($Field.Type) {
+            "bool" {
+                if ($Value -is [string]) { $Value = $Value.Trim() -in "1", "true", "yes", "on" } else { $Value = [bool]$Value }
+            }
+            "time" {
+                $Value = ([string]$Value).Trim()
+                if ($Value -notmatch '^([01]\d|2[0-3]):([0-5]\d)$') { throw "$Name must be a time like 10:00" }
+            }
+            "days" {
+                $Digits = @(([string]$Value).ToCharArray() | Where-Object { $_ -match '[1-7]' } | Sort-Object -Unique)
+                if (([string]$Value) -match '[^1-7]' -or $Digits.Count -eq 0) { throw "$Name must list weekdays as digits 1 (Monday) to 7 (Sunday)" }
+                $Value = -join $Digits
+            }
+            "int" {
+                $Number = 0
+                if (-not [int]::TryParse([string]$Value, [ref]$Number)) { throw "$Name must be a whole number" }
+                if ($Field.Allowed -and $Number -notin $Field.Allowed) { throw "$Name must be one of $($Field.Allowed -join ', ')" }
+                if ($Field.Contains("Min") -and ($Number -lt $Field.Min -or $Number -gt $Field.Max)) { throw "$Name must be between $($Field.Min) and $($Field.Max)" }
+                $Value = $Number
+            }
+            "enum" {
+                $Match = @($Field.Map.Keys | Where-Object { $_ -eq [string]$Value })
+                if ($Match.Count -eq 0) { throw "$Name must be one of $($Field.Map.Keys -join ', ')" }
+                $Value = [string]$Match[0]
+            }
+            "names" {
+                $Value = (([string]$Value -split ',' | ForEach-Object { $_.Trim() -replace '\.exe$', '' } | Where-Object { $_ }) -join ',')
+                if ($Value -notmatch '^[A-Za-z0-9._+ ,-]{0,150}$') { throw "$Name may only contain process names (letters, digits . _ + -), 150 characters at most" }
+            }
+        }
+        $Result[$Name] = $Value
+    }
+    if ($Result.WindowFrom -eq $Result.WindowTo) { throw "The time window needs different start and end times" }
+    return [pscustomobject]$Result
+}#Returns a complete, validated schedule
+
+function Get-ChocoScheduleDefaults {
+    # The schedule new apps start with: the built-in defaults, changed by the UpdateSchedule setting (compact JSON)
+    $Override = $null
+    if ($script:Settings -and $script:Settings.PSObject.Properties["UpdateSchedule"] -and ([string]$script:Settings.UpdateSchedule).Trim()) {
+        try { $Override = [string]$script:Settings.UpdateSchedule | ConvertFrom-Json } catch { Write-Warning "The UpdateSchedule setting is not valid JSON, using the built-in defaults" }
+    }
+    return New-ChocoSchedule -Values $Override
+}#Schedule for new apps
+
+function ConvertTo-ChocoScheduleCfg {
+    param([Parameter(Mandatory = $true)]$Schedule)
+    # Compact JSON with short keys and one-letter enum values, then base64url (no ; = + / in the notes)
+    $Compact = [ordered]@{ v = 1 }
+    foreach ($Field in $script:ScheduleFields) {
+        $Value = $Schedule.($Field.Name)
+        $Compact[$Field.Key] = switch ($Field.Type) {
+            "bool" { [int][bool]$Value }
+            "time" { ([string]$Value).Replace(":", "") }
+            "enum" { $Field.Map[[string]$Value] }
+            default { $Value }
+        }
+    }
+    return ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes(($Compact | ConvertTo-Json -Compress)))
+}#Schedule as the cfg value of the notes
+
+function ConvertFrom-ChocoScheduleCfg {
+    param([Parameter(Mandatory = $true)][string]$Cfg)
+    $Text = $Cfg.Replace("-", "+").Replace("_", "/")
+    $Text += "=" * ((4 - $Text.Length % 4) % 4)
+    $Compact = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Text)) | ConvertFrom-Json
+    $Values = @{}
+    foreach ($Field in $script:ScheduleFields) {
+        $Raw = Get-ChocoScheduleValue $Compact $Field.Key
+        if ($null -eq $Raw) { continue }
+        $Values[$Field.Name] = switch ($Field.Type) {
+            "time" { ([string]$Raw).Insert(2, ":") }
+            "enum" { $Letter = [string]$Raw; @($Field.Map.Keys | Where-Object { $Field.Map[$_] -eq $Letter })[0] }
+            default { $Raw }
+        }
+    }
+    return New-ChocoSchedule -Values $Values
+}#Reads the cfg value of the notes (throws when it is damaged)
+
 function New-ChocoAppPolicy {
     <#
-        The update policy of one app: version (empty = always the latest), update mode, grace period and the
-        values baked into the device scripts. The fingerprint goes into the detection rule: when it changes in
+        The update policy of one app: version (empty = always the latest), update mode, grace period, the schedule
+        and the values baked into the device scripts. The fingerprint goes into the detection rule: when it changes in
         Intune, devices no longer detect the app as current and run install.ps1 again, which applies the policy.
+        Update modes: Off (Intune installs a released version right away), Startup (= automatic per schedule),
+        Custom (the user is asked, installed after GraceHours at the latest).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Package,
@@ -171,11 +309,19 @@ function New-ChocoAppPolicy {
         [ValidateRange(1, 2160)][int]$GraceHours = 48,
         [string]$PackageSource = "",
         [int]$UpdateDelayMinMinutes = 5,
-        [int]$UpdateDelayMaxMinutes = 60
+        [int]$UpdateDelayMaxMinutes = 60,
+        # Hashtable or object with schedule values (see $script:ScheduleFields); missing ones use the built-in defaults
+        $Schedule
     )
     if ($Version -eq "latest") { $Version = "" }
     if ($Version -and $Version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') { throw "'$Version' is not a valid package version" }
-    $Text = "$($Package.ToLower())|$Version|$UpdateMode|$GraceHours|$PackageSource|$UpdateDelayMinMinutes|$UpdateDelayMaxMinutes|$($script:DeviceScriptRevision)"
+    $ScheduleObject = New-ChocoSchedule -Values $Schedule
+    if ($UpdateMode -eq "Startup" -and -not ($ScheduleObject.TriggerStart -or $ScheduleObject.TriggerWindow -or $ScheduleObject.IdleMinutes -gt 0 -or $ScheduleObject.TriggerLogon)) {
+        throw "Automatic updates need at least one trigger (PC start, time window, idle or sign-in)"
+    }
+    $Cfg = ConvertTo-ChocoScheduleCfg $ScheduleObject
+    # Every field of the policy is part of the fingerprint (the cfg text covers the whole schedule)
+    $Text = "$($Package.ToLower())|$Version|$UpdateMode|$GraceHours|$PackageSource|$UpdateDelayMinMinutes|$UpdateDelayMaxMinutes|$Cfg|$($script:DeviceScriptRevision)"
     $Sha = [Security.Cryptography.SHA256]::Create()
     $Hash = -join ($Sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))[0..7] | ForEach-Object { $_.ToString("x2") })
     $Sha.Dispose()
@@ -187,32 +333,52 @@ function New-ChocoAppPolicy {
         PackageSource         = $PackageSource
         UpdateDelayMinMinutes = $UpdateDelayMinMinutes
         UpdateDelayMaxMinutes = $UpdateDelayMaxMinutes
+        Schedule              = $ScheduleObject
         Fingerprint           = $Hash
     }
 }#Returns the update policy of an app with its fingerprint
 
+function Get-DeviceScheduleText {
+    # The schedule as compact JSON for a single-quoted string of a device script (ASCII only, quotes doubled)
+    param([Parameter(Mandatory = $true)]$Schedule)
+    return ((New-ChocoSchedule -Values $Schedule | ConvertTo-Json -Compress) -replace '[^\x20-\x7E]', '').Replace("'", "''")
+}#Schedule for the device scripts
+
 function ConvertTo-ChocoAppNotes {
+    <#
+        Notes of the Intune app: marker, then the readable fields of the first versions (package, version, update,
+        grace, source, delay: older tool versions still read them), then ";cfg=" with the whole schedule as
+        versioned compact JSON (base64url). ConvertFrom-ChocoAppNotes is the only reader.
+    #>
     param([Parameter(Mandatory = $true)]$Policy, [string]$Marker = $script:AppMarker)
     $Version = if ($Policy.Version) { $Policy.Version } else { "latest" }
-    # Package source (URL encoded) and startup delay belong to the app too, so a later change keeps them
-    return "$Marker;package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)" +
+    $Notes = "$Marker;package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)" +
         ";source=$([uri]::EscapeDataString([string]$Policy.PackageSource));delay=$($Policy.UpdateDelayMinMinutes)-$($Policy.UpdateDelayMaxMinutes)"
-}#Notes of the Intune app: marker, package and update policy (read back by ConvertFrom-ChocoAppNotes)
+    if ($Policy.Schedule) { $Notes += ";cfg=$(ConvertTo-ChocoScheduleCfg $Policy.Schedule)" }
+    if ($Notes.Length -ge $script:NotesMaxLength) { throw "The notes of the app would be $($Notes.Length) characters long (limit used: $($script:NotesMaxLength)). Shorten the package source or the process names." }
+    return $Notes
+}#Notes of the Intune app (read back by ConvertFrom-ChocoAppNotes)
 
 function ConvertFrom-ChocoAppNotes {
     param([string]$Notes)
-    # PackageSource and the delays are $null for apps from before they were stored (callers use the current settings)
+    # PackageSource and the delays are $null for apps from before they were stored (callers use the current settings).
+    # Schedule is always complete: without cfg (older apps) it is the built-in default, which behaves like before.
     $Result = [ordered]@{ Package = $null; Version = ""; UpdateMode = "Startup"; GraceHours = 48; HasPolicy = $false
-        PackageSource = $null; UpdateDelayMinMinutes = $null; UpdateDelayMaxMinutes = $null }
+        PackageSource = $null; UpdateDelayMinMinutes = $null; UpdateDelayMaxMinutes = $null; Schedule = $null; HasSchedule = $false }
     if ($Notes -match 'package=([A-Za-z0-9._+-]+)') { $Result.Package = $Matches[1] }
     if ($Notes -match 'version=([0-9A-Za-z.+-]+)' -and $Matches[1] -ne "latest") { $Result.Version = $Matches[1] }
     if ($Notes -match 'update=(Off|Startup|Custom)') { $Result.UpdateMode = $Matches[1]; $Result.HasPolicy = $true }
     if ($Notes -match 'grace=(\d+)') { $Result.GraceHours = [int]$Matches[1] }
     if ($Notes -match 'source=([^;]*)') { $Result.PackageSource = [uri]::UnescapeDataString($Matches[1]) }
     if ($Notes -match 'delay=(\d+)-(\d+)') { $Result.UpdateDelayMinMinutes = [int]$Matches[1]; $Result.UpdateDelayMaxMinutes = [int]$Matches[2] }
+    if ($Notes -match '(?:^|;)cfg=([A-Za-z0-9_-]+)') {
+        try { $Result.Schedule = ConvertFrom-ChocoScheduleCfg $Matches[1]; $Result.HasSchedule = $true }
+        catch { Write-Warning "The schedule in the notes could not be read, using the defaults: $($_.Exception.Message)" }
+    }
+    if (-not $Result.Schedule) { $Result.Schedule = New-ChocoSchedule }
     # Apps from before the update policy keep their behavior: latest version, update at startup
     return [pscustomobject]$Result
-}#Reads package and update policy from the notes of an Intune app
+}#Reads package, update policy and schedule from the notes of an Intune app
 
 function Install-IntunechocoComponents {
     # IntuneWin32App 1.5.0 or newer is required (older versions break packaging, see issue #5, and dependencies, see issue #3)
@@ -920,33 +1086,543 @@ function Write-ProtectedFile([string]$Path, [string]$Text) {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII
 }
+
+# Log: %ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<id>.log, so that "Collect
+# diagnostics" in Intune includes it. At 1 MB it becomes IntuneChocoDeployment-<id>.1.log (one rollover).
+# The scripts set $LogId (package or winget id, file name safe) and $LogTag before they log.
+function Add-CappedLine([string]$Path, [string]$Line) {
+    try {
+        if (Test-ForeignItem $Path) { Remove-ItemSafely $Path }
+        if ((Test-Path -LiteralPath $Path) -and (Get-Item -LiteralPath $Path).Length -gt 1MB) {
+            Move-Item -LiteralPath $Path -Destination ($Path -replace '\.log$', '.1.log') -Force
+        }
+        Add-Content -LiteralPath $Path -Value $Line
+    }
+    catch { }
+}
+function Write-DeviceLog([string]$Text) {
+    # The folder belongs to the Intune Management Extension (admin only); it is not created here
+    $Dir = Join-Path $env:ProgramData "Microsoft\IntuneManagementExtension\Logs"
+    if (Test-Path -LiteralPath $Dir) { Add-CappedLine (Join-Path $Dir "IntuneChocoDeployment-$LogId.log") ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $LogTag, $Text) }
+}
+
+# last-result.json: the last attempt of this app, in its protected folder (%ProgramData%\IntuneChocoUpdates\<package>
+# or %ProgramData%\IntuneWingetDeployment\<id>), written by install.ps1 and update.ps1. One JSON object, plain ASCII:
+#   Format     1 (raised when fields change meaning)
+#   Package    Chocolatey package id or winget id
+#   Time       time of the attempt, ISO 8601 with offset, local time
+#   Action     install | upgrade | uninstall | check | restart
+#   Status     ok | failed | skipped | pending   (skipped = a condition did not allow it now, pending = update known, not installed yet)
+#   ExitCode   exit code of choco, winget or the installer; 0 for ok, skipped and pending
+#   Cause      short text, e.g. "ok", "up to date", "waiting: on battery", "failed: exit code 1603"
+#   Installed  installed version after the attempt, "" when unknown
+#   Target     version aimed at (pinned version or newest known), "" when unknown
+# $ResultFile is set by the scripts once the folder is protected.
+function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [string]$Cause, [string]$Installed = "", [string]$Target = "") {
+    if (-not $ResultFile) { return }
+    $Clean = { param($Text) $Short = ([string]$Text -replace '[^\x20-\x7E]', '?'); if ($Short.Length -gt 120) { $Short.Substring(0, 120) } else { $Short } }
+    try {
+        $Result = [ordered]@{ Format = 1; Package = (& $Clean $LogId); Time = (Get-Date).ToString("o"); Action = $Action; Status = $Status
+            ExitCode = $ExitCode; Cause = (& $Clean $Cause); Installed = (& $Clean $Installed); Target = (& $Clean $Target) }
+        Write-ProtectedFile $ResultFile ($Result | ConvertTo-Json -Compress)
+    }
+    catch { }
+}
 '@
-}#Lock and folder protection of the device scripts
+}#Lock, folder protection, log and last result of the device scripts
+
+function Get-ScreenProbeScript {
+    # Runs in the session of a signed-in user (started on demand by update.ps1 through the task "Probe <id> screen state"):
+    # asks Windows whether the user is presenting or has a full-screen app and writes the answer for update.ps1.
+    return @'
+# Writes SHQueryUserNotificationState of this session to %LOCALAPPDATA%\IntuneChocoUpdates\screen-state.txt
+#   2 busy (full screen), 3 Direct3D full screen, 4 presentation mode, 5 ready for notifications, 6 quiet time, 7 app
+Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class NotifyState { [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state); }'
+$State = 0
+[void][NotifyState]::SHQueryUserNotificationState([ref]$State)
+$Folder = Join-Path $env:LOCALAPPDATA "IntuneChocoUpdates"
+New-Item -Path $Folder -ItemType Directory -Force | Out-Null
+Set-Content -Path (Join-Path $Folder "screen-state.txt") -Value $State
+'@
+}#Script that reports the screen state of a user session
+
+function Get-DeviceTaskRegistration {
+    # Register-UpdateTasks of install.ps1 (Chocolatey and winget). Needs: $TaskPath, $TaskNames (9 names, see below),
+    # $AppRoot, $Mode, $Sched (schedule), $DelayMin, $DelayMax.
+    #   0 start   1 now   2 check   3 notify   4 window   5 idle   6 sign-in   7 retry (made by update.ps1)   8 probe
+    return @'
+function Register-UpdateTasks {
+    $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $UpdateScript = Join-Path $AppRoot "update.ps1"
+    $System = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
+    # Each device waits a random time, so a whole office behind one IP doesn't hit the download limits at once
+    $Spread = { "PT{0}M" -f (Get-Random -Minimum $DelayMin -Maximum ($DelayMax + 1)) }
+    function New-UpdateSettings([bool]$Restrict, [hashtable]$Extra = @{}) {
+        # Restrict: honor "only on mains power" (Task Scheduler does not start the task on battery and stops it when the
+        # device goes on battery). The tasks of Custom mode are not restricted: the deadline decides there.
+        $Parameters = @{ StartWhenAvailable = $true; ExecutionTimeLimit = (New-TimeSpan -Hours 2); MultipleInstances = "IgnoreNew"; RunOnlyIfNetworkAvailable = $true }
+        if (-not ($Restrict -and $Sched.OnlyOnMains)) { $Parameters.AllowStartIfOnBatteries = $true; $Parameters.DontStopIfGoingOnBatteries = $true }
+        foreach ($Key in $Extra.Keys) { $Parameters[$Key] = $Extra[$Key] }
+        return New-ScheduledTaskSettingsSet @Parameters
+    }
+    function Add-UpdateTask([int]$Index, $Triggers, $Settings, [string]$Step, [string]$Why) {
+        $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$UpdateScript`" -Mode $Step -Trigger $Why"
+        Register-ScheduledTask -TaskName $TaskNames[$Index] -TaskPath $TaskPath -Action $Action -Trigger $Triggers -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
+    }
+
+    if ($Mode -in "Startup", "Custom") {
+        # Startup = install automatically per schedule; Custom = only check (the user prompt and the deadline decide)
+        $Step = if ($Mode -eq "Custom") { "Check" } else { "Startup" }
+        $Restrict = $Mode -eq "Startup"
+        if ($Sched.TriggerStart) {
+            $Trigger = New-ScheduledTaskTrigger -AtStartup
+            $Trigger.Delay = & $Spread
+            Add-UpdateTask 0 @($Trigger) (New-UpdateSettings $Restrict) $Step "Start"
+        }
+        if ($Sched.TriggerLogon) {
+            $Trigger = New-ScheduledTaskTrigger -AtLogOn
+            $Trigger.Delay = & $Spread
+            Add-UpdateTask 6 @($Trigger) (New-UpdateSettings $Restrict) $Step "Logon"
+        }
+    }
+    if ($Mode -eq "Startup" -and $Sched.TriggerWindow) {
+        # Weekly at the start of the window plus a random delay up to its end; a run that starts late (device was off)
+        # checks again inside update.ps1 whether the window is still open
+        $Days = @($Sched.WindowDays.ToCharArray() | ForEach-Object { if ($_ -eq '7') { "Sunday" } else { [string][DayOfWeek][int][string]$_ } })
+        $From = [timespan]::Parse($Sched.WindowFrom)
+        $Length = ([timespan]::Parse($Sched.WindowTo) - $From).TotalMinutes
+        if ($Length -le 0) { $Length += 1440 }
+        $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Days -At ([datetime]::Today + $From) -RandomDelay (New-TimeSpan -Minutes ([Math]::Max(1, $Length - 1)))
+        Add-UpdateTask 4 @($Trigger) (New-UpdateSettings $true) "Startup" "Window"
+    }
+    if ($Mode -eq "Startup" -and $Sched.IdleMinutes -gt 0) {
+        # PowerShell 5.1 has no cmdlet for the idle trigger: create it from its CIM class. The idle time is a task setting.
+        $Class = Get-CimClass -Namespace "Root/Microsoft/Windows/TaskScheduler" -ClassName "MSFT_TaskIdleTrigger"
+        $Trigger = New-CimInstance -CimClass $Class -ClientOnly
+        $Trigger.Enabled = $true
+        $IdleSettings = New-UpdateSettings $true @{ RunOnlyIfIdle = $true; IdleDuration = (New-TimeSpan -Minutes $Sched.IdleMinutes); IdleWaitTimeout = (New-TimeSpan -Hours 2); DontStopOnIdleEnd = $true }
+        Add-UpdateTask 5 @($Trigger) $IdleSettings "Startup" "Idle"
+    }
+    if ($Mode -eq "Custom") {
+        # "Update now" from the user prompt: started on demand; signed-in users may run it (not change it)
+        $NowSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+        $NowAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$UpdateScript`" -Mode Now -Trigger Manual"
+        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action $NowAction -Principal $System -Settings $NowSettings -Force -ErrorAction Stop | Out-Null
+        $Service = New-Object -ComObject Schedule.Service
+        $Service.Connect()
+        $Service.GetFolder($TaskPath.TrimEnd("\")).GetTask($TaskNames[1]).SetSecurityDescriptor("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)", 0)
+
+        # Every 1, 4 or 24 hours: is there an update, is the grace period over?
+        $Check = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes((Get-Random -Minimum 5 -Maximum 60)) -RepetitionInterval (New-TimeSpan -Hours $Sched.CheckIntervalHours) -RepetitionDuration (New-TimeSpan -Days 3650)
+        Add-UpdateTask 2 @($Check) (New-UpdateSettings $false) "Check" "Interval"
+    }
+    if ($Mode -eq "Custom" -or ($Mode -eq "Startup" -and $Sched.RestartMode -eq "Ask")) {
+        # The prompts (update, closing the app, restart) run in the session of every signed-in user (Users group), at
+        # logon and every hour, without a console window
+        $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+        $NotifyScript = Join-Path $AppRoot "notify.ps1"
+        $NotifyAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$NotifyScript`""
+        $NotifyTriggers = @(
+            (New-ScheduledTaskTrigger -AtLogOn),
+            (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650))
+        )
+        $NotifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force -ErrorAction Stop | Out-Null
+    }
+    if ($Sched.NoPresentation -and $Mode -ne "Off") {
+        # On demand only: update.ps1 starts it in the session of each signed-in user to ask for the screen state
+        $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+        $ProbeScript = Join-Path $AppRoot "probe.ps1"
+        $ProbeAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$ProbeScript`""
+        $ProbeSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances Parallel
+        Register-ScheduledTask -TaskName $TaskNames[8] -TaskPath $TaskPath -Action $ProbeAction -Principal $Users -Settings $ProbeSettings -Force -ErrorAction Stop | Out-Null
+    }
+}
+'@
+}#Task registration of install.ps1
+
+function Get-DeviceUpdateCommon {
+    # The schedule logic of update.ps1 (Chocolatey and winget). Before it the script defines $Config, $Mode, $Trigger,
+    # $StateFile, $LogFile, $AppKey, $LogId; after it the source functions Invoke-Upgrade (exit code, 0/1641/3010 = success),
+    # Get-PendingUpdate (Pending, Installed, Target), Get-InstalledText and Invoke-SourceMaintenance.
+    return @'
+$S = $Config.Schedule
+$TaskId = $Config.TaskId
+$LogTag = "$Mode/$Trigger"
+$ResultFile = Join-Path $PSScriptRoot "last-result.json"
+$RetryFile = Join-Path $PSScriptRoot "retry.json"
+$RestartFile = Join-Path $PSScriptRoot "restart.json"
+$AttemptFile = Join-Path $PSScriptRoot "attempt.txt"
+function Write-Log([string]$Text) {
+    Add-CappedLine $LogFile ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $LogTag, $Text)
+    Write-DeviceLog $Text
+}
+function Read-JsonFile([string]$Path) {
+    if (Test-Path -LiteralPath $Path) { try { return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) } catch { } }
+    return $null
+}
+function Save-Result([string]$Action, [string]$Status, [int]$Code, [string]$Cause, [string]$Target = "") {
+    if (-not $Target) { $Target = [string]$Config.Version }
+    Save-LastResult $Action $Status $Code $Cause ([string](Get-InstalledText)) $Target
+}
+
+# --- Conditions ---
+function Test-OnBattery {
+    try { return [bool](@(Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop | Where-Object { $_.BatteryStatus -eq 1 }).Count) } catch { return $false }
+}
+function Test-Metered {
+    # Windows connection cost of the internet connection: fixed or variable data plan, roaming, over the limit
+    try {
+        [void][Windows.Networking.Connectivity.NetworkInformation, Windows.Networking.Connectivity, ContentType = WindowsRuntime]
+        $Connection = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile()
+        if (-not $Connection) { return $false }
+        $Cost = $Connection.GetConnectionCost()
+        return ([string]$Cost.NetworkCostType -in "Fixed", "Variable") -or [bool]$Cost.Roaming -or [bool]$Cost.OverDataLimit
+    }
+    catch { return $false }
+}
+function Test-ScreenBusy {
+    # SHQueryUserNotificationState only answers for the session of the caller. SYSTEM has none, so the task "Probe ..."
+    # (Users group, runs probe.ps1) is started in each signed-in session; the answer comes back in a file in the profile
+    # of that user (the user could write a wrong answer there; that only moves the time of an update, nothing else).
+    try {
+        $Sessions = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Where-Object { $_.SessionId -gt 0 } | Sort-Object SessionId -Unique)
+        if ($Sessions.Count -eq 0) { return $false }
+        $Service = New-Object -ComObject Schedule.Service
+        $Service.Connect()
+        $Task = $Service.GetFolder($Config.TaskPath.TrimEnd("\")).GetTask("Probe $TaskId screen state")
+        foreach ($Explorer in $Sessions) {
+            $Sid = (Invoke-CimMethod -InputObject $Explorer -MethodName GetOwnerSid -ErrorAction Stop).Sid
+            $UserHome = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid" -ErrorAction Stop).ProfileImagePath
+            $File = Join-Path $UserHome "AppData\Local\IntuneChocoUpdates\screen-state.txt"
+            $Start = (Get-Date).AddSeconds(-1)
+            # 4 = TASK_RUN_USE_SESSION_ID
+            [void]$Task.RunEx($null, 4, [int]$Explorer.SessionId, $null)
+            for ($i = 0; $i -lt 15; $i++) {
+                Start-Sleep -Seconds 1
+                if ((Test-Path -LiteralPath $File) -and (Get-Item -LiteralPath $File).LastWriteTime -ge $Start) { break }
+            }
+            if ((Test-Path -LiteralPath $File) -and (Get-Item -LiteralPath $File).LastWriteTime -ge $Start) {
+                $State = [int]((Get-Content -LiteralPath $File -Raw).Trim())
+                if ($State -in 2, 3, 4, 6) { return $true }
+            }
+        }
+    }
+    catch { Write-Log "screen state unknown: $($_.Exception.Message)" }
+    return $false
+}
+function Get-IsoDay([datetime]$Date) { if ($Date.DayOfWeek -eq [DayOfWeek]::Sunday) { return 7 } else { return [int]$Date.DayOfWeek } }
+function Test-InWindow([datetime]$At = (Get-Date)) {
+    $From = [timespan]::Parse($S.WindowFrom)
+    $To = [timespan]::Parse($S.WindowTo)
+    $Time = $At.TimeOfDay
+    if ($From -lt $To) { return ($Time -ge $From -and $Time -lt $To -and ([string]$S.WindowDays).Contains([string](Get-IsoDay $At))) }
+    # The window crosses midnight; its weekday is the day it starts
+    if ($Time -ge $From) { return ([string]$S.WindowDays).Contains([string](Get-IsoDay $At)) }
+    if ($Time -lt $To) { return ([string]$S.WindowDays).Contains([string](Get-IsoDay $At.AddDays(-1))) }
+    return $false
+}
+function Get-AppFolders {
+    # Install folders of the app from its uninstall entry (best effort)
+    $Name = [string]$Config.DisplayName
+    $Last = ($AppKey -split '\.')[-1]
+    $Roots = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    $Folders = @()
+    foreach ($Entry in @(Get-ItemProperty -Path $Roots -ErrorAction SilentlyContinue)) {
+        $Display = [string]$Entry.DisplayName
+        if (-not $Display -or -not $Entry.InstallLocation) { continue }
+        if (($Name -and $Display -like ([WildcardPattern]::Escape($Name) + "*")) -or $Display -eq $Last) {
+            $Folder = ([string]$Entry.InstallLocation).Trim().Trim('"').TrimEnd("\")
+            if ($Folder.Length -gt 12 -and (Test-Path -LiteralPath $Folder) -and $Folder -ne $env:ProgramFiles -and $Folder -ne ${env:ProgramFiles(x86)}) { $Folders += $Folder }
+        }
+    }
+    return @($Folders | Select-Object -Unique)
+}
+function Get-RunningApp {
+    # Processes of the app: the names of the policy, otherwise programs in its install folder or the tools folder of its
+    # Chocolatey package. Best effort: when nothing is known, the app counts as not running.
+    $Names = @()
+    $Folders = @()
+    if ($S.ProcessNames) { $Names = @($S.ProcessNames -split ',') }
+    else {
+        $Folders = @(Get-AppFolders)
+        if ($ChocoRoot) {
+            $Tools = Join-Path $ChocoRoot "lib\$AppKey\tools"
+            if (Test-Path -LiteralPath $Tools) { $Folders += $Tools }
+        }
+    }
+    $Found = @()
+    foreach ($Process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        if ($Process.Id -eq $PID) { continue }
+        $Path = $null
+        try { $Path = $Process.Path } catch { }
+        $InFolder = $false
+        foreach ($Folder in $Folders) { if ($Path -and $Path.StartsWith($Folder + "\", [StringComparison]::OrdinalIgnoreCase)) { $InFolder = $true } }
+        if ($InFolder -or $Process.ProcessName -in $Names) { $Found += $Process }
+    }
+    return $Found
+}
+function Stop-AppProcesses($Processes) {
+    # Ask politely (close the main window), after 30 seconds end what is left
+    foreach ($Process in $Processes) { try { [void]$Process.CloseMainWindow() } catch { } }
+    foreach ($Process in $Processes) { try { [void]$Process.WaitForExit(30000) } catch { } }
+    foreach ($Process in $Processes) { try { if (-not $Process.HasExited) { Stop-Process -Id $Process.Id -Force -ErrorAction Stop } } catch { } }
+    Write-Log ("closed " + (($Processes | ForEach-Object { $_.ProcessName } | Select-Object -Unique) -join ", "))
+}
+function Get-Blocker([bool]$PastDeadline, [bool]$WaivePresentation) {
+    # Why an update must not start now ($null = go). The deadline waives power, network and app-open conditions (the app
+    # is handled by the deadline setting); presentations still count for 4 hours after the deadline.
+    if (-not $PastDeadline) {
+        if ($S.OnlyOnMains -and (Test-OnBattery)) { return "on battery" }
+        if ($S.NoMetered -and (Test-Metered)) { return "metered network" }
+    }
+    if ($S.NoPresentation -and -not $WaivePresentation -and (Test-ScreenBusy)) { return "presentation or full-screen app" }
+    if (-not $PastDeadline -and $S.AppNotRunning -and @(Get-RunningApp).Count -gt 0) { return "app is running" }
+    return $null
+}
+
+# --- Waiting, retrying, restarting ---
+function Set-RetryTask([datetime]$At, [string]$Step) {
+    try {
+        $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Mode $Step -Trigger Retry"
+        $System = New-ScheduledTaskPrincipal -UserId "S-1-5-18" -LogonType ServiceAccount -RunLevel Highest
+        $Parameters = @{ StartWhenAvailable = $true; ExecutionTimeLimit = (New-TimeSpan -Hours 2); MultipleInstances = "IgnoreNew"; RunOnlyIfNetworkAvailable = $true }
+        if (-not ($Config.Mode -eq "Startup" -and $S.OnlyOnMains)) { $Parameters.AllowStartIfOnBatteries = $true; $Parameters.DontStopIfGoingOnBatteries = $true }
+        Register-ScheduledTask -TaskName "Retry $TaskId update" -TaskPath $Config.TaskPath -Action $Action -Trigger (New-ScheduledTaskTrigger -Once -At $At) -Principal $System `
+            -Settings (New-ScheduledTaskSettingsSet @Parameters) -Force -ErrorAction Stop | Out-Null
+    }
+    catch { Write-Log "the retry task could not be registered: $($_.Exception.Message)" }
+}
+function Get-RetryState {
+    $State = [pscustomobject]@{ Attempts = 0; WaitSince = ""; Failed = ""; FailedAt = "" }
+    $Old = Read-JsonFile $RetryFile
+    if ($Old) { foreach ($Name in "Attempts", "WaitSince", "Failed", "FailedAt") { if ($null -ne $Old.$Name) { $State.$Name = $Old.$Name } } }
+    # A new trigger starts a new chain of retries and waits
+    if ($Trigger -ne "Retry") { $State.Attempts = 0; $State.WaitSince = "" }
+    return $State
+}
+function Save-RetryState($State) { Write-ProtectedFile $RetryFile ($State | ConvertTo-Json -Compress) }
+function Wait-ForChance([string]$Reason, [string]$Step, [int]$Minutes = 30) {
+    # Next chance: the next trigger, and meanwhile a short retry (for at most a day)
+    Write-Log "waiting: $Reason"
+    Save-Result "upgrade" "skipped" 0 "waiting: $Reason"
+    $State = Get-RetryState
+    if (-not $State.WaitSince) { $State.WaitSince = (Get-Date).ToString("o") }
+    if (((Get-Date) - [datetime]$State.WaitSince).TotalHours -lt 24) {
+        Save-RetryState $State
+        Set-RetryTask (Get-Date).AddMinutes($Minutes) $Step
+    }
+    else { Save-RetryState $State; Write-Log "waiting for more than a day, the next trigger tries again" }
+}
+function Get-FailTarget {
+    try { $Info = Get-PendingUpdate; if ($Info.Target) { return [string]$Info.Target } } catch { }
+    return "unknown"
+}
+function Register-FailureRetry([string]$Step) {
+    $State = Get-RetryState
+    switch ($S.RetryMode) {
+        "Every" {
+            if ($State.Attempts -lt $S.RetryCount) {
+                $State.Attempts++
+                Save-RetryState $State
+                Set-RetryTask (Get-Date).AddHours($S.RetryHours) $Step
+                Write-Log "retry $($State.Attempts) of $($S.RetryCount) in $($S.RetryHours) hour(s)"
+            }
+            else { Save-RetryState $State; Write-Log "no retries left" }
+        }
+        "None" {
+            $State.Failed = Get-FailTarget
+            $State.FailedAt = (Get-Date).ToString("o")
+            Save-RetryState $State
+            Write-Log "no retry (setting): not tried again for this version"
+        }
+        default { Save-RetryState $State; Write-Log "next chance is the next trigger" }
+    }
+}
+function Start-NotifyTask { & schtasks.exe /run /tn "$($Config.TaskPath)Notify $TaskId update" | Out-Null }
+function Invoke-RestartStep {
+    $Request = Read-JsonFile $RestartFile
+    if (-not $Request) { return 0 }
+    if ((Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime -gt [datetime]$Request.Since) {
+        Remove-Item -LiteralPath $RestartFile -Force -ErrorAction SilentlyContinue
+        Write-Log "the device has restarted since"
+        return 0
+    }
+    if ($S.RestartMode -ne "OutsideWindow") { return 0 }
+    if ($S.NoPresentation -and (Test-ScreenBusy)) { Set-RetryTask (Get-Date).AddMinutes(30) "Restart"; return 0 }
+    if (Test-InWindow) {
+        # Not inside the time window: wait for its end
+        $End = [datetime]::Today + [timespan]::Parse($S.WindowTo)
+        if ($End -le (Get-Date)) { $End = $End.AddDays(1) }
+        Set-RetryTask $End.AddMinutes(1) "Restart"
+        Write-Log "restart waits for the end of the time window ($End)"
+        return 0
+    }
+    & shutdown.exe /r /t 600 /c "A software update needs a restart. The device restarts in 10 minutes. Save your work." | Out-Null
+    Write-Log "restart announced in 10 minutes"
+    Save-Result "restart" "ok" 0 "restart in 10 minutes"
+    return 0
+}
+function Request-Restart {
+    if ($S.RestartMode -eq "Never") { Write-Log "a restart is needed, not done (restart setting: never)"; return }
+    Write-ProtectedFile $RestartFile (@{ Since = (Get-Date).ToString("o"); Package = $TaskId; DisplayName = [string]$Config.DisplayName } | ConvertTo-Json -Compress)
+    if ($S.RestartMode -eq "Ask") { Start-NotifyTask; Write-Log "asked the user to restart" }
+    else { [void](Invoke-RestartStep) }
+}
+
+# --- The runs ---
+function Invoke-Install([string]$Step) {
+    Invoke-SourceMaintenance
+    Write-ProtectedFile $AttemptFile (Get-Date).ToString("o")
+    $Code = Invoke-Upgrade
+    if ($Code -in 0, 1641, 3010) {
+        Write-Log "update installed (exit code $Code)"
+        $State = Get-RetryState
+        $State.Attempts = 0; $State.WaitSince = ""; $State.Failed = ""; $State.FailedAt = ""
+        Save-RetryState $State
+        Save-Result "upgrade" "ok" 0 $(if ($Code -in 1641, 3010) { "ok, restart needed" } else { "ok" })
+        if ($Code -in 1641, 3010) { Request-Restart }
+        return 0
+    }
+    if ($Code -eq 1618) { Wait-ForChance "another installation is running" $Step; return $Code }
+    Save-Result "upgrade" "failed" $Code "failed: exit code $Code"
+    Register-FailureRetry $Step
+    return $Code
+}
+function Invoke-CheckStep {
+    $Info = Get-PendingUpdate
+    if (-not $Info.Pending) {
+        Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
+        Save-Result "check" "ok" 0 "up to date"
+        return 0
+    }
+    $State = Read-JsonFile $StateFile
+    if (-not $State -or $State.Target -ne $Info.Target) {
+        $Now = Get-Date
+        $State = [pscustomobject]@{
+            Package     = $TaskId
+            DisplayName = $Config.DisplayName
+            Installed   = [string]$Info.Installed
+            Target      = [string]$Info.Target
+            FirstSeen   = $Now.ToString("o")
+            Deadline    = $Now.AddHours([int]$Config.GraceHours).ToString("o")
+        }
+        Write-ProtectedFile $StateFile ($State | ConvertTo-Json)
+        Write-Log "update $($Info.Installed) -> $($Info.Target) available, installed automatically from $($State.Deadline)"
+    }
+    $Deadline = [datetime]$State.Deadline
+    if ((Get-Date) -lt $Deadline) { Save-Result "check" "pending" 0 "update available, installed from $($Deadline.ToString('g'))" ([string]$Info.Target); return 0 }
+    Write-Log "grace period is over"
+    $Block = Get-Blocker $true ((Get-Date) -gt $Deadline.AddHours(4))
+    if ($Block) { Wait-ForChance $Block "Check"; return 0 }
+    $Open = @(Get-RunningApp)
+    if ($Open.Count -gt 0) {
+        switch ($S.DeadlineAppMode) {
+            "Wait" { Wait-ForChance "the app is open" "Check"; return 0 }
+            "Close" { Stop-AppProcesses $Open }
+            "AskClose" {
+                if (-not $State.CloseAt) {
+                    $CloseAt = (Get-Date).AddMinutes([int]$S.CloseAfterMinutes)
+                    $State | Add-Member -NotePropertyName CloseAt -NotePropertyValue $CloseAt.ToString("o") -Force
+                    Write-ProtectedFile $StateFile ($State | ConvertTo-Json)
+                    Start-NotifyTask
+                    Set-RetryTask $CloseAt "Check"
+                    Write-Log "asked the user to close the app, it is closed at $CloseAt"
+                    Save-Result "check" "pending" 0 "waiting for the user to close the app" ([string]$Info.Target)
+                    return 0
+                }
+                if ((Get-Date) -lt [datetime]$State.CloseAt) { return 0 }
+                Stop-AppProcesses $Open
+            }
+        }
+    }
+    return (Invoke-Install "Check")
+}
+function Invoke-UpdateRun {
+    Write-Log "start"
+    if ($Mode -eq "Restart") { return (Invoke-RestartStep) }
+    # "Update now" from the user prompt: no conditions
+    if ($Mode -eq "Now") { return (Invoke-Install "Startup") }
+    if ($Mode -eq "Check") { return (Invoke-CheckStep) }
+    # Automatic per schedule
+    if ($Trigger -eq "Window" -and -not (Test-InWindow)) { Write-Log "outside the time window, skipped"; return 0 }
+    if ($Trigger -in "Idle", "Logon" -and (Test-Path -LiteralPath $AttemptFile)) {
+        try { if (((Get-Date) - [datetime](Get-Content -LiteralPath $AttemptFile -Raw).Trim()).TotalHours -lt 12) { Write-Log "tried less than 12 hours ago, skipped"; return 0 } } catch { }
+    }
+    if ($S.RetryMode -eq "None") {
+        $State = Get-RetryState
+        if ($State.Failed -and $State.FailedAt -and ((Get-Date) - [datetime]$State.FailedAt).TotalDays -lt 7 -and (Get-FailTarget) -eq $State.Failed) {
+            Write-Log "failed before for this version and no retry is set, skipped"
+            return 0
+        }
+    }
+    $Block = Get-Blocker $false $false
+    if ($Block) { Wait-ForChance $Block "Startup"; return 0 }
+    return (Invoke-Install "Startup")
+}
+'@
+}#Schedule logic of update.ps1
 
 function Get-UpdateNotifyScript {
-    # The update prompt of Custom mode, for Chocolatey and winget apps (only the task folder differs)
+    # The prompts for the signed-in user, for Chocolatey and winget apps (only the task folder differs): update prompt of
+    # Custom mode, warning before the app is closed at the deadline, restart request
     param([Parameter(Mandatory = $true)][string]$TaskPath)
     $Script = @'
-# Shows the update prompt in the session of a signed-in user (scheduled task of the Users group, no admin rights).
-# "Install now" starts the SYSTEM task "Update <package> now"; "Later" is respected for 4 hours, but not within the
-# last hour before the update is installed anyway.
+# Shows prompts in the session of a signed-in user (scheduled task of the Users group, no admin rights).
+# Update: "Install now" starts the SYSTEM task "Update <package> now"; "Later" is respected for 4 hours, but not within
+# the last hour before the update is installed anyway. Closing: after the deadline, tells when the app is closed.
+# Restart: asks to restart after an update that needs it.
+Add-Type -AssemblyName System.Windows.Forms
+# DefaultDesktopOnly: the prompt comes to the front without a window of its own
+$Options = [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly
+$SnoozeFolder = Join-Path $env:LOCALAPPDATA "IntuneChocoUpdates"
+
+$RestartFile = Join-Path $PSScriptRoot "restart.json"
+if (Test-Path $RestartFile) {
+    try {
+        $Request = Get-Content -Path $RestartFile -Raw | ConvertFrom-Json
+        $Booted = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime -gt [datetime]$Request.Since
+        $SnoozeFile = Join-Path $SnoozeFolder "$($Request.Package).restart"
+        $Snoozed = $false
+        if (Test-Path $SnoozeFile) { try { $Snoozed = (Get-Date) -lt [datetime](Get-Content -Path $SnoozeFile -Raw).Trim() } catch { } }
+        if (-not $Booted -and -not $Snoozed) {
+            $Name = if ($Request.DisplayName) { $Request.DisplayName } else { $Request.Package }
+            $Answer = [System.Windows.Forms.MessageBox]::Show("The update of $Name needs a restart of this device.`r`n`r`nRestart now? Save your work first.", "Software update: $Name", "YesNo", "Information", "Button2", $Options)
+            if ($Answer -eq "Yes") { & shutdown.exe /r /t 60 /c "Restart for the update of $Name" | Out-Null }
+            else {
+                New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
+                Set-Content -Path $SnoozeFile -Value (Get-Date).AddHours(4).ToString("o")
+            }
+        }
+    }
+    catch { }
+}
+
 $StateFile = Join-Path $PSScriptRoot "state.json"
 if (-not (Test-Path $StateFile)) { exit 0 }
 try { $State = Get-Content -Path $StateFile -Raw | ConvertFrom-Json } catch { exit 0 }
 $Deadline = [datetime]$State.Deadline
-if ((Get-Date) -ge $Deadline) { exit 0 }
+$Name = if ($State.DisplayName) { $State.DisplayName } else { $State.Package }
+if ((Get-Date) -ge $Deadline) {
+    if ($State.CloseAt -and (Get-Date) -lt [datetime]$State.CloseAt) {
+        $WarnFile = Join-Path $SnoozeFolder "$($State.Package).closing"
+        $Warned = (Test-Path $WarnFile) -and ((Get-Content -Path $WarnFile -Raw).Trim() -eq [string]$State.CloseAt)
+        if (-not $Warned) {
+            New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
+            Set-Content -Path $WarnFile -Value ([string]$State.CloseAt)
+            [void][System.Windows.Forms.MessageBox]::Show("$Name is updated now and will be closed at $(([datetime]$State.CloseAt).ToString('t')).`r`n`r`nPlease save your work and close $Name.", "Software update: $Name", "OK", "Warning", "Button1", $Options)
+        }
+    }
+    exit 0
+}
 
-$SnoozeFolder = Join-Path $env:LOCALAPPDATA "IntuneChocoUpdates"
 $SnoozeFile = Join-Path $SnoozeFolder "$($State.Package).snooze"
 if (Test-Path $SnoozeFile) {
     try { $Until = [datetime](Get-Content -Path $SnoozeFile -Raw).Trim() } catch { $Until = Get-Date }
     if ((Get-Date) -lt $Until -and $Deadline -gt (Get-Date).AddHours(1)) { exit 0 }
 }
 
-Add-Type -AssemblyName System.Windows.Forms
-$Name = if ($State.DisplayName) { $State.DisplayName } else { $State.Package }
-# DefaultDesktopOnly: the prompt comes to the front without a window of its own
-$Options = [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly
 $Versions = if ($State.Installed -and $State.Target) { " ($($State.Installed) -> $($State.Target))" } else { "" }
 $Text = "An update for $Name is available$Versions.`r`n`r`n" +
     "Install it now? Save your work in $Name first, it may be closed during the update.`r`n`r`n" +
@@ -963,7 +1639,7 @@ else {
 }
 '@
     return $Script.Replace("__TASKPATH__", $TaskPath)
-}#Script of the update prompt for the signed-in user
+}#Script of the prompts for the signed-in user
 
 function New-ChocoPackageScripts {
     <#
@@ -988,6 +1664,9 @@ param(
     [int]$GraceHours = __GRACE__,
     [string]$DisplayName = '__DISPLAYNAME__',
     [string]$Policy = '__POLICY__',
+    [string]$ScheduleJson = '__SCHEDULE__',
+    [int]$DelayMin = __DELAYMIN__,
+    [int]$DelayMax = __DELAYMAX__,
     [switch]$Uninstall
 )
 
@@ -1006,9 +1685,14 @@ $Choco = Join-Path $ChocoRoot "bin\choco.exe"
 if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot"; exit 1 }
 
 $TaskPath = "\Intune-Choco-Updates\"
-$TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update")
+$TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update",
+    "Update $Package in time window", "Update $Package when idle", "Update $Package at sign-in", "Retry $Package update", "Probe $Package screen state")
 $Base = Join-Path $env:ProgramData "IntuneChocoUpdates"
 $AppRoot = Join-Path $Base $Package
+$LogId = $Package -replace '[^A-Za-z0-9._-]', '_'
+$LogTag = if ($Uninstall) { "uninstall" } else { "install" }
+$ResultFile = ""
+$Sched = $ScheduleJson | ConvertFrom-Json
 function Remove-UpdateTasks {
     foreach ($Name in $TaskNames) { Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 }
@@ -1028,6 +1712,7 @@ if ($Uninstall) {
         Exit-DeploymentLock
     }
     # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
+    Write-DeviceLog "choco uninstall $Package exit code $ExitCode"
     if ($ExitCode -notin 0, 1605, 1614, 1641, 3010) { Write-Output "choco uninstall failed with exit code $ExitCode"; exit $ExitCode }
     Remove-UpdateTasks
     try { Remove-ItemSafely $AppRoot } catch { Write-Output "$AppRoot could not be removed: $($_.Exception.Message)" }
@@ -1045,12 +1730,13 @@ try {
     Protect-Folder $AppRoot
 }
 catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit 1 }
+$ResultFile = Join-Path $AppRoot "last-result.json"
 
 # A new installation always installs. When only the policy changed (released version, update mode), the device
 # follows its update mode: Off installs a released version right away (latest + Off leaves the installed version
 # alone), Startup at the next startup, Custom asks the user and installs at the latest when the grace period is over.
 $Upgrade = (-not $Installed) -or ($Mode -eq "Off" -and $Version -and (Compare-PackageVersion $Version $Installed) -ne 0)
-if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; exit 1618 }
+if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; Write-DeviceLog "another installation is still running, Intune tries again"; exit 1618 }
 if (Test-ChocolateyUpdateDue) { Write-Output (Update-Chocolatey) }
 $ExitCode = 0
 if ($Upgrade) {
@@ -1058,68 +1744,38 @@ if ($Upgrade) {
     $ExitCode = $LASTEXITCODE
 }
 Exit-DeploymentLock
+if ($Upgrade) {
+    $InstallAction = if ($Installed) { "upgrade" } else { "install" }
+    $InstallOk = $ExitCode -in 0, 1641, 3010
+    Write-DeviceLog "choco $InstallAction $Package exit code $ExitCode"
+    Save-LastResult $InstallAction $(if ($InstallOk) { "ok" } else { "failed" }) $(if ($ExitCode -in 1641, 3010) { 0 } else { $ExitCode }) $(if ($InstallOk) { "ok" } else { "failed: exit code $ExitCode" }) ([string](Get-InstalledVersion)) $Version
+}
 if ($ExitCode -notin 0, 1641, 3010) { exit $ExitCode }
 
 # Settings for the update helpers; a new policy starts its own grace period
 try {
-    foreach ($File in "update.ps1", "notify.ps1") {
+    foreach ($File in "update.ps1", "notify.ps1", "probe.ps1") {
         Remove-Item -LiteralPath (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force -ErrorAction Stop
     }
-    Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Package = $Package; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName } | ConvertTo-Json)
-    Remove-Item -Path (Join-Path $AppRoot "state.json") -Force -ErrorAction SilentlyContinue
+    Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Package = $Package; TaskId = $Package; TaskPath = $TaskPath; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName; Schedule = $Sched } | ConvertTo-Json -Depth 4)
+    foreach ($File in "state.json", "retry.json", "restart.json") { Remove-Item -Path (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue }
 }
 catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; exit 1 }
 
+__TASKREG__
+
 Remove-UpdateTasks
 try {
-    $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $UpdateScript = Join-Path $AppRoot "update.ps1"
-    $System = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
-    $UpdateAction = { param($Step) New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$UpdateScript`" -Mode $Step" }
-
-    if ($Mode -in "Startup", "Custom") {
-        # Each device waits a random time, so a whole office behind one IP doesn't hit the Chocolatey rate limit at once
-        $Trigger = New-ScheduledTaskTrigger -AtStartup
-        $Trigger.Delay = "PT{0}M" -f (Get-Random -Minimum __DELAYMIN__ -Maximum (__DELAYMAX__ + 1))
-        $Triggers = @($Trigger)
-        if ($Mode -eq "Startup") {
-            # With Fast Startup, shutting down is no real startup: also once a day at a random time between 10 and 15
-            # o'clock (a missed run follows when the device is on again)
-            $Triggers += New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))
-        }
-        # Custom only checks at startup: the user prompt and the grace period decide when the update is installed
-        $StartupStep = if ($Mode -eq "Custom") { "Check" } else { "Startup" }
-        Register-ScheduledTask -TaskName $TaskNames[0] -TaskPath $TaskPath -Action (& $UpdateAction $StartupStep) -Trigger $Triggers -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-    }
-    if ($Mode -eq "Custom") {
-        # "Update now" from the user prompt: started on demand; signed-in users may run it (not change it)
-        Register-ScheduledTask -TaskName $TaskNames[1] -TaskPath $TaskPath -Action (& $UpdateAction "Now") -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-        $Service = New-Object -ComObject Schedule.Service
-        $Service.Connect()
-        $Service.GetFolder($TaskPath.TrimEnd("\")).GetTask($TaskNames[1]).SetSecurityDescriptor("D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;AU)", 0)
-
-        # Every 4 hours: is there an update, is the grace period over?
-        $Check = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes((Get-Random -Minimum 5 -Maximum 60)) -RepetitionInterval (New-TimeSpan -Hours 4) -RepetitionDuration (New-TimeSpan -Days 3650)
-        Register-ScheduledTask -TaskName $TaskNames[2] -TaskPath $TaskPath -Action (& $UpdateAction "Check") -Trigger $Check -Principal $System -Settings $Settings -Force -ErrorAction Stop | Out-Null
-
-        # The prompt runs in the session of every signed-in user (Users group), at logon and every hour, without a console window
-        $Users = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-        $NotifyScript = Join-Path $AppRoot "notify.ps1"
-        $NotifyAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$NotifyScript`""
-        $NotifyTriggers = @(
-            (New-ScheduledTaskTrigger -AtLogOn),
-            (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650))
-        )
-        $NotifySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $TaskNames[3] -TaskPath $TaskPath -Action $NotifyAction -Trigger $NotifyTriggers -Principal $Users -Settings $NotifySettings -Force -ErrorAction Stop | Out-Null
-    }
+    Register-UpdateTasks
     Write-Output "Update mode $Mode applied for $Package"
+    Write-DeviceLog "update mode $Mode applied"
 }
 catch {
     # Without its tasks the app is not set up: no marker, so detection fails and Intune runs install.ps1 again
     Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
+    Write-DeviceLog "update tasks could not be registered: $($_.Exception.Message)"
+    Save-LastResult "install" "failed" 1 "update tasks could not be registered"
     exit 1
 }
 
@@ -1130,26 +1786,34 @@ exit $ExitCode
 
     $UpdateScript = @'
 # Update helper of one Chocolatey app (scheduled tasks, SYSTEM). Settings come from config.json next to it.
-#   Startup  update to the target version (startup task)
-#   Check    update available? Remember since when; after the grace period install it
-#   Now      install the update at once (started from the user prompt)
-param([ValidateSet("Startup", "Check", "Now")][string]$Mode = "Check")
+#   -Mode Startup  update automatically per schedule (conditions, time window, retries); started by the triggers
+#   -Mode Check    update available? Remember since when; after the grace period install it (Custom mode)
+#   -Mode Now      install the update at once (started from the user prompt)
+#   -Mode Restart  restart the device when an update asked for it (restart setting "outside the time window")
+#   -Trigger       what started the run: Start, Window, Idle, Logon, Interval, Retry or Manual (for the log)
+param(
+    [ValidateSet("Startup", "Check", "Now", "Restart")][string]$Mode = "Check",
+    [ValidateSet("Start", "Window", "Idle", "Logon", "Interval", "Retry", "Manual")][string]$Trigger = "Manual"
+)
 
 $Config = Get-Content -Path (Join-Path $PSScriptRoot "config.json") -Raw | ConvertFrom-Json
 $Package = $Config.Package
+$AppKey = $Package
+$LogId = $Package -replace '[^A-Za-z0-9._-]', '_'
 $StateFile = Join-Path $PSScriptRoot "state.json"
 $LogFile = Join-Path $PSScriptRoot "update.log"
-function Write-Log([string]$Text) { Add-Content -Path $LogFile -Value ("{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f (Get-Date), $Mode, $Text) }
 
 $ChocoRoot = $env:ChocolateyInstall
 if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
 $Choco = Join-Path $ChocoRoot "bin\choco.exe"
-if (-not (Test-Path $Choco)) { Write-Log "choco.exe not found"; exit 1 }
 $SourceArguments = @()
 if ($Config.Source) { $SourceArguments = @("--source", $Config.Source) }
 
 __COMMON__
 __CHOCOCOMMON__
+__UPDATECOMMON__
+
+if (-not (Test-Path $Choco)) { Write-Log "choco.exe not found"; exit 1 }
 
 function Get-TargetVersion {
     # A released version is known; "latest" asks the source for the newest version of this one package
@@ -1158,7 +1822,24 @@ function Get-TargetVersion {
     $Line = & $Choco search $Package --exact --limit-output @SourceArguments 2>$null | Where-Object { $_ -like "$Package|*" } | Select-Object -First 1
     if ($Line) { return ($Line -split "\|")[1] }
 }
-
+function Get-InstalledText { return (Get-InstalledVersion) }
+function Get-PendingUpdate {
+    $Installed = Get-InstalledVersion
+    $Target = Get-TargetVersion
+    # "1.2.0" and "1.2" are the same version; latest: only something newer than the installed one counts
+    $Pending = if (-not $Installed) { [bool]$Target }
+    elseif ($Config.Version) { (Compare-PackageVersion $Target $Installed) -ne 0 }
+    else { $Target -and (Compare-PackageVersion $Target $Installed) -gt 0 }
+    return [pscustomobject]@{ Pending = [bool]$Pending; Installed = $Installed; Target = $Target }
+}
+function Invoke-SourceMaintenance {
+    # Chocolatey itself, at most once a day (no waiting when another installation runs, the next run does it)
+    if (Test-ChocolateyUpdateDue) {
+        if (Enter-DeploymentLock) {
+            try { Write-Log (Update-Chocolatey) } finally { Exit-DeploymentLock }
+        }
+    }
+}
 function Invoke-Upgrade {
     if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return 1618 }
     try {
@@ -1173,49 +1854,8 @@ function Invoke-Upgrade {
     return $Code
 }
 
-# Chocolatey itself, at most once a day (no waiting when another installation runs, the next run does it)
-if (Test-ChocolateyUpdateDue) {
-    if (Enter-DeploymentLock) {
-        try { Write-Log (Update-Chocolatey) } finally { Exit-DeploymentLock }
-    }
-}
-
-switch ($Mode) {
-    "Now" { exit (Invoke-Upgrade) }
-    "Startup" { exit (Invoke-Upgrade) }
-    "Check" {
-        $Installed = Get-InstalledVersion
-        $Target = Get-TargetVersion
-        # "1.2.0" and "1.2" are the same version; latest: only something newer than the installed one counts
-        $Pending = if (-not $Installed) { [bool]$Target }
-        elseif ($Config.Version) { (Compare-PackageVersion $Target $Installed) -ne 0 }
-        else { $Target -and (Compare-PackageVersion $Target $Installed) -gt 0 }
-        if (-not $Pending) {
-            Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
-            exit 0
-        }
-        $State = $null
-        if (Test-Path $StateFile) { try { $State = Get-Content -Path $StateFile -Raw | ConvertFrom-Json } catch { } }
-        if (-not $State -or $State.Target -ne $Target) {
-            $Now = Get-Date
-            $State = [pscustomobject]@{
-                Package     = $Package
-                DisplayName = $Config.DisplayName
-                Installed   = $Installed
-                Target      = $Target
-                FirstSeen   = $Now.ToString("o")
-                Deadline    = $Now.AddHours([int]$Config.GraceHours).ToString("o")
-            }
-            $State | ConvertTo-Json | Set-Content -Path $StateFile -Encoding UTF8
-            Write-Log "update $Installed -> $Target available, installed automatically from $($State.Deadline)"
-        }
-        if ((Get-Date) -ge [datetime]$State.Deadline) {
-            Write-Log "grace period is over"
-            exit (Invoke-Upgrade)
-        }
-        exit 0
-    }
-}
+$RunResult = @(Invoke-UpdateRun)
+exit [int]$RunResult[-1]
 '@
 
     $ChocoCommon = @'
@@ -1282,8 +1922,10 @@ exit 1
     # Values go into single-quoted strings of ASCII files
     $Quote = { param($Text) ([string]$Text -replace '[^\x20-\x7E]', '').Replace("'", "''") }
     $Common = Get-DeviceScriptCommon
-    $InstallScript = $InstallScript.Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
-    $UpdateScript = $UpdateScript.Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
+    $UpdateCommon = Get-DeviceUpdateCommon
+    $InstallScript = $InstallScript.Replace("__TASKREG__", (Get-DeviceTaskRegistration)).Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
+    $UpdateScript = $UpdateScript.Replace("__UPDATECOMMON__", $UpdateCommon).Replace("__COMMON__", $Common).Replace("__CHOCOCOMMON__", $ChocoCommon)
+    $InstallScript = $InstallScript.Replace("__SCHEDULE__", (Get-DeviceScheduleText $Policy.Schedule))
     $InstallScript = $InstallScript.Replace("__PACKAGE__", $ChocoName).Replace("__SOURCE__", (& $Quote $Policy.PackageSource))
     $InstallScript = $InstallScript.Replace("__VERSION__", (& $Quote $Policy.Version)).Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
@@ -1293,6 +1935,7 @@ exit 1
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value $NotifyScript -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "probe.ps1") -Value (Get-ScreenProbeScript) -Encoding ASCII
     $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
     return $DetectionFile
@@ -1338,6 +1981,8 @@ function New-IntuneWin32ChocoApplication {
         [string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)]
         [int]$GraceHours = $script:Settings.GraceHours,
+        # When and under which conditions updates install (hashtable of New-ChocoSchedule values); default = the UpdateSchedule setting
+        $Schedule = (Get-ChocoScheduleDefaults),
         # "latest" = devices follow the newest version; "current" = pin today's version; or an exact version.
         # Empty = the VersionMode setting (Latest or Pinned)
         [string]$Version,
@@ -1403,7 +2048,7 @@ function New-IntuneWin32ChocoApplication {
                     }
                 }
                 $Policy = New-ChocoAppPolicy -Package $Name -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
-                    -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes
+                    -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
 
                 ### Install and Detection Script, package
@@ -1478,7 +2123,15 @@ function Format-ChocoUpdateMode {
     param([Parameter(Mandatory = $true)]$Policy)
     switch ($Policy.UpdateMode) {
         "Off" { "off (released versions are installed by Intune right away)" }
-        "Startup" { "at every startup" }
+        "Startup" {
+            $S = $Policy.Schedule
+            $When = @()
+            if ($S.TriggerStart) { $When += "at startup" }
+            if ($S.TriggerWindow) { $When += "daily $($S.WindowFrom)-$($S.WindowTo)" }
+            if ($S.IdleMinutes -gt 0) { $When += "when idle $($S.IdleMinutes) min" }
+            if ($S.TriggerLogon) { $When += "at sign-in" }
+            "automatic ($($When -join ', '))"
+        }
         "Custom" {
             $Grace = if ($Policy.GraceHours % 24 -eq 0) { "$($Policy.GraceHours / 24) day(s)" } else { "$($Policy.GraceHours) hour(s)" }
             "user prompt, installed after $Grace at the latest"
@@ -1511,7 +2164,9 @@ function Update-IntuneChocoApp {
         # Exact version to release, or "latest" to follow the newest version again
         [string]$Version,
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode,
-        [ValidateRange(1, 2160)][int]$GraceHours
+        [ValidateRange(1, 2160)][int]$GraceHours,
+        # Schedule values to change (hashtable of New-ChocoSchedule values, may be partial); the others stay as they are
+        $Schedule
     )
     Assert-IntuneChocoPrerequisites
     Assert-IntuneChocoConnection
@@ -1537,8 +2192,10 @@ function Update-IntuneChocoApp {
     $DelayMin = if ($null -ne $Current.UpdateDelayMinMinutes) { $Current.UpdateDelayMinMinutes } else { $script:Settings.UpdateDelayMinMinutes }
     $DelayMax = if ($null -ne $Current.UpdateDelayMaxMinutes) { $Current.UpdateDelayMaxMinutes } else { $script:Settings.UpdateDelayMaxMinutes }
 
+    # The schedule stays that of the app (apps from before schedules existed keep the built-in defaults = their old behavior)
+    $NewSchedule = New-ChocoSchedule -Values $Schedule -Base $Current.Schedule
     $Policy = New-ChocoAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
-        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax
+        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax -Schedule $NewSchedule
     Write-Host ("{0}: version {1}, updates {2}" -f $App.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-ChocoUpdateMode $Policy))
 
     Write-Host "Building the package with the new policy"
@@ -1584,7 +2241,8 @@ function Test-IntuneChocoPackage {
         [string]$Version = "",
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)][int]$GraceHours = $script:Settings.GraceHours,
-        [ValidateSet("Chocolatey", "Winget")][string]$Source = "Chocolatey"
+        [ValidateSet("Chocolatey", "Winget")][string]$Source = "Chocolatey",
+        $Schedule = (Get-ChocoScheduleDefaults)
     )
     $IsWinget = $Source -eq "Winget"
     $Studio = Find-SandboxStudio
@@ -1595,7 +2253,7 @@ function Test-IntuneChocoPackage {
     if ($Version -eq "latest") { $Version = "" }
     if ($Version -eq "current") { $Version = $Info.Version }
     $Policy = New-ChocoAppPolicy -Package $Package -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -PackageSource $(if ($IsWinget) { "" } else { $script:Settings.PackageSource }) `
-        -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes
+        -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes -Schedule $Schedule
 
     # The package scripts exactly as deployed
     $SafePackage = $Package -replace '[^A-Za-z0-9._-]', '_'

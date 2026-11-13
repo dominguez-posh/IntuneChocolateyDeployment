@@ -170,7 +170,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
         Test-Smoke 'Scratch has the custom icon' ($scratch.hasIcon -and $scratch.iconValid)
         Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -ne 'Chocolatey' -and $_.assignment -eq 'available' }).Count -eq 2)
-        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByChocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+$') $zip.notes
+        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByChocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$') $zip.notes
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'no errors in the log' (-not ($log -match 'failed')) (($log -split "`n" | Where-Object { $_ -match 'failed' }) -join ' | ')
@@ -363,7 +363,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke "$What scripts share the device lock" ($install -match 'Global.IntuneChocoDeployment"' -and $install -match 'Enter-DeploymentLock' -and $update -match 'Enter-DeploymentLock')
             Test-Smoke "$What helper folder is protected by SID" ($install -match 'Protect-Folder' -and $install -match 'S-1-5-18' -and $install -match 'S-1-5-32-544' -and $install -match 'SetAccessRuleProtection\(\$true')
             Test-Smoke "$What install fails without its tasks" ($install -match 'could not be registered[^\n]*\n[\s\S]{0,200}exit 1' -and $install -notmatch 'Set-Content -Path \(Join-Path \$AppRoot "policy.txt"\)')
-            Test-Smoke "$What startup task checks in Custom mode" ($install -match '\$StartupStep = if \(\$Mode -eq "Custom"\) \{ "Check" \}' -and $install -match '-Daily')
+            Test-Smoke "$What startup task checks in Custom mode" ($install -match '\$Step = if \(\$Mode -eq "Custom"\) \{ "Check" \}' -and $install -match 'New-ScheduledTaskTrigger -Weekly')
             if ($What -eq 'Chocolatey') {
                 Test-Smoke 'Chocolatey uninstall removes dependencies' ($install -match 'uninstall \$Package -y --no-progress --remove-dependencies')
                 Test-Smoke 'Chocolatey check asks for the one package' ($update -match 'search \$Package --exact --limit-output' -and $update -notmatch 'outdated')
@@ -399,7 +399,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'deployment carries the update settings' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                Test-Smoke 'deployment carries the update settings' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
                 Test-Smoke 'install script has the update routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 72')
                 Test-GeneratedScripts (Join-Path $script:WorkRoot "package\$($s.Package)") 'Chocolatey'
@@ -445,7 +445,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             4 {
                 if (-not (Test-Idle 'policy') -or -not (Test-Idle 'tenant')) { return $false }
                 $app = Get-StoreApp 'VideoLAN.VLC'
-                Test-Smoke 'winget app changed in Intune' ($app.notes -match '^PoweredByWinget;package=VideoLAN\.VLC;version=latest;update=Custom;grace=12;source=;delay=\d+-\d+$' -and $app.detection -ne $s.WingetDetection) $app.notes
+                Test-Smoke 'winget app changed in Intune' ($app.notes -match '^PoweredByWinget;package=VideoLAN\.VLC;version=latest;update=Custom;grace=12;source=;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.detection -ne $s.WingetDetection) $app.notes
                 $folder = Join-Path $script:WorkRoot 'package\winget-VideoLAN.VLC'
                 $install = Get-Content (Join-Path $folder 'source\install.ps1') -Raw
                 Test-Smoke 'winget install script has the routine' ($install -match "\`$Mode = 'Custom'" -and $install -match '\$GraceHours = 12' -and $install -match 'Intune-Winget-Updates')

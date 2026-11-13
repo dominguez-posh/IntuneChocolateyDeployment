@@ -155,7 +155,7 @@ startup delay of the app in `source=` and `delay=`, which a later change keeps):
 | Mode | Behaviour on the device |
 |------|-------------------------|
 | **Off** | No automatic updates. The device gets a new version only when you release it in the tool; a settings change alone never upgrades a **latest** app. |
-| **Startup** | The update is installed at the next PC start (after the random delay) and once a day between 10 and 15 o'clock, because with Fast Startup a shutdown is no real start. |
+| **Startup** | Automatic per schedule (see below). Default: at the next PC start (after the random delay) and once a day between 10 and 15 o'clock, because with Fast Startup a shutdown is no real start. |
 | **Custom** | Checked at startup and every 4 hours. When an update is available, signed-in users get a popup and can install it right away or snooze it. After the grace period (hours or days) it is installed automatically, without waiting for a restart. |
 
 The version is either **latest** (the device follows the newest version on the feed) or **pinned** to one version.
@@ -165,6 +165,38 @@ update mode then decides when devices install it.
 Settings changes take effect without redeploying. The detection script compares a fingerprint of the policy with
 `%ProgramData%\IntuneChocoUpdates\<package>\policy.txt`. After a change in Intune, detection fails, Intune runs
 `install.ps1` again, and that applies the new settings.
+
+#### Update schedule (Startup = automatic per schedule)
+Every app also has a schedule: when and under which conditions updates install. It is stored in the app notes as
+`cfg=` (base64url of a versioned compact JSON, after the readable fields; notes stay well below 1000 characters) and
+read by `ConvertFrom-ChocoAppNotes` only. Apps without `cfg=` use the defaults, which equal the earlier behavior.
+Defaults for new apps: the `UpdateSchedule` setting (JSON of the values below), otherwise the built-in defaults.
+Change one app: `Update-IntuneChocoApp -AppId <id> -Schedule @{ OnlyOnMains = $true; WindowFrom = "12:00" }`.
+
+| Value | Meaning (default) |
+|-------|-------------------|
+| `TriggerStart`, update delay min/max | At PC start, after a random wait (on, 5 to 60 min) |
+| `TriggerWindow`, `WindowFrom`, `WindowTo`, `WindowDays` | Daily at a random time inside the window, on the weekdays 1 (Monday) to 7 (on, 10:00 to 15:00, all days). The window may cross midnight. |
+| `IdleMinutes` | When the PC was idle for 1, 5, 10, 15, 30 or 60 minutes (0 = off) |
+| `TriggerLogon` | At user sign-in (off) |
+| `OnlyOnMains`, `NoPresentation`, `NoMetered`, `AppNotRunning` | Conditions (all off): not on battery, no presentation or full-screen app, no metered network, the app is not running |
+| `CheckIntervalHours` | Custom mode: look for new versions every 1, 4 or 24 hours (4) |
+| `DeadlineAppMode`, `CloseAfterMinutes` | Custom mode, app open at the deadline: `Install` (installer decides), `AskClose` (warn, close after N minutes), `Close`, `Wait` (until closed) (Install, 15) |
+| `RestartMode` | If the installer needs a restart: `Never`, `Ask` (prompt in the user session), `OutsideWindow` (announced 10 minutes ahead, only outside the time window) (Never) |
+| `RetryMode`, `RetryCount`, `RetryHours` | After a failure: `Next` chance (next trigger), `None` (not for the same version for 7 days), `Every` N times every X hours (Next, 3, 4) |
+| `ProcessNames` | Process names for "app is running", comma separated; empty = found from the install folder (best effort) |
+
+Task Scheduler does what it can express (start, weekly trigger with random delay, idle trigger, battery and network
+settings); `update.ps1` checks the rest. In Custom mode the grace period decides: the deadline waives power, network and
+app-open conditions (the app is handled by `DeadlineAppMode`); a presentation still delays it by up to 4 hours.
+Presentation detection: `SHQueryUserNotificationState` only answers for the caller's own session, so `update.ps1`
+(SYSTEM) starts the on-demand task `Probe <package> screen state` (Users group) in every signed-in session
+(`RunEx` with the session id); `probe.ps1` writes the state into the user's profile where `update.ps1` reads it.
+Not verified on a real device yet.
+
+Every script also logs to `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\IntuneChocoDeployment-<package>.log`
+(1 MB, one rollover to `...-<package>.1.log`), which Intune's "Collect diagnostics" includes. Each app folder holds
+`last-result.json` (format in the comment block of `Save-LastResult` in `Get-DeviceScriptCommon`).
 
 Apps created by older versions keep working. They count as **latest / Startup** until you change their settings.
 
