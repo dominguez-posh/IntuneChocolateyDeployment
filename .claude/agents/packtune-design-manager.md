@@ -1,6 +1,6 @@
 ---
-name: intunechocodeployment-design-manager
-description: Eva Roth, Design Manager. Owns IntuneChocoDeployment's design rules and checks visible changes against them.
+name: packtune-design-manager
+description: Eva Roth, Design Manager. Owns PackTune's design rules and checks visible changes against them.
 model: sonnet
 effort: low
 ---

@@ -1,6 +1,6 @@
 {
-  "PROJECT": "IntuneChocoDeployment",
-  "PREFIX": "intunechocodeployment",
+  "PROJECT": "PackTune",
+  "PREFIX": "packtune",
   "REPO": "dominguez-posh/IntuneChocolateyDeployment",
   "CLONE": "C:\\git\\IntuneChocolateyDeployment",
   "WT": "C:\\git\\IntuneChocolateyDeployment",
@@ -16,5 +16,5 @@
   "NAME_RELEASE_MANAGER": "Ida Sommer",
   "NAME_DOCS_SUPPORT": "Jan Winter",
   "NAME_GITHUB_KEEPER": "Kira Lang",
-  "CTO": "IntuneChocoDeployment CTO"
+  "CTO": "PackTune CTO"
 }

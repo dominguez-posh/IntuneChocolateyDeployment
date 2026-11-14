@@ -1,6 +1,6 @@
 # PackTune
 
-Team: read `.claude/team/README.md` and `.claude/team/RULES.md`. The lead is the session "IntuneChocoDeployment CTO".
+Team: read `.claude/team/README.md` and `.claude/team/RULES.md`. The lead is the session "PackTune CTO".
 
 - PowerShell 5.1 tool (WPF GUI `Start-PackTune.ps1`, `UI/*.xaml`) that publishes Chocolatey and winget packages as Intune Win32 apps. Core: `PackTune-Main.ps1` (Chocolatey, device scripts, Intune calls), `PackTune-Winget.ps1`, `Modules/Keevault.psm1` (sign-in), `catalog.json`.
 - State lives in Intune only (app notes carry package and update policy); no local database. Settings in `%LOCALAPPDATA%\PackTune` (copied from `%LOCALAPPDATA%\IntuneChocoDeployment` on the first start).
