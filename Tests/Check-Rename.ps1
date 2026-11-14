@@ -101,7 +101,13 @@ foreach ($case in @(@('Chocolatey', $chocoInstall, '\PackTune\Chocolatey\', '\In
     Test-Check "$label install.ps1: nothing of the old name is written" ($text -notmatch 'Join-Path \$ToolRoot[^\r\n]*IntuneChoco' -and $text -notmatch 'Software\\IntuneChocoDeployment')
 }
 Test-Check 'detection reads the new folder' ((Get-Content $chocoDetect -Raw) -match '"PackTune\\Chocolatey\\\$Package\\policy\.txt"' -and (Get-Content $wingetDetect -Raw) -match '"PackTune\\Winget\\\$SafeId\\policy\.txt"')
-Test-Check 'the fingerprint changed with the device script revision' ($script:DeviceScriptRevision -ge 6 -and $policyV.Fingerprint -ne 'x')
+Test-Check 'the fingerprint changed with the device script revision' ($script:DeviceScriptRevision -ge 7 -and $policyV.Fingerprint -ne 'x')
+# Old folders only when admin-only up to %ProgramFiles%, old task folders only when empty
+$removeOld = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Remove-OldToolFolder' }, $true).Extent.Text
+$removeTaskFolder = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Remove-OldTaskFolder' }, $true)
+Test-Check 'old folder: every removal is guarded by the admin-only chain check' (([regex]::Matches($removeOld, 'Remove-ItemSafely')).Count -eq 3 -and ([regex]::Matches($removeOld, 'Test-AdminOnlyChain')).Count -eq 3 -and $removeOld.IndexOf('Test-AdminOnlyChain $Path') -lt $removeOld.IndexOf('Remove-ItemSafely $Path'))
+Test-Check 'old task folder: deleted only when it has no tasks (hidden too) and no subfolders' ($removeTaskFolder -and $removeTaskFolder.Extent.Text -match 'GetTasks\(1\)\.Count -eq 0 -and \$Folder\.GetFolders\(0\)\.Count -eq 0' -and $removeTaskFolder.Extent.Text -match 'DeleteFolder')
+Test-Check 'old task folder: removed after the old tasks (Chocolatey, winget, runtime)' (@($chocoInstall, $wingetInstall | Where-Object { $_.IndexOf('Remove-OldTaskFolder $OldTaskPath') -gt $_.IndexOf('-TaskPath $OldTaskPath -Confirm') -and $_.IndexOf('-TaskPath $OldTaskPath -Confirm') -gt 0 }).Count -eq 2 -and ([regex]::Matches((Get-PackTuneRuntimeScripts).Install, 'Remove-OldTaskFolder \$OldTaskPath')).Count -eq 2 -and [int]$script:RuntimeRevision -ge 3)
 $notify = Get-Content (Join-Path $chocoDir 'source\notify.ps1') -Raw
 Test-Check 'notify.ps1 starts tasks in the new folder' ($notify.Contains('\PackTune\Chocolatey\') -and -not $notify.Contains('Intune-Choco-Updates'))
 $runtime = Get-PackTuneRuntimeScripts
@@ -113,16 +119,32 @@ $OldToolRoot = Join-Path $work 'pf\IntuneChocoDeployment'
 $script:AdminSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 function Write-DeviceLog([string]$Text) { $script:DeviceLogText += "$Text`n" }
 $script:DeviceLogText = ''
-foreach ($name in 'Assert-ToolPath', 'Remove-ItemSafely', 'Remove-OldToolFolder') {
+foreach ($name in 'Assert-ToolPath', 'Remove-ItemSafely', 'Remove-OldToolFolder', 'Test-AdminOnlyFolder', 'Test-AdminOnlyChain') {
     $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
 }
+# The admin-only chain check with the real %ProgramFiles% (read-only): a system folder passes, the temp tree does not
+$ProgramFilesRoot = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+Test-Check 'admin-only chain: a folder under %ProgramFiles% that only admins can change passes' (Test-AdminOnlyChain (Join-Path $ProgramFilesRoot 'WindowsPowerShell'))
+Test-Check 'admin-only chain: a path outside %ProgramFiles% fails' (-not (Test-AdminOnlyChain $work))
 $decoy = Join-Path $work 'decoy'
 New-Item -ItemType Directory -Path $decoy, (Join-Path $OldToolRoot 'Chocolatey\vlc\sub'), (Join-Path $OldToolRoot 'Chocolatey\git'), (Join-Path $OldToolRoot 'Winget\Logs'), (Join-Path $OldToolRoot 'Winget\Contoso.App'), (Join-Path $OldToolRoot 'Runtime') -Force | Out-Null
 'keep me' | Set-Content (Join-Path $decoy 'precious.txt')
 'x' | Set-Content (Join-Path $OldToolRoot 'Chocolatey\vlc\update.ps1'), (Join-Path $OldToolRoot 'Chocolatey\chocolatey-update.txt'), (Join-Path $OldToolRoot 'Winget\Logs\a.log')
 & cmd.exe /c mklink /J (Join-Path $OldToolRoot 'Chocolatey\vlc\sub\link') $decoy | Out-Null
 $linkMade = Test-Path -LiteralPath (Join-Path $OldToolRoot 'Chocolatey\vlc\sub\link')
+# Fail closed: the temporary tree belongs to this user (a user could change it), so nothing is removed, only logged
+$ProgramFilesRoot = Join-Path $work 'pf'
+Remove-OldToolFolder 'Chocolatey\vlc'
+Test-Check 'old folder that is not admin-only is left alone and logged' ((Test-Path (Join-Path $OldToolRoot 'Chocolatey\vlc\update.ps1')) -and $script:DeviceLogText -match 'left alone, it is not admin-only') $script:DeviceLogText
+# A junction in the chain is refused by the same check
+$junctionRoot = Join-Path $work 'pf-link'
+& cmd.exe /c mklink /J $junctionRoot (Join-Path $work 'pf') | Out-Null
+Test-Check 'admin-only chain: a junction on the way fails' (-not (Test-AdminOnlyChain (Join-Path $junctionRoot 'IntuneChocoDeployment\Chocolatey')))
+[IO.Directory]::Delete($junctionRoot, $false)
+# From here the chain counts as admin-only (stand-in), to check what is removed and what is not
+function Test-AdminOnlyChain([string]$Path) { $true }
+$script:DeviceLogText = ''
 Remove-OldToolFolder 'Chocolatey\vlc'
 Test-Check 'old folder of one app is removed, a link inside is removed and never followed' ($linkMade -and -not (Test-Path (Join-Path $OldToolRoot 'Chocolatey\vlc')) -and (Test-Path (Join-Path $decoy 'precious.txt')))
 Test-Check 'other apps of the old tree stay until their own install' ((Test-Path (Join-Path $OldToolRoot 'Chocolatey\git')) -and (Test-Path (Join-Path $OldToolRoot 'Winget\Contoso.App')))

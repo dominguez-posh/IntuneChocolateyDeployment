@@ -18,7 +18,7 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 2
+$script:RuntimeRevision = 3
 
 #region scripts
 
@@ -82,6 +82,7 @@ if ($Uninstall) {
     # Chocolatey and App Installer belong to the device: only the task and the marker of this tool go (detection fails again)
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-OldTaskFolder $OldTaskPath
     Remove-OldToolFolder "Runtime"
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "ready.txt") -Force -ErrorAction SilentlyContinue
     Write-DeviceLog "uninstalled: task and marker removed, Chocolatey and App Installer stay"
@@ -185,6 +186,7 @@ try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
     foreach ($Name in $OldTaskName, $TaskName) { Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+    Remove-OldTaskFolder $OldTaskPath
     $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'update.ps1')`""
     $Triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours(10).AddMinutes((Get-Random -Maximum 300)))))
