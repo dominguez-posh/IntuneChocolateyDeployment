@@ -1,7 +1,7 @@
 {
   "PROJECT": "PackTune",
   "PREFIX": "packtune",
-  "REPO": "dominguez-posh/IntuneChocolateyDeployment",
+  "REPO": "dominguez-posh/PackTune",
   "CLONE": "C:\\git\\IntuneChocolateyDeployment",
   "WT": "C:\\git\\IntuneChocolateyDeployment",
   "REPORT_LANGUAGE": "German",

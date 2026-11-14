@@ -1,6 +1,6 @@
 # PackTune team
 
-A software team for PackTune (dominguez-posh/IntuneChocolateyDeployment): the lead session "PackTune CTO" and 11 subagents in `.claude/agents/`. Rules: `RULES.md`. Lead brief: `CTO.md`. Values used for the templates: `vars.json`. Updates come from the dev-team-framework repo (`node setup.mjs <project>`, it never overwrites without `--overwrite`).
+A software team for PackTune (dominguez-posh/PackTune): the lead session "PackTune CTO" and 11 subagents in `.claude/agents/`. Rules: `RULES.md`. Lead brief: `CTO.md`. Values used for the templates: `vars.json`. Updates come from the dev-team-framework repo (`node setup.mjs <project>`, it never overwrites without `--overwrite`).
 
 ## Start
 1. Open a terminal in C:\git\IntuneChocolateyDeployment.
